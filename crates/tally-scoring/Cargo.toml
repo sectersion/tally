@@ -1,0 +1,10 @@
+[package]
+name = "tally-scoring"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# Do NOT enable serde_json's `preserve_order`: later code relies on sorted maps.
+serde_json = "1"
