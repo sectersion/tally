@@ -51,14 +51,26 @@ pub fn cap_ms(action: &Event, ctx: &CapContext) -> i64 {
     }
 }
 
-/// `events` must be sorted by ts.
+/// `events` must be sorted by ts. Scans back for a failing run of the same command with a human
+/// action strictly between; an earlier pass of that command ends the scan (it already closed the loop).
 pub fn completes_fail_pass_loop(events: &[Event], idx: usize) -> bool {
     let Some(e) = events.get(idx) else { return false };
     let Kind::TestRun { cmd_hash, exit_code: 0, .. } = &e.kind else { return false };
-    (0..idx).rev().take_while(|&j| e.ts - events[j].ts <= LOOP_WINDOW_MS).any(|j| {
-        matches!(&events[j].kind, Kind::TestRun { cmd_hash: h, exit_code, .. } if h == cmd_hash && *exit_code != 0)
-            && events[j + 1..idx].iter().any(Event::is_human_action)
-    })
+    let mut human_between = false;
+    for f in events[..idx].iter().rev().take_while(|f| e.ts - f.ts <= LOOP_WINDOW_MS) {
+        if let Kind::TestRun { cmd_hash: h, exit_code, .. } = &f.kind {
+            if h == cmd_hash {
+                if *exit_code == 0 {
+                    return false;
+                }
+                if human_between {
+                    return true;
+                }
+            }
+        }
+        human_between |= f.is_human_action();
+    }
+    false
 }
 
 #[cfg(test)]
@@ -124,5 +136,14 @@ mod tests {
         assert!(completes_fail_pass_loop(&v, 2));
         assert!(!completes_fail_pass_loop(&v, 9));
         assert!(!completes_fail_pass_loop(&v, 0));
+    }
+    #[test]
+    fn fail_pass_loop_completes_once() {
+        let v = [test_run_at(0, "x", 1), prompt_at(300_000, 200, 600), test_run_at(900_000, "x", 0), test_run_at(1_800_000, "x", 0)];
+        assert!(completes_fail_pass_loop(&v, 2));
+        assert!(!completes_fail_pass_loop(&v, 3));
+        // A pass of a different command does not close this one's loop.
+        let v = [test_run_at(0, "x", 1), prompt_at(300_000, 200, 600), test_run_at(900_000, "y", 0), test_run_at(1_800_000, "x", 0)];
+        assert!(completes_fail_pass_loop(&v, 3));
     }
 }

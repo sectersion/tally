@@ -30,11 +30,38 @@ pub struct ChainError {
     pub reason: &'static str,
 }
 
-/// The entry without `hash`, keys sorted, no whitespace. Relies on serde_json's sorted maps.
+/// `LedgerEntry` minus `hash`. Fields MUST stay in alphabetical order: that order is the canonical key order.
+#[derive(Serialize)]
+struct Canonical<'a> {
+    action_id: &'a str,
+    features: &'a BTreeMap<String, i64>,
+    kind: &'a str,
+    prev_hash: &'a str,
+    project: &'a Option<String>,
+    reasons: &'a [String],
+    ruleset: &'a str,
+    ts: i64,
+    unverified_s: u32,
+    v: u32,
+    verified_s: u32,
+}
+
+/// The entry without `hash`, keys sorted, no whitespace. Independent of serde_json's map ordering.
 pub fn canonical_json(e: &LedgerEntry) -> String {
-    let mut v = serde_json::to_value(e).expect("entry serializes");
-    v.as_object_mut().expect("entry is an object").remove("hash");
-    v.to_string()
+    serde_json::to_string(&Canonical {
+        action_id: &e.action_id,
+        features: &e.features,
+        kind: &e.kind,
+        prev_hash: &e.prev_hash,
+        project: &e.project,
+        reasons: &e.reasons,
+        ruleset: &e.ruleset,
+        ts: e.ts,
+        unverified_s: e.unverified_s,
+        v: e.v,
+        verified_s: e.verified_s,
+    })
+    .expect("entry serializes")
 }
 
 pub fn entry_hash(e: &LedgerEntry) -> String {
@@ -119,6 +146,19 @@ mod tests {
         c.project = None;
         let e = chain(&[c], GENESIS_HASH).remove(0);
         assert!(canonical_json(&e).contains(r#""project":null"#));
+    }
+
+    /// Exact bytes for both project variants; catches field-order drift and any map-order dependency.
+    #[test]
+    fn canonical_json_exact_with_some_and_none_project() {
+        let mut c = claim("a1");
+        c.features.insert("chars".into(), 200);
+        let mut e = chain(&[c.clone()], GENESIS_HASH).remove(0);
+        let tail = format!(r#""prev_hash":"{GENESIS_HASH}","project":"p","reasons":["capped"],"ruleset":"2026.11-0","ts":1000,"unverified_s":0,"v":1,"verified_s":60}}"#);
+        let head = r#"{"action_id":"a1","features":{"chars":200,"relevance_pm":600},"kind":"prompt","#;
+        assert_eq!(canonical_json(&e), format!("{head}{tail}"));
+        e.project = None;
+        assert_eq!(canonical_json(&e), format!("{head}{}", tail.replace(r#""p""#, "null")));
     }
 
     #[test]

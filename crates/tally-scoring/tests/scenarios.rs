@@ -102,3 +102,23 @@ fn null_project_is_kept_unattributed() {
     let c = score(&[prompt_no_project_at(0, 600)]);
     assert_eq!((c[0].project.clone(), c[0].verified_s), (None, 120));
 }
+#[test]
+fn long_gap_starts_a_new_run() {
+    let c = score(&[prompt_at(0, 600), prompt_at(36_000, 600)]);
+    assert_eq!((c[1].verified_s, c[1].unverified_s), (120, 0));
+    assert!(c[1].reasons.contains(&"first_action".into()));
+}
+#[test]
+fn gap_of_exactly_max_interval_is_same_run() {
+    let c = score(&[prompt_at(0, 600), prompt_at(3600, 600)]);
+    assert_eq!((c[1].verified_s, c[1].unverified_s), (768, 2832));
+    assert!(!c[1].reasons.contains(&"first_action".into()));
+}
+#[test]
+fn fail_pass_loop_completes_once() {
+    let c = score(&[test_at(0, "x", 1), prompt_at(300, 600), test_at(900, "x", 0), test_at(1800, "x", 0)]);
+    assert_eq!(c[2].verified_s, 600);
+    assert!(c[2].reasons.contains(&"fail_pass_loop".into()));
+    assert_eq!((c[3].verified_s, c[3].unverified_s), (120, 780));
+    assert!(!c[3].reasons.contains(&"fail_pass_loop".into()));
+}

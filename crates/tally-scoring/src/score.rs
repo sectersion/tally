@@ -23,42 +23,91 @@ pub struct Claim {
 
 /// Claims for every human action, in `(ts, id)` order. Input order and duplicate ids do not matter.
 pub fn score(events: &[Event]) -> Vec<Claim> {
-    let mut sorted = events.to_vec();
-    sorted.sort_by(|a, b| (a.ts, &a.id).cmp(&(b.ts, &b.id)));
-    let mut seen = BTreeSet::new();
-    sorted.retain(|e| seen.insert(e.id.clone()));
-
+    let sorted = sort_dedup(events);
     let mut prev = None;
     let mut out = Vec::new();
+    // Idle/busy events that may still overlap a later interval, and the next event not yet looked at.
+    let (mut open, mut next) = (Vec::new(), 0);
+    // ponytail: `open` holds every idle/busy span still running at iv.start, so many long overlapping
+    // spans degrade to O(n * open); fine for real sessions, an interval tree if that ever shows up.
     for (i, a) in sorted.iter().enumerate() {
-        if a.is_human_action() {
-            out.push(claim(&sorted, i, prev));
-            prev = Some(a.ts);
+        if !a.is_human_action() {
+            continue;
         }
+        let (iv, new_run) = interval(a.ts, prev);
+        // Spans start at their ts, so one with ts >= t cannot overlap [iv.start, t).
+        while next < sorted.len() && sorted[next].ts < a.ts {
+            if span_end(&sorted[next]).is_some() {
+                open.push(&sorted[next]);
+            }
+            next += 1;
+        }
+        // iv.start never decreases, so a span ending at or before it can never overlap again.
+        open.retain(|e| span_end(e).is_some_and(|end| end > iv.start));
+        let lo = sorted.partition_point(|e| e.ts < iv.start);
+        let hi = sorted.partition_point(|e| e.ts <= a.ts);
+        out.push(claim(&sorted, i, iv, new_run, open.iter().copied(), &sorted[lo..hi]));
+        prev = Some(a.ts);
     }
     out
 }
 
-/// `ev` sorted by `(ts, id)`; `t_prev` is the previous human action's ts, if any.
-fn claim(ev: &[Event], i: usize, t_prev: Option<i64>) -> Claim {
+/// Sorted by `(ts, id)`, first occurrence of each id kept.
+fn sort_dedup(events: &[Event]) -> Vec<Event> {
+    let mut sorted = events.to_vec();
+    sorted.sort_by(|a, b| (a.ts, &a.id).cmp(&(b.ts, &b.id)));
+    let mut seen = BTreeSet::new();
+    sorted.retain(|e| seen.insert(e.id.clone()));
+    sorted
+}
+
+/// The action's interval, and whether it starts a new run (no previous action, or a gap over MAX_INTERVAL).
+fn interval(t: i64, t_prev: Option<i64>) -> (Span, bool) {
+    match t_prev {
+        Some(p) if t - p <= MAX_INTERVAL_MS => (Span { start: p, end: t }, false),
+        _ => (Span { start: t - FIRST_ACTION_MS, end: t }, true),
+    }
+}
+
+fn span_end(e: &Event) -> Option<i64> {
+    match e.kind {
+        Kind::Idle { end_ts } | Kind::AgentBusy { end_ts } => Some(end_ts),
+        _ => None,
+    }
+}
+
+/// `ev` sorted by `(ts, id)`. `spans` must include every idle/busy event overlapping `iv` and
+/// `outputs` every event with ts in `[iv.start, t]`; extra events are filtered out here.
+fn claim<'a>(
+    ev: &[Event],
+    i: usize,
+    iv: Span,
+    new_run: bool,
+    spans: impl Iterator<Item = &'a Event>,
+    outputs: &[Event],
+) -> Claim {
     let a = &ev[i];
     let t = a.ts;
-    let iv = Span { start: t_prev.unwrap_or(t - FIRST_ACTION_MS).max(t - MAX_INTERVAL_MS), end: t };
+    let overlaps = |s: &Span| s.end > iv.start && s.start < iv.end;
 
     let (mut reading, mut idle_part, mut agent_idle, mut busy) = (vec![], vec![], vec![], vec![]);
-    // ponytail: scans every event per action, O(n^2); index spans by ts if runs get long.
-    for e in ev {
-        match e.kind {
-            Kind::AgentOutput { chars } if iv.start <= e.ts && e.ts <= t => {
+    for e in outputs {
+        if let Kind::AgentOutput { chars } = e.kind {
+            if iv.start <= e.ts && e.ts <= t {
                 let len = (chars as i64 * 1000 / READ_CPS).min(MAX_READ_MS);
                 reading.push(Span { start: e.ts, end: e.ts + len });
             }
+        }
+    }
+    // Spans not overlapping iv cannot change anything below: every result is clipped to iv.
+    for e in spans {
+        match e.kind {
             // Grace is measured from the idle span's real start, before clipping to the interval.
             Kind::Idle { end_ts } => {
-                idle_part.push(Span { start: e.ts + IDLE_GRACE_MS, end: end_ts });
-                agent_idle.push(Span { start: e.ts + AGENT_IDLE_MS, end: end_ts });
+                idle_part.extend(Some(Span { start: e.ts + IDLE_GRACE_MS, end: end_ts }).filter(overlaps));
+                agent_idle.extend(Some(Span { start: e.ts + AGENT_IDLE_MS, end: end_ts }).filter(overlaps));
             }
-            Kind::AgentBusy { end_ts } => busy.push(Span { start: e.ts, end: end_ts }),
+            Kind::AgentBusy { end_ts } => busy.extend(Some(Span { start: e.ts, end: end_ts }).filter(overlaps)),
             _ => {}
         }
     }
@@ -88,7 +137,7 @@ fn claim(ev: &[Event], i: usize, t_prev: Option<i64>) -> Claim {
     let verified_ms = raw_ms.min(cap);
 
     let reasons = [
-        ("first_action", t_prev.is_none()),
+        ("first_action", new_run),
         ("read_protected", removed(&all, &think) != removed_ms),
         ("think_protected", removed(&all, &reading) != removed_ms),
         ("idle_subtracted", removed(&idle_part, &prot) > 0),
@@ -135,6 +184,76 @@ mod tests {
 
     fn at(id: &str, s: i64, kind: Kind) -> Event {
         Event { id: id.into(), ts: s * 1000, ..ev(kind) }
+    }
+
+    /// Reference: every event is a span/output candidate for every action (the old O(n^2) scan).
+    fn score_reference(events: &[Event]) -> Vec<Claim> {
+        let sorted = sort_dedup(events);
+        let mut prev = None;
+        let mut out = Vec::new();
+        for (i, a) in sorted.iter().enumerate() {
+            if a.is_human_action() {
+                let (iv, new_run) = interval(a.ts, prev);
+                out.push(claim(&sorted, i, iv, new_run, sorted.iter(), &sorted));
+                prev = Some(a.ts);
+            }
+        }
+        out
+    }
+
+    /// Deterministic synthetic history: prompts, edits, tests, interrupts, idle/busy spans (some
+    /// hours long, overlapping), outputs, same-ts ties and multi-hour gaps.
+    fn synthetic(n: usize) -> Vec<Event> {
+        use crate::event::Actor;
+        let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut r = move |m: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % m) as i64
+        };
+        let mut ts = 0;
+        (0..n)
+            .map(|k| {
+                ts += match r(20) {
+                    0 => 0,
+                    1 => 3_600_000 + r(4) * 3_000_000,
+                    _ => r(600_000),
+                };
+                let kind = match r(9) {
+                    0 | 1 => Kind::Prompt { chars: r(400) as u32, relevance_pm: r(1000) as u16, novelty_bytes: 50 },
+                    2 => Kind::Idle { end_ts: ts + if r(5) == 0 { r(10_800_000) } else { r(900_000) } },
+                    3 => Kind::AgentBusy { end_ts: ts + if r(5) == 0 { r(7_200_000) } else { r(600_000) } },
+                    4 | 5 => Kind::AgentOutput { chars: r(20_000) as u32 },
+                    6 => Kind::TestRun { cmd_hash: ["a", "b"][r(2) as usize].into(), exit_code: r(2) as i32, initiator: [Actor::User, Actor::Agent][r(2) as usize] },
+                    7 => Kind::UserEdit { file_hash: "h".into(), lines_changed: 3 },
+                    _ => Kind::Interrupt,
+                };
+                Event { id: format!("{k:06}"), ts, ..ev(kind) }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn optimized_matches_reference() {
+        let events = synthetic(4000);
+        let got = score(&events);
+        assert_eq!(got, score_reference(&events));
+        for r in ["first_action", "idle_subtracted", "agent_busy_subtracted", "read_protected", "think_protected", "fail_pass_loop", "capped"] {
+            assert!(got.iter().any(|c| c.reasons.iter().any(|x| x == r)), "generator never hits {r}");
+        }
+    }
+
+    /// `cargo test -p tally-scoring --release -- --ignored score_20k`
+    #[test]
+    #[ignore]
+    fn score_20k_events_is_fast() {
+        let events = synthetic(20_000);
+        let start = std::time::Instant::now();
+        let n = score(&events).len();
+        let took = start.elapsed();
+        println!("{n} claims in {took:?}");
+        assert!(took < std::time::Duration::from_secs(1));
     }
 
     #[test]
