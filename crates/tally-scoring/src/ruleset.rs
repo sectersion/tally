@@ -14,6 +14,7 @@ pub const MAX_READ_MS: i64 = 600_000;
 pub const LOOP_WINDOW_MS: i64 = 3_600_000;
 pub const NOVELTY_MIN: u32 = 24;
 pub const VOCAB_MAX: usize = 50_000;
+pub const CONTEXT_TAIL_BYTES: usize = 8192;
 pub const COMMIT_INTERVAL_MS: i64 = 300_000;
 
 pub const TRIVIAL_CHARS: u32 = 20;

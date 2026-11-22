@@ -4,5 +4,7 @@ pub mod ledger;
 pub mod ruleset;
 pub mod score;
 pub mod spans;
+#[cfg(feature = "text")]
+pub mod text;
 
 pub use score::{score, Claim};
