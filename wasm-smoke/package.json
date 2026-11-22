@@ -1,0 +1,5 @@
+{
+  "name": "tally-scoring-wasm-smoke",
+  "private": true,
+  "scripts": { "test": "bun test" }
+}

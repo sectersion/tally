@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/tally-scoring"]
+resolver = "2"
