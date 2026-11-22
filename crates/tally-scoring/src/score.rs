@@ -64,8 +64,8 @@ fn sort_dedup(events: &[Event]) -> Vec<Event> {
 /// The action's interval, and whether it starts a new run (no previous action, or a gap over MAX_INTERVAL).
 fn interval(t: i64, t_prev: Option<i64>) -> (Span, bool) {
     match t_prev {
-        Some(p) if t - p <= MAX_INTERVAL_MS => (Span { start: p, end: t }, false),
-        _ => (Span { start: t - FIRST_ACTION_MS, end: t }, true),
+        Some(p) if t.saturating_sub(p) <= MAX_INTERVAL_MS => (Span { start: p, end: t }, false),
+        _ => (Span { start: t.saturating_sub(FIRST_ACTION_MS), end: t }, true),
     }
 }
 
@@ -95,7 +95,7 @@ fn claim<'a>(
         if let Kind::AgentOutput { chars } = e.kind {
             if iv.start <= e.ts && e.ts <= t {
                 let len = (chars as i64 * 1000 / READ_CPS).min(MAX_READ_MS);
-                reading.push(Span { start: e.ts, end: e.ts + len });
+                reading.push(Span { start: e.ts, end: e.ts.saturating_add(len) });
             }
         }
     }
@@ -104,8 +104,8 @@ fn claim<'a>(
         match e.kind {
             // Grace is measured from the idle span's real start, before clipping to the interval.
             Kind::Idle { end_ts } => {
-                idle_part.extend(Some(Span { start: e.ts + IDLE_GRACE_MS, end: end_ts }).filter(overlaps));
-                agent_idle.extend(Some(Span { start: e.ts + AGENT_IDLE_MS, end: end_ts }).filter(overlaps));
+                idle_part.extend(Some(Span { start: e.ts.saturating_add(IDLE_GRACE_MS), end: end_ts }).filter(overlaps));
+                agent_idle.extend(Some(Span { start: e.ts.saturating_add(AGENT_IDLE_MS), end: end_ts }).filter(overlaps));
             }
             Kind::AgentBusy { end_ts } => busy.extend(Some(Span { start: e.ts, end: end_ts }).filter(overlaps)),
             _ => {}
@@ -114,7 +114,7 @@ fn claim<'a>(
     let busy_part = subtract(&busy, &subtract(&busy, &agent_idle)); // busy ∩ agent_idle
     let think = match a.kind {
         Kind::Prompt { relevance_pm, .. } if relevance_pm >= THINK_RELEVANCE_PM => {
-            vec![Span { start: t - THINK_MAX_MS, end: t }]
+            vec![Span { start: t.saturating_sub(THINK_MAX_MS), end: t }]
         }
         _ => vec![],
     };
@@ -128,11 +128,11 @@ fn claim<'a>(
         interrupt_followed_by_prompt: matches!(a.kind, Kind::Interrupt)
             && ev[i + 1..]
                 .iter()
-                .take_while(|e| e.ts - t <= INTERRUPT_FOLLOW_MS)
+                .take_while(|e| e.ts.saturating_sub(t) <= INTERRUPT_FOLLOW_MS)
                 .any(|e| matches!(e.kind, Kind::Prompt { .. })),
         completes_fail_pass_loop: completes_fail_pass_loop(ev, i),
     };
-    let raw_ms = iv.end - iv.start - removed_ms;
+    let raw_ms = iv.end.saturating_sub(iv.start).saturating_sub(removed_ms);
     let cap = cap_ms(a, &ctx);
     let verified_ms = raw_ms.min(cap);
 
@@ -153,7 +153,7 @@ fn claim<'a>(
         project: a.project.clone(),
         kind: kind.into(),
         verified_s: (verified_ms / 1000) as u32,
-        unverified_s: ((raw_ms - verified_ms) / 1000) as u32,
+        unverified_s: ((raw_ms - verified_ms) / 1000).min(u32::MAX as i64) as u32,
         reasons: reasons.iter().filter(|r| r.1).map(|r| r.0.to_string()).collect(),
         features: features.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
     }

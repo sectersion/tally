@@ -50,7 +50,7 @@ Input: all events for one user, sorted by `ts`, across all projects.
 
 For each human action `a` at time `t`, with the previous human action (any project) at `t_prev`:
 
-1. **Interval.** `I = [max(t_prev, t − MAX_INTERVAL), t]`. For the first action of a run, `t_prev = t − FIRST_ACTION_S`.
+1. **Interval.** `I = [max(t_prev, t − MAX_INTERVAL), t]`. A run starts at the first action ever and at any action more than `MAX_INTERVAL` after the previous human action; for the first action of a run, `I = [t − FIRST_ACTION_S, t]`. Time away longer than `MAX_INTERVAL` is never credited, even when the machine produced no idle samples (asleep, daemon off).
 2. **Reading allowance.** For each `agent_output` inside `I`, the window `[output_ts, output_ts + min(chars / READ_CPS, MAX_READ_S)]` is protected from idle subtraction.
 3. **Thinking allowance.** If `a` is a substantive prompt (`relevance_pm ≥ THINK_RELEVANCE_PM`), the last `THINK_MAX_S` seconds before `t` are also protected. Deep thinking counts only when it ends in a substantive decision.
 4. **Idle subtraction.** For each `idle` span inside `I`, subtract the part beyond the first `IDLE_GRACE_S` seconds, excluding protected windows.
@@ -79,7 +79,7 @@ Credited hours = sum of `verified_s`. Unverified seconds are shown to reviewers 
 | `commit`, `lines_changed < 3` | 60 s |
 | `commit`, otherwise | 600 s |
 
-**Fail→pass loop:** a passing `test_run` whose `cmd_hash` matches an earlier failing run within `LOOP_WINDOW_S`, with at least one human action in between.
+**Fail→pass loop:** a passing `test_run` whose `cmd_hash` matches an earlier failing run within `LOOP_WINDOW_S`, with at least one human action in between. A loop completes once: if a passing run of the same `cmd_hash` falls between the failing run and this one, this run is an ordinary `test_run`.
 
 ## 5. Relevance and novelty
 

@@ -67,6 +67,26 @@ fn watching_generation_earns_nothing_reading_does() {
     assert!(c[1].reasons.contains(&"agent_busy_subtracted".into()));
 }
 #[test]
+fn reading_output_protects_idle_time_and_says_so() {
+    // idle 10..300 would remove 190..300 (110 s); reading 100..200 protects 190..200, so only 100 s go
+    let c = score(&[prompt_at(0, 600), idle(10, 300), output(100, 2500), prompt_at(420, 300)]);
+    assert_eq!(c[1].verified_s, 320);
+    assert!(c[1].reasons.contains(&"read_protected".into()));
+    assert!(c[1].reasons.contains(&"idle_subtracted".into()));
+}
+#[test]
+fn extreme_timestamps_do_not_panic() {
+    let mut lo = prompt_at(0, 600);
+    lo.ts = i64::MIN;
+    let mut span = idle(0, 0);
+    span.ts = i64::MIN;
+    span.kind = Kind::Idle { end_ts: i64::MAX };
+    let mut hi = prompt_at(0, 600);
+    hi.ts = i64::MAX;
+    let c = score(&[lo, span, hi]);
+    assert_eq!(c.len(), 2);
+}
+#[test]
 fn multitasking_splits_by_next_action() {
     let c = score(&[prompt_in(0, "A", 600), prompt_in(600, "B", 400), edit_in(700, "A")]);
     assert_eq!((c[1].project.as_deref(), c[1].verified_s, c[1].unverified_s), (Some("B"), 552, 48));

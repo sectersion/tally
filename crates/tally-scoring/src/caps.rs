@@ -4,7 +4,9 @@ use crate::event::{Decision, Event, Kind};
 use crate::ruleset::*;
 
 const TRIVIAL_PROMPT_CAP_MS: i64 = 90_000;
-const PROMPT_BASE_S: i64 = 120;
+const PROMPT_BASE_MS: i64 = 120_000;
+/// Spec §4: 1.08 s per relevance_pm point.
+const PROMPT_MS_PER_PM: i64 = 1_080;
 const PROMPT_MAX_MS: i64 = 1_200_000;
 const INTERRUPT_FOLLOWED_CAP_MS: i64 = 120_000;
 const INTERRUPT_CAP_MS: i64 = 30_000;
@@ -35,7 +37,7 @@ pub fn cap_ms(action: &Event, ctx: &CapContext) -> i64 {
             if is_trivial_prompt(*chars, *relevance_pm) {
                 TRIVIAL_PROMPT_CAP_MS
             } else {
-                ((PROMPT_BASE_S + *relevance_pm as i64 * 108 / 100) * 1000).min(PROMPT_MAX_MS)
+                (PROMPT_BASE_MS + *relevance_pm as i64 * PROMPT_MS_PER_PM).min(PROMPT_MAX_MS)
             }
         }
         Kind::Interrupt if ctx.interrupt_followed_by_prompt => INTERRUPT_FOLLOWED_CAP_MS,
@@ -57,7 +59,7 @@ pub fn completes_fail_pass_loop(events: &[Event], idx: usize) -> bool {
     let Some(e) = events.get(idx) else { return false };
     let Kind::TestRun { cmd_hash, exit_code: 0, .. } = &e.kind else { return false };
     let mut human_between = false;
-    for f in events[..idx].iter().rev().take_while(|f| e.ts - f.ts <= LOOP_WINDOW_MS) {
+    for f in events[..idx].iter().rev().take_while(|f| e.ts.saturating_sub(f.ts) <= LOOP_WINDOW_MS) {
         if let Kind::TestRun { cmd_hash: h, exit_code, .. } = &f.kind {
             if h == cmd_hash {
                 if *exit_code == 0 {
@@ -99,6 +101,15 @@ mod tests {
         assert_eq!(cap_ms(&prompt(200, 149), &NONE), 90_000);
         assert_eq!(cap_ms(&prompt(200, 600), &NONE), 768_000);
         assert_eq!(cap_ms(&prompt(200, 1000), &NONE), 1_200_000);
+    }
+    #[test]
+    fn prompt_cap_boundaries_and_exact_ms() {
+        // chars == 20 and relevance_pm == 150 are NOT trivial
+        assert_eq!(cap_ms(&prompt(20, 150), &NONE), 282_000); // 120 + 162
+        assert_eq!(cap_ms(&prompt(19, 150), &NONE), 90_000);
+        assert_eq!(cap_ms(&prompt(20, 149), &NONE), 90_000);
+        // 1.08 s per point, kept to the millisecond: 120 s + 151 * 1.08 s
+        assert_eq!(cap_ms(&prompt(200, 151), &NONE), 283_080);
     }
     #[test]
     fn interrupt_caps() {

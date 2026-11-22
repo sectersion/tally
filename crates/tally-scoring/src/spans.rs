@@ -56,7 +56,7 @@ pub fn clip(spans: &[Span], window: Span) -> Vec<Span> {
 }
 
 pub fn total_ms(spans: &[Span]) -> i64 {
-    spans.iter().map(|s| s.end - s.start).sum()
+    spans.iter().fold(0i64, |acc, s| acc.saturating_add(s.end.saturating_sub(s.start)))
 }
 
 #[cfg(test)]
