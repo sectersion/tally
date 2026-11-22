@@ -1,0 +1,27 @@
+name: scoring
+on: [push, pull_request]
+jobs:
+  native:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p tally-scoring --all-features
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: rustup target add wasm32-unknown-unknown
+      - run: cargo install wasm-pack --locked
+      - uses: oven-sh/setup-bun@v2
+      # Default features only: proves zstd does not leak into the wasm32 build.
+      - run: cargo build -p tally-scoring --target wasm32-unknown-unknown
+      - run: wasm-pack build crates/tally-scoring --target nodejs --features wasm && cd wasm-smoke && bun test

@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 # Do NOT enable serde_json's `preserve_order`: later code relies on sorted maps.
@@ -13,6 +16,9 @@ sha2 = "0.10"
 hex = "0.4"
 # Optional: local text features only; keep out of default features (wasm32 build).
 zstd = { version = "0.13", optional = true }
+# Exact pin: wasm-pack/wasm-bindgen-cli in CI must match this version.
+wasm-bindgen = { version = "=0.2.130", optional = true }
 
 [features]
 text = ["dep:zstd"]
+wasm = ["dep:wasm-bindgen"]
