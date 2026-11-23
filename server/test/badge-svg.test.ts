@@ -95,6 +95,38 @@ test("private is 'private' and lightgrey", async () => {
   expect(s).not.toContain("1.0 h");
 });
 
+test("/v1 badge.json agrees with /badge for private and deleted-account projects", async () => {
+  const PRIVATE = {
+    schemaVersion: 1,
+    label: "tracked with Tally",
+    message: "private",
+    color: "lightgrey",
+  };
+  const p = await project({ public: false });
+  await ledger(p.id, 3600, 0);
+  const r = await get(`/v1/projects/${p.id}/badge.json`);
+  expect(r.status).toBe(200);
+  expect(await r.json()).toEqual(PRIVATE);
+  expect(await (await get(`/badge/${p.name}.json`)).json()).toEqual(PRIVATE);
+
+  const d = await project();
+  await ledger(d.id, 3600, 0);
+  const [u] =
+    await sql`select owner_id, handle from projects p join users u on u.id = p.owner_id where p.id = ${d.id}`;
+  const { deleteAccount } = await import("../src/pages.ts");
+  expect(await deleteAccount(sql, u.owner_id, u.handle)).toBe(true);
+  expect(await (await get(`/v1/projects/${d.id}/badge.json`)).json()).toEqual(PRIVATE);
+});
+
+test("/v1 badge.json for an unowned plan 06 project still serves hours", async () => {
+  const p = await project({ owned: false, public: false });
+  await ledger(p.id, 3600, 0);
+  const r = await get(`/v1/projects/${p.id}/badge.json`);
+  expect(r.status).toBe(200);
+  expect(await r.json()).toMatchObject({ message: "1.0 h", color: "blue" });
+  expect((await get(`/v1/projects/${crypto.randomUUID()}/badge.json`)).status).toBe(404);
+});
+
 test("etag round trip gives 304 and changes after an upload", async () => {
   const p = await project();
   const r1 = await get(`/badge/${p.name}.svg`);

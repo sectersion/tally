@@ -776,9 +776,14 @@ export function createServer(deps: Deps) {
       "/v1/projects/:id/badge.json": {
         GET: handle("/v1/projects/:id/badge.json", async (req, server) => {
           limit(`badge:${ip(req, server)}`, rates.badge);
-          const s = await verifiedSeconds(sql, req.params.id);
-          if (s === null) throw new HttpError(404, { error: "not_found" });
-          return json(200, badge(s), { "cache-control": "public, max-age=300" });
+          const cache = { "cache-control": "public, max-age=300" };
+          const [p] = await sql`select public, owner_id from projects where id = ${req.params.id}`;
+          if (!p) throw new HttpError(404, { error: "not_found" });
+          // Owned and private (or the owner deleted their account): the same answer as /badge.
+          // Unowned plan 06 projects keep serving hours.
+          if (p.owner_id && !p.public)
+            return json(200, { ...badge(0), message: "private", color: "lightgrey" }, cache);
+          return json(200, badge((await verifiedSeconds(sql, req.params.id)) ?? 0), cache);
         }),
       },
     },
