@@ -10,8 +10,8 @@ export class HttpError extends Error {
   }
 }
 
-export function json(status: number, body: unknown): Response {
-  return Response.json(body, { status });
+export function json(status: number, body: unknown, headers?: HeadersInit): Response {
+  return Response.json(body, { status, headers });
 }
 
 const tooLarge = () => new HttpError(413, { error: "body_too_large", max: MAX_BODY_BYTES });

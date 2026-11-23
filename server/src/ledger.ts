@@ -20,6 +20,24 @@ export async function getHead(
     : { head_hash: GENESIS, count: 0 };
 }
 
+/** Verified seconds over all of a project's chains (every ruleset); null if the project does not exist. */
+export async function verifiedSeconds(sql: SQL, projectId: string): Promise<number | null> {
+  const [r] =
+    await sql`select (select coalesce(sum(verified_s), 0) from chains where project_id = p.id) as s
+    from projects p where p.id = ${projectId}`;
+  return r ? Number(r.s) : null;
+}
+
+/** shields.io endpoint JSON. Floors to a tenth of an hour so the badge never exceeds verified time. */
+export function badge(seconds: number) {
+  return {
+    schemaVersion: 1,
+    label: "tracked with Tally",
+    message: `${(Math.floor(seconds / 360) / 10).toFixed(1)} h`,
+    color: "blue",
+  };
+}
+
 /** Records a daemon's committed head. The hash need not be stored yet: received_at is the evidence. */
 export async function recordCommit(
   sql: SQL,

@@ -2,7 +2,14 @@ import type { BunRequest, SQL } from "bun";
 import { requireToken } from "./auth.ts";
 import { MAX_BATCH, MAX_BODY_BYTES } from "./config";
 import { HttpError, json, parse, readJson } from "./errors.ts";
-import { appendEntries, checkBatch, getHead, recordCommit } from "./ledger.ts";
+import {
+  appendEntries,
+  badge,
+  checkBatch,
+  getHead,
+  recordCommit,
+  verifiedSeconds,
+} from "./ledger.ts";
 import { log } from "./log.ts";
 import { CommitBody, UploadBody } from "./schema.ts";
 import { rulesetVersion } from "./wasm.ts";
@@ -73,6 +80,14 @@ export function createServer(deps: Deps) {
           await requireToken(sql, req, projectId);
           await recordCommit(sql, projectId, parse(CommitBody, await readJson(req)));
           return json(200, { ok: true });
+        }),
+      },
+      "/v1/projects/:id/badge.json": {
+        GET: handle(async (req) => {
+          // Task 9: rate limit call site goes here (keyed by ip; public, no auth).
+          const s = await verifiedSeconds(sql, req.params.id);
+          if (s === null) throw new HttpError(404, { error: "not_found" });
+          return json(200, badge(s), { "cache-control": "public, max-age=300" });
         }),
       },
     },
