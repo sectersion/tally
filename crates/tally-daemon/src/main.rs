@@ -52,6 +52,34 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Store a project's device token (read from stdin) in the data dir; the token is never printed.
+    ///
+    /// With `--server`, also writes `[sync] enabled = true` into config.toml unless it already has a `[sync]` table.
+    Login {
+        #[arg(long)]
+        server_id: String,
+        #[arg(long)]
+        server: Option<String>,
+    },
+    /// Remove a project's device token.
+    Logout {
+        #[arg(long)]
+        server_id: String,
+    },
+    /// Commit heads and upload every linked project's published chains to `[sync] server` now (ignores backoff).
+    Sync {
+        /// Print what each chain would upload (one GET per chain); upload nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Diagnose a ledger that no longer matches a fresh derivation (read-only).
+    Repair {
+        /// Close the current chain and start a new epoch (not yet available).
+        #[arg(long, requires = "reason")]
+        new_epoch: bool,
+        #[arg(long, value_enum, requires = "new_epoch")]
+        reason: Option<tally_daemon::repair::Reason>,
+    },
     Status,
     Verify,
     /// Check downloaded published chain files; needs no home or database. Exits 1 if any fail.
@@ -112,6 +140,12 @@ enum ProjectCmd {
         #[arg(long)]
         name: Option<String>,
     },
+    /// Store the server's project id for a registered repository.
+    Link {
+        path: PathBuf,
+        #[arg(long)]
+        server_id: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -141,6 +175,18 @@ fn main() -> Result<()> {
     let db = home.join("tally.db");
     if let Cmd::Hook { cmd: HookCmd::TestRun { args } } = &cli.cmd {
         std::process::exit(test_run(&home, &db, args));
+    }
+    if let Cmd::Login { server_id, server } = &cli.cmd {
+        return login(&home, server_id, server.as_deref());
+    }
+    if let Cmd::Logout { server_id } = &cli.cmd {
+        let gone = tally_daemon::credentials::delete_token(&home, server_id).context("updating the token file")?;
+        println!("{}", if gone { "logged out" } else { "not logged in" });
+        return Ok(());
+    }
+    if let Cmd::Repair { new_epoch: true, .. } = &cli.cmd {
+        eprintln!("{}", tally_daemon::repair::NEW_EPOCH_UNAVAILABLE);
+        std::process::exit(1);
     }
     if matches!(cli.cmd, Cmd::Ingest { .. } | Cmd::Project { .. } | Cmd::Run { .. }) {
         std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
@@ -178,7 +224,9 @@ fn main() -> Result<()> {
             let s = ingest_ndjson(&mut store, &text, &source, watermark)?;
             println!("added {}, duplicates {}", s.added, s.duplicates);
         }
-        Cmd::Hook { .. } | Cmd::VerifyPublished { .. } => unreachable!("handled before the store is opened"),
+        Cmd::Hook { .. } | Cmd::VerifyPublished { .. } | Cmd::Login { .. } | Cmd::Logout { .. } => {
+            unreachable!("handled before the store is opened")
+        }
         Cmd::Project { cmd: ProjectCmd::Add { path, name } } => {
             if let Some(n) = name.as_deref().filter(|n| !tally_daemon::published::valid_public_name(n)) {
                 bail!("invalid project name {n:?}; use owner/repo (letters, digits, '.', '_', '-')");
@@ -189,6 +237,9 @@ fn main() -> Result<()> {
             }
             println!("{id}");
         }
+        Cmd::Project { cmd: ProjectCmd::Link { path, server_id } } => {
+            println!("{}", tally_daemon::project::link_git_project(&mut store, &path, &server_id)?);
+        }
         Cmd::Finalize => {
             let s = finalize(&mut store)?;
             println!("appended {}, skipped {}, final {}, provisional {}", s.appended, s.skipped, s.final_total, s.provisional);
@@ -197,6 +248,70 @@ fn main() -> Result<()> {
             let cfg = config::load(&home)?;
             let r = tally_daemon::publish::publish_once(&mut store, &cfg.publish, &home, dry_run)?;
             print!("{}", r.render_text(dry_run));
+        }
+        Cmd::Sync { dry_run } => {
+            let server = config::load(&home)?.sync.server.ok_or_else(|| anyhow!("no [sync] server in config.toml"))?;
+            let tokens = tally_daemon::credentials::load_tokens(&home).context("reading device tokens")?;
+            let (commits, chains) = if dry_run {
+                (vec![], tally_daemon::sync::dry_run(&mut store, &server, &tokens))
+            } else {
+                tally_daemon::sync::sync_once(&mut store, &server, &tokens, &mut Default::default(), Some(now_ms()))
+            };
+            let ids = store.server_ids()?;
+            let mut failed = false;
+            let mut fail = |p: &str, e: &tally_daemon::sync::SyncError| {
+                failed = true;
+                let id = ids.get(p).and_then(|v| v.first()).map_or("<id>", String::as_str);
+                match e {
+                    tally_daemon::sync::SyncError::NotLoggedIn { .. } => eprintln!("{p}: no device token; run tally login --server-id {id}"),
+                    tally_daemon::sync::SyncError::Api(tally_daemon::api::ApiError::Unauthorized) => {
+                        eprintln!("{p}: device token rejected; run tally login --server-id {id}")
+                    }
+                    e @ tally_daemon::sync::SyncError::Api(tally_daemon::api::ApiError::Rejected { .. }) => {
+                        eprintln!("{p}: {e}; run tally repair")
+                    }
+                    e => eprintln!("{p}: {e}"),
+                }
+            };
+            for (p, r) in &commits {
+                if let Err(e) = r {
+                    fail(p, e);
+                }
+            }
+            for (p, r) in &chains {
+                match r {
+                    Ok(c) if dry_run => println!("{} {}: {} to upload", c.project, c.ruleset, c.uploaded),
+                    Ok(c) => println!("{} {}: uploaded {}, server has {}", c.project, c.ruleset, c.uploaded, c.server_count),
+                    Err(e) => fail(p, e),
+                }
+            }
+            if failed {
+                std::process::exit(1);
+            }
+        }
+        Cmd::Repair { .. } => {
+            use tally_daemon::repair::{diagnose, Diagnosis};
+            let msg = match diagnose(&store)? {
+                Diagnosis::Clean => None,
+                Diagnosis::ScoringChanged { index, field, .. } => Some(format!("scoring changed at entry {index} ({field}): uploads are stopped; repair needs plan 10 Task 1b merged and server epoch support; see docs/superpowers/plans/2026-11-23-07-daemon-sync.md Task 9")),
+                Diagnosis::Diverged { index, field, .. } => Some(format!("ledger diverged at entry {index} ({field}): uploads are stopped for all projects; a new epoch needs tally repair --new-epoch (not yet available: needs plan 10 Task 1b merged and server epoch support)")),
+                Diagnosis::Published(e) => Some(format!("published chains are inconsistent: {e}")),
+            };
+            if let Some(m) = msg {
+                println!("{m}");
+                std::process::exit(1);
+            }
+            println!("ok: ledger matches a fresh derivation");
+            // Server counts, when logged in: one GET /head per linked chain.
+            if let Some(server) = config::load(&home)?.sync.server {
+                let tokens = tally_daemon::credentials::load_tokens(&home).context("reading device tokens")?;
+                for (p, r) in tally_daemon::sync::dry_run(&mut store, &server, &tokens) {
+                    match r {
+                        Ok(c) => println!("{} {}: server has {}", c.project, c.ruleset, c.server_count),
+                        Err(e) => eprintln!("{p}: {e}"),
+                    }
+                }
+            }
         }
         Cmd::Status => {
             let s = status(&store)?;
@@ -222,6 +337,45 @@ fn main() -> Result<()> {
             Err(e) => return Err(e.into()),
         },
     }
+    Ok(())
+}
+
+/// Stores the token from stdin, then checks it against `[sync] server` if one is configured.
+fn login(home: &std::path::Path, server_id: &str, server: Option<&str>) -> Result<()> {
+    if !tally_daemon::project::valid_server_id(server_id) {
+        bail!("invalid server id; use 1 to 64 letters, digits, '_' or '-'");
+    }
+    std::fs::create_dir_all(home).with_context(|| format!("creating {}", home.display()))?;
+    // Validate the config (and any existing [sync] server) before storing a secret.
+    config::load(home)?;
+    eprint!("paste device token: ");
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).context("reading the token")?;
+    tally_daemon::credentials::save_token(home, server_id, &line).map_err(|e| anyhow!("token not stored: {e}"))?;
+    if let Some(url) = server {
+        let p = home.join("config.toml");
+        let existing = std::fs::read_to_string(&p).unwrap_or_default();
+        if existing.lines().any(|l| l.trim() == "[sync]") {
+            println!("edit [sync] in {}", p.display());
+        } else {
+            let text = format!("{existing}{}[sync]\nenabled = true\nserver = {}\n", if existing.is_empty() || existing.ends_with('\n') { "" } else { "\n" }, toml::Value::String(url.to_string()));
+            std::fs::write(&p, &text).with_context(|| format!("writing {}", p.display()))?;
+            if let Err(e) = config::load(home) {
+                std::fs::write(&p, &existing)?; // restore: the url was not acceptable
+                bail!("{e}");
+            }
+        }
+    }
+    // One GET /head when a server is configured. The token stays stored either way.
+    if let Some(url) = config::load(home)?.sync.server {
+        let token = tally_daemon::credentials::load_tokens(home).context("reading device tokens")?.remove(server_id).unwrap_or_default();
+        match tally_daemon::api::Api::new(&url, &token).head(server_id, tally_scoring::RULESET_VERSION) {
+            Ok(_) => {}
+            Err(tally_daemon::api::ApiError::Unauthorized) => bail!("device token rejected by {url}; the token is stored, run tally login again with a valid one"),
+            Err(e) => eprintln!("warning: could not check the token with {url}: {e}"),
+        }
+    }
+    println!("logged in");
     Ok(())
 }
 

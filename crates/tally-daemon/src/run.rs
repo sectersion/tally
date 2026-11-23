@@ -143,15 +143,28 @@ pub fn sources(cfg: &Config, home: &Path, store: &mut Store) -> Result<Vec<Box<d
     Ok(v)
 }
 
-/// The per-tick hooks: daily publish (plan 07 appends sync after it).
+/// The per-tick hooks: daily publish, then sync when enabled.
 pub fn hooks(cfg: &Config, home: &Path) -> Vec<TickHook> {
     let publish = cfg.publish.clone();
-    let home = home.to_path_buf();
+    let h = home.to_path_buf();
     let mut scheduler = crate::publish::Scheduler::new();
-    vec![Box::new(move |store, now_ms| {
-        scheduler.tick(store, &publish, &home, crate::publish::local_day_number(chrono::Local::now()), now_ms);
+    let mut v: Vec<TickHook> = vec![Box::new(move |store, now_ms| {
+        scheduler.tick(store, &publish, &h, crate::publish::local_day_number(chrono::Local::now()), now_ms);
         Ok(())
-    })]
+    })];
+    v.extend(sync_hook(cfg, home));
+    v
+}
+
+/// `None` unless `[sync]` is enabled and has a server.
+pub fn sync_hook(cfg: &Config, home: &Path) -> Option<TickHook> {
+    let server = cfg.sync.server.clone().filter(|_| cfg.sync.enabled)?;
+    let home = home.to_path_buf();
+    let mut ticker = crate::sync::SyncTicker::new();
+    Some(Box::new(move |store, now_ms| {
+        ticker.tick(store, &server, &home, now_ms);
+        Ok(())
+    }))
 }
 
 /// Seconds between ticks: 0 would busy-loop and a huge value overflows `Instant`, so 1 s to 24 h.

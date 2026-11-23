@@ -82,6 +82,28 @@ fn project_add_rejects_a_directory_outside_git_and_prints_the_id_inside_one() {
 }
 
 #[test]
+fn project_link_stores_the_server_id() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let repo = t.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let r = repo.to_str().unwrap();
+    let added = tally(&home, &["project", "add", r, "--name", "owner/repo"]);
+    assert!(added.status.success(), "{}", err(&added));
+    let o = tally(&home, &["project", "link", r, "--server-id", "srv_1"]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(out(&o), out(&added));
+    assert_eq!(out(&o).len(), 64);
+    let c = rusqlite::Connection::open(home.join("tally.db")).unwrap();
+    let (name, sid): (String, String) = c
+        .query_row("SELECT public_name, server_id FROM projects WHERE local_id = ?1", [out(&o)], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap();
+    assert_eq!((name.as_str(), sid.as_str()), ("owner/repo", "srv_1"));
+    let bad = tally(&home, &["project", "link", r, "--server-id", "a/b"]);
+    assert!(!bad.status.success());
+}
+
+#[test]
 fn project_add_reports_an_adopted_name_on_stderr_only() {
     if Command::new("git").arg("--version").output().is_err() {
         return;
@@ -322,4 +344,121 @@ fn project_add_rejects_a_name_that_is_not_owner_slash_repo() {
     let o = tally(&t.path().join("home"), &["project", "add", t.path().to_str().unwrap(), "--name", "foo"]);
     assert!(!o.status.success());
     assert!(err(&o).contains("invalid project name"), "{}", err(&o));
+}
+
+#[test]
+fn login_stores_the_token_and_never_prints_it() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let t = tempfile::tempdir().unwrap();
+    let mut c = Command::new(env!("CARGO_BIN_EXE_tally"))
+        .arg("--home").arg(t.path()).args(["login", "--server-id", "srv_1"])
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    c.stdin.take().unwrap().write_all(b"tok_secret\n").unwrap();
+    let o = c.wait_with_output().unwrap();
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(out(&o), "logged in");
+    assert!(!out(&o).contains("tok_secret") && !err(&o).contains("tok_secret"));
+    assert_eq!(std::fs::read_to_string(t.path().join("device_tokens")).unwrap(), "srv_1 tok_secret\n");
+
+    let o = tally(t.path(), &["logout", "--server-id", "srv_1"]);
+    assert_eq!(out(&o), "logged out");
+    assert_eq!(out(&tally(t.path(), &["logout", "--server-id", "srv_1"])), "not logged in");
+}
+
+#[path = "support/fake_server.rs"]
+mod fake_server;
+use fake_server::FakeServer;
+
+fn login(home: &Path, token: &str, extra: &[&str]) -> Output {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut c = Command::new(env!("CARGO_BIN_EXE_tally"))
+        .arg("--home").arg(home).args(["login", "--server-id", "srv_1"]).args(extra)
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    c.stdin.take().unwrap().write_all(format!("{token}\n").as_bytes()).unwrap();
+    c.wait_with_output().unwrap()
+}
+
+/// `named_home` with owner/repo linked to srv_1 and `[sync]` pointing at `url`.
+fn synced_home(t: &Path, url: &str) -> std::path::PathBuf {
+    let home = named_home(t);
+    let o = tally(&home, &["project", "link", t.join("repo").to_str().unwrap(), "--server-id", "srv_1"]);
+    assert!(o.status.success(), "{}", err(&o));
+    std::fs::write(home.join("config.toml"), format!("[sync]\nenabled = true\nserver = '{url}'\n")).unwrap();
+    home
+}
+
+#[test]
+fn sync_dry_run_reports_and_uploads_nothing() {
+    let f = FakeServer::start("tok");
+    let t = tempfile::tempdir().unwrap();
+    let home = synced_home(t.path(), &f.url);
+    let o = login(&home, "tok", &[]);
+    assert!(o.status.success(), "{}", err(&o));
+    let o = tally(&home, &["sync", "--dry-run"]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(out(&o), format!("owner/repo {}: 2 to upload", tally_scoring::RULESET_VERSION));
+    assert!(f.requests().iter().all(|r| r.method != "POST"));
+    assert!(f.chain("srv_1", fake_server::R).is_empty());
+
+    let o = tally(&home, &["sync"]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(out(&o), format!("owner/repo {}: uploaded 2, server has 2", tally_scoring::RULESET_VERSION));
+    assert_eq!(f.chain("srv_1", fake_server::R).len(), 2);
+    assert_eq!(f.commits("srv_1").len(), 1);
+    assert!(!out(&o).contains("tok") && !err(&o).contains("tok"));
+}
+
+#[test]
+fn sync_without_login_says_so() {
+    let f = FakeServer::start("tok");
+    let t = tempfile::tempdir().unwrap();
+    let home = synced_home(t.path(), &f.url);
+    let o = tally(&home, &["sync"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(err(&o).contains("tally login --server-id srv_1"), "{}", err(&o));
+}
+
+#[test]
+fn sync_without_a_server_names_the_setting() {
+    let t = tempfile::tempdir().unwrap();
+    let home = named_home(t.path());
+    let o = tally(&home, &["sync"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(err(&o).contains("[sync] server"), "{}", err(&o));
+}
+
+#[test]
+fn login_checks_the_token_against_a_configured_server() {
+    let f = FakeServer::start("tok");
+    let t = tempfile::tempdir().unwrap();
+    let o = login(t.path(), "tok_wrong", &["--server", &f.url]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(err(&o).contains("device token rejected"), "{}", err(&o));
+    assert!(!out(&o).contains("tok_wrong") && !err(&o).contains("tok_wrong"));
+    // the token stays stored even when rejected
+    assert_eq!(std::fs::read_to_string(t.path().join("device_tokens")).unwrap(), "srv_1 tok_wrong\n");
+    let o = login(t.path(), "tok", &[]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(out(&o), "logged in");
+    f.down(true);
+    let o = login(t.path(), "tok", &[]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(err(&o).contains("warning"), "{}", err(&o));
+}
+
+#[test]
+fn repair_on_a_clean_store_prints_ok_and_new_epoch_is_refused() {
+    let t = tempfile::tempdir().unwrap();
+    let home = named_home(t.path());
+    let o = tally(&home, &["repair"]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(out(&o).starts_with("ok:"), "{}", out(&o));
+    let o = tally(&home, &["repair", "--new-epoch", "--reason", "store-damaged"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(err(&o).contains("not available"), "{}", err(&o));
+    let o = tally(&home, &["repair", "--new-epoch", "--reason", "my text"]);
+    assert!(!o.status.success());
+    assert!(err(&o).contains("invalid value"), "{}", err(&o));
 }
