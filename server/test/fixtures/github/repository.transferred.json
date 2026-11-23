@@ -1,0 +1,10 @@
+{
+  "headers": {
+    "content-type": "application/json",
+    "user-agent": "GitHub-Hookshot/invented",
+    "x-github-event": "repository",
+    "x-github-delivery": "00000000-0000-4000-8000-000000000005",
+    "x-hub-signature-256": "sha256=b638979ee36ed5a63ff51ec059132abbda9e5babd769a4a1eb0a07cc4aa6ea63"
+  },
+  "body": "{\"action\":\"transferred\",\"repository\":{\"id\":1001,\"full_name\":\"newowner/scratch\",\"name\":\"scratch\",\"owner\":{\"login\":\"newowner\"}},\"changes\":{\"owner\":{\"from\":{\"user\":{\"login\":\"octo\",\"id\":42}}}},\"installation\":{\"id\":5002},\"sender\":{\"login\":\"octo\",\"id\":42}}"
+}

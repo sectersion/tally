@@ -1,0 +1,10 @@
+{
+  "headers": {
+    "content-type": "application/json",
+    "user-agent": "GitHub-Hookshot/invented",
+    "x-github-event": "installation",
+    "x-github-delivery": "00000000-0000-4000-8000-000000000002",
+    "x-hub-signature-256": "sha256=294bb28f210ce467dde7bc41a2c28eea4a1891a23fe132b5df5a0834b2d9bd26"
+  },
+  "body": "{\"action\":\"deleted\",\"installation\":{\"id\":5001,\"account\":{\"login\":\"octo\"}},\"repositories\":[{\"id\":1001,\"full_name\":\"octo/scratch\",\"name\":\"scratch\",\"owner\":{\"login\":\"octo\"}}],\"requester\":null,\"sender\":{\"login\":\"octo\",\"id\":42}}"
+}
