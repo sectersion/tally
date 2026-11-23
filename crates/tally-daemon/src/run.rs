@@ -24,6 +24,7 @@ pub struct TickReport {
 
 pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut [TickHook], now_ms: i64) -> TickReport {
     let mut r = TickReport::default();
+    let mut tick_writes: Vec<(String, i64)> = vec![];
     for src in sources.iter_mut() {
         let id = src.id().to_string();
         let mut st = match store.get_state(&id) {
@@ -53,6 +54,12 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
         // still count as duplicates, not as dropped.
         // ponytail: one retry per late event (O(late x batch)); filter by finalized_through + id lookup if batches of late events get big.
         let coverage = src.take_coverage();
+        let writes = src.take_agent_writes();
+        if let Err(e) = store.put_agent_writes(&writes) {
+            r.errors.push(format!("source {id}: {e}"));
+            continue;
+        }
+        tick_writes.extend(writes);
         let (mut events, mut dropped) = (p.events, 0);
         let appended = loop {
             match store.append_events(&events) {
@@ -91,6 +98,11 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
             r.errors.push(format!("source {id}: {e}"));
         }
     }
+    if !tick_writes.is_empty() {
+        for src in sources.iter_mut() {
+            src.see_agent_writes(&tick_writes);
+        }
+    }
     match finalize(store) {
         Ok(f) => r.finalized = Some(f),
         Err(e) => r.errors.push(e.to_string()),
@@ -120,6 +132,14 @@ pub fn sources(cfg: &Config, home: &Path, store: &mut Store) -> Result<Vec<Box<d
             v.push(Box::new(crate::claude_code::ClaudeCode::new(dir)));
         }
     }
+    if cfg.heartbeat.enabled {
+        let seed = store.agent_writes_since(now_ms() - crate::heartbeat::SEED_WINDOW_MS).unwrap_or_default();
+        let token_file = cfg.heartbeat.token_file.clone().unwrap_or_else(|| home.join("heartbeat.token"));
+        match crate::heartbeat::HeartbeatSource::start(cfg.heartbeat.port, &token_file, seed) {
+            Ok(h) => v.push(Box::new(h)),
+            Err(e) => eprintln!("heartbeat source disabled: {e}"),
+        }
+    }
     // The git source is always on (no `[git]` config); with no registered repos it polls nothing.
     // It reads agent markers through its own connection to the db file under `home`.
     match (store.repos_to_poll(), Store::open(&home.join("tally.db"))) {
@@ -144,6 +164,9 @@ pub fn sources(cfg: &Config, home: &Path, store: &mut Store) -> Result<Vec<Box<d
     }
     if !cc.enabled {
         disabled.push("claude-code");
+    }
+    if !cfg.heartbeat.enabled {
+        disabled.push("heartbeat");
     }
     // Fatal: a stale presence_required would over-credit all session.
     store.set_run_config(cfg.presence.required(), &disabled)?;
@@ -409,5 +432,42 @@ mod tests {
         let mut s = Store::open(&d.path().join("tally.db")).unwrap();
         s.conn.execute_batch("CREATE TRIGGER no_meta BEFORE INSERT ON meta BEGIN SELECT RAISE(ABORT, 'no'); END;").unwrap();
         assert!(sources(&Config::default(), d.path(), &mut s).is_err());
+    }
+
+    struct WriterSrc(Vec<(String, i64)>);
+    impl Source for WriterSrc {
+        fn id(&self) -> &str {
+            "writer"
+        }
+        fn poll(&mut self, _: i64, _: &mut dyn SourceState) -> Result<Poll, SourceError> {
+            Ok(Poll { events: vec![], watermark: None })
+        }
+        fn take_agent_writes(&mut self) -> Vec<(String, i64)> {
+            std::mem::take(&mut self.0)
+        }
+    }
+    struct Listener(std::rc::Rc<std::cell::RefCell<Vec<(String, i64)>>>);
+    impl Source for Listener {
+        fn id(&self) -> &str {
+            "listener"
+        }
+        fn poll(&mut self, _: i64, _: &mut dyn SourceState) -> Result<Poll, SourceError> {
+            Ok(Poll { events: vec![], watermark: None })
+        }
+        fn see_agent_writes(&mut self, w: &[(String, i64)]) {
+            self.0.borrow_mut().extend_from_slice(w);
+        }
+    }
+
+    #[test]
+    fn runner_persists_agent_writes_and_forwards_them() {
+        let mut s = Store::open_in_memory().unwrap();
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+        let mut srcs: Vec<Box<dyn Source>> = vec![Box::new(WriterSrc(vec![("h".into(), 5)])), Box::new(Listener(seen.clone()))];
+        let r = run_once(&mut s, &mut srcs, &mut [], 1_000);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(s.agent_writes_since(0).unwrap(), vec![("h".to_string(), 5)]);
+        assert_eq!(*seen.borrow(), vec![("h".to_string(), 5)]);
+        assert!(s.agent_writes_since(6).unwrap().is_empty());
     }
 }

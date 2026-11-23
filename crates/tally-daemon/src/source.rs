@@ -77,6 +77,8 @@ pub trait Source {
     fn take_agent_writes(&mut self) -> Vec<(String, i64)> {
         Vec::new()
     }
+    /// Receives every agent write drained from all sources in this tick (after all polls).
+    fn see_agent_writes(&mut self, _writes: &[(String, i64)]) {}
 }
 
 pub fn now_ms() -> i64 {

@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS source_state(source TEXT NOT NULL, key TEXT NOT NULL,
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS coverage(start_ts INTEGER NOT NULL, end_ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS adapter_health(source TEXT PRIMARY KEY, found_files INTEGER NOT NULL, records INTEGER NOT NULL, skipped INTEGER NOT NULL, errors INTEGER NOT NULL, format TEXT NOT NULL, last_event_ts INTEGER, counters TEXT NOT NULL, checked_ts INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS agent_writes(file_hash TEXT NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY(file_hash, ts));
 CREATE TABLE IF NOT EXISTS skipped_claims(action_id TEXT PRIMARY KEY, ts INTEGER NOT NULL, reason TEXT NOT NULL);
 CREATE TRIGGER IF NOT EXISTS skipped_no_update BEFORE UPDATE ON skipped_claims
 BEGIN SELECT RAISE(ABORT, 'skipped_claims is append-only'); END;
@@ -193,6 +194,23 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Records agent file writes `(file_hash, ts)`; a re-emitted batch is harmless. Only the runner calls this.
+    pub fn put_agent_writes(&mut self, w: &[(String, i64)]) -> Result<(), StoreError> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (h, ts) in w {
+            tx.execute("INSERT OR IGNORE INTO agent_writes(file_hash, ts) VALUES (?1, ?2)", params![h, ts])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Agent writes with `ts >= since`, oldest first.
+    pub fn agent_writes_since(&self, since: i64) -> Result<Vec<(String, i64)>, StoreError> {
+        let mut st = self.conn.prepare("SELECT file_hash, ts FROM agent_writes WHERE ts >= ?1 ORDER BY ts, file_hash")?;
+        let rows = st.query_map([since], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Upserts one source's adapter health. Only the runner calls this.

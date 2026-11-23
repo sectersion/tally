@@ -127,3 +127,43 @@ fn sink_receives_only_valid_heartbeats() {
     post(&r, ONE, "{nope");
     assert_eq!(s.lock().unwrap().len(), 2);
 }
+
+#[test]
+fn end_to_end_post_then_poll_emits_one_user_edit() {
+    use std::collections::BTreeMap;
+    use tally_daemon::heartbeat::server::ServerConfig;
+    use tally_daemon::heartbeat::HeartbeatSource;
+    use tally_daemon::source::Source;
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    let file = repo.join("src").join("uniquepathname.rs");
+    let esc = file.to_string_lossy().replace('\\', "\\\\");
+    let t = 1_763_800_000.0;
+    let body = format!(
+        r#"[{{"entity":"{esc}","type":"file","time":{t},"is_write":true}},{{"entity":"{esc}","type":"file","time":{},"is_write":true}}]"#,
+        t + 5.0
+    );
+    let mut src = HeartbeatSource::start_with(ServerConfig::new(0, KEY.into()), vec![]).unwrap();
+    let addr = src.addr().unwrap();
+    let mut s = TcpStream::connect(addr).unwrap();
+    let m = format!(
+        "POST {BULK} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: {}\r\nContent-Length: {}\r\n\r\n{body}",
+        auth(),
+        body.len()
+    );
+    s.write_all(m.as_bytes()).unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    assert!(out.starts_with("HTTP/1.1 201"), "{out}");
+    let p = src.poll(1_763_800_000_000 + 60_000, &mut BTreeMap::<String, String>::new()).unwrap();
+    assert_eq!(p.events.len(), 1);
+    // Persist and make sure the path text never reaches the db file.
+    let db = d.path().join("tally.db");
+    let mut store = tally_daemon::store::Store::open(&db).unwrap();
+    store.append_events(&p.events).unwrap();
+    drop(store);
+    let bytes: Vec<u8> = ["", "-wal"].iter().flat_map(|x| std::fs::read(format!("{}{x}", db.display())).unwrap_or_default()).collect();
+    assert!(!bytes.windows(14).any(|w| w == b"uniquepathname"));
+}
