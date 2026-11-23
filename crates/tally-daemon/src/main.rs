@@ -48,6 +48,11 @@ enum Cmd {
     Finalize,
     Status,
     Verify,
+    /// Check downloaded published chain files; needs no home or database. Exits 1 if any fail.
+    VerifyPublished {
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+    },
     /// Poll the sources and finalize every `run.interval_secs` until interrupted.
     Run {
         /// Overrides `run.interval_secs` from config.toml.
@@ -105,6 +110,24 @@ enum ProjectCmd {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Cmd::VerifyPublished { files } = &cli.cmd {
+        let mut failed = false;
+        for f in files {
+            let text = std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?;
+            match tally_daemon::published::verify_published_json(&text) {
+                Ok(c) => {
+                    let h = tally_daemon::published::hours_message(c.verified_s);
+                    println!("ok: {}: {} entries, project {}, ruleset {}, verified_hours {}", f.display(), c.entries,
+                        c.project.as_deref().unwrap_or("none"), c.ruleset.as_deref().unwrap_or("none"), h.trim_end_matches(" h"));
+                }
+                Err(e) => {
+                    println!("{e}");
+                    failed = true;
+                }
+            }
+        }
+        std::process::exit(i32::from(failed));
+    }
     let home = match cli.home {
         Some(h) => h,
         None => dirs::data_local_dir().ok_or_else(|| anyhow!("no local data directory; pass --home"))?.join("tally"),
@@ -149,7 +172,7 @@ fn main() -> Result<()> {
             let s = ingest_ndjson(&mut store, &text, &source, watermark)?;
             println!("added {}, duplicates {}", s.added, s.duplicates);
         }
-        Cmd::Hook { .. } => unreachable!("handled before the store is opened"),
+        Cmd::Hook { .. } | Cmd::VerifyPublished { .. } => unreachable!("handled before the store is opened"),
         Cmd::Project { cmd: ProjectCmd::Add { path, name } } => {
             let (id, adopted) = register_git_project_matched(&mut store, &path, name.as_deref())?;
             if let Some((name, via)) = adopted {

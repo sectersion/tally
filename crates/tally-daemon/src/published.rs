@@ -136,6 +136,30 @@ pub fn hours_message(verified_s: u64) -> String {
     format!("{}.{} h", tenths / 10, tenths % 10)
 }
 
+#[derive(Debug, PartialEq)]
+pub struct PublishedCheck {
+    pub entries: usize,
+    pub project: Option<String>,
+    pub ruleset: Option<String>,
+    pub verified_s: u64,
+}
+
+/// Checks a downloaded public chain file: valid chain from genesis, one project, one ruleset.
+pub fn verify_published_json(json: &str) -> Result<PublishedCheck, String> {
+    let entries: Vec<LedgerEntry> = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    verify_chain(&entries, GENESIS_HASH).map_err(|e| format!("FAIL at entry {}: {}", e.index, e.reason))?;
+    let first = entries.first();
+    if entries.iter().any(|e| Some(&e.project) != first.map(|f| &f.project) || Some(&e.ruleset) != first.map(|f| &f.ruleset)) {
+        return Err("FAIL: file mixes projects or rulesets".into());
+    }
+    Ok(PublishedCheck {
+        entries: entries.len(),
+        project: first.and_then(|f| f.project.clone()),
+        ruleset: first.map(|f| f.ruleset.clone()),
+        verified_s: entries.iter().map(|e| u64::from(e.verified_s)).sum(),
+    })
+}
+
 pub fn badge_json(verified_s: u64) -> String {
     let v = serde_json::json!({
         "schemaVersion": 1, "label": "tracked with Tally", "message": hours_message(verified_s), "color": "blue",
@@ -276,6 +300,26 @@ mod tests {
         s.register_project("p1", "C:/r", Some("o/r r")).unwrap();
         assert!(matches!(sync(&mut s, true), Err(PublishError::BadName(n)) if n == "o/r r"));
         assert!(s.published_projects().unwrap().is_empty());
+    }
+    fn chain_json(projects: &[&str]) -> String {
+        use tally_scoring::Claim;
+        let claims: Vec<Claim> = projects.iter().enumerate().map(|(i, p)| Claim {
+            action_id: format!("a{i}"), ts: i as i64, project: Some((*p).into()), kind: "prompt".into(),
+            verified_s: 100 + i as u32, unverified_s: 0, reasons: vec![], features: Default::default(),
+        }).collect();
+        serde_json::to_string(&tally_scoring::chain(&claims, GENESIS_HASH)).unwrap()
+    }
+    #[test] fn verify_published_accepts_a_good_chain_and_rejects_tampering_and_mixes() {
+        let good = chain_json(&["o/r", "o/r"]);
+        let c = verify_published_json(&good).unwrap();
+        assert_eq!((c.entries, c.project.as_deref(), c.verified_s), (2, Some("o/r"), 201));
+        assert!(c.ruleset.is_some());
+        // ponytail: tally_scoring::wasm is feature-gated, so verify_chain_json_impl is not asserted here.
+        let bad = good.replacen("\"verified_s\":100", "\"verified_s\":999", 1);
+        assert!(verify_published_json(&bad).unwrap_err().starts_with("FAIL at entry"));
+        assert_eq!(verify_published_json(&chain_json(&["o/r", "o/x"])).unwrap_err(), "FAIL: file mixes projects or rulesets");
+        assert_eq!(verify_published_json("[]").unwrap().entries, 0);
+        assert!(verify_published_json("nope").is_err());
     }
     #[test] fn badge_hours_floor_to_one_decimal() {
         assert_eq!(hours_message(0), "0.0 h");

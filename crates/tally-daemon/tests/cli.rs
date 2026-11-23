@@ -220,3 +220,26 @@ fn hook_test_run_of_a_missing_program_exits_127_and_records_nothing() {
     assert!(err(&o).contains("tally-no-such-program-xyz"), "{}", err(&o));
     assert!(!home.join("tally.db").exists());
 }
+
+#[test]
+fn verify_published_checks_files_without_creating_a_database() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let claims: Vec<tally_scoring::Claim> = (0..2).map(|i| tally_scoring::Claim {
+        action_id: format!("a{i}"), ts: i, project: Some("o/r".into()), kind: "prompt".into(),
+        verified_s: 360, unverified_s: 0, reasons: vec![], features: Default::default(),
+    }).collect();
+    let good = serde_json::to_string(&tally_scoring::chain(&claims, tally_scoring::GENESIS_HASH)).unwrap();
+    let (gf, bf) = (t.path().join("good.json"), t.path().join("bad.json"));
+    std::fs::write(&gf, &good).unwrap();
+    std::fs::write(&bf, good.replacen("\"verified_s\":360", "\"verified_s\":361", 1)).unwrap();
+
+    let o = tally(&home, &["verify-published", gf.to_str().unwrap()]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(out(&o).contains("ok:") && out(&o).contains("verified_hours 0.2"), "{}", out(&o));
+
+    let o = tally(&home, &["verify-published", gf.to_str().unwrap(), bf.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(out(&o).contains("FAIL at entry"), "{}", out(&o));
+    assert!(!home.join("tally.db").exists());
+}
