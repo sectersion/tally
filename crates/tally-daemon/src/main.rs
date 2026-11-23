@@ -61,7 +61,9 @@ enum Cmd {
     ///
     /// No watermark is set for source `shell`: a hook event is stamped at completion with the
     /// current time, and every other source holds its watermark at or below the present, so the
-    /// event is never at or below a finalized point.
+    /// event is essentially never at or below a finalized point (a daemon poll in the millisecond
+    /// between the child exiting and the append could race; the hook then warns that the run
+    /// was not recorded).
     Hook {
         #[command(subcommand)]
         cmd: HookCmd,
@@ -119,12 +121,13 @@ fn main() -> Result<()> {
             if let Some(n) = interval_secs {
                 cfg.run.interval_secs = n;
             }
+            cfg.validate().map_err(|e| anyhow!(e))?;
             if cfg.presence.required() && !tally_daemon::presence::supported() {
                 bail!("presence.require is true but presence is not supported on this platform; set [presence] require = false in config.toml");
             }
             store.set_presence_required(cfg.presence.required())?;
             if once {
-                let mut srcs = sources(&cfg, &home, &store);
+                let mut srcs = sources(&cfg, &home, &mut store);
                 let r = run_once(&mut store, &mut srcs, &mut hooks(&cfg, &home), now_ms());
                 for e in &r.errors {
                     eprintln!("{e}");
@@ -152,7 +155,7 @@ fn main() -> Result<()> {
         }
         Cmd::Finalize => {
             let s = finalize(&mut store)?;
-            println!("appended {}, final {}, provisional {}", s.appended, s.final_total, s.provisional);
+            println!("appended {}, skipped {}, final {}, provisional {}", s.appended, s.skipped, s.final_total, s.provisional);
         }
         Cmd::Status => {
             let s = status(&store)?;

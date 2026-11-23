@@ -75,6 +75,8 @@ struct Prepared {
     horizon: Option<i64>,
     /// Events with `ts <= horizon` that were scored.
     scored_events: usize,
+    /// Skipped claims stored when read; `append_ledger_checked` refuses if it changed.
+    skipped_seen: usize,
     entries: Vec<LedgerEntry>,
     skips: Vec<(String, i64, String)>,
     summary: FinalizeSummary,
@@ -138,14 +140,14 @@ fn prepare(store: &Store) -> Result<Prepared, FinalizeError> {
         final_total,
         provisional: claims.len().saturating_sub(final_total + skipped.len() + skips.len()),
     };
-    Ok(Prepared { horizon, scored_events, entries, skips, summary })
+    Ok(Prepared { horizon, scored_events, skipped_seen: skipped.len(), entries, skips, summary })
 }
 
 const NO_COVERAGE: &str = "no_presence_coverage";
 
 fn commit(store: &mut Store, p: Prepared) -> Result<FinalizeSummary, FinalizeError> {
     if let Some(h) = p.horizon {
-        store.append_ledger(&p.entries, h, p.scored_events, &p.skips)?;
+        store.append_ledger_checked(&p.entries, h, p.scored_events, &p.skips, Some(p.skipped_seen))?;
     }
     Ok(p.summary)
 }
@@ -296,7 +298,6 @@ mod tests {
         let before = s.ledger().unwrap();
         // coverage that would have credited c arrives late (raw insert: extend_coverage never
         // lowers a row's start, so it cannot produce this row itself)
-        s.extend_coverage(&[(1_200_000, 1_500_000)]).unwrap();
         s.conn.execute("INSERT INTO coverage(start_ts, end_ts) VALUES (1000000, 2000000)", []).unwrap();
         let r = finalize(&mut s).unwrap();
         assert_eq!((r.appended, r.skipped), (0, 0));
@@ -384,6 +385,20 @@ mod tests {
         let before = (s.ledger().unwrap(), s.skipped().unwrap());
         assert!(matches!(finalize(&mut s), Err(FinalizeError::Divergence { index: 2, ref action_id }) if action_id == "d"));
         assert_eq!((s.ledger().unwrap(), s.skipped().unwrap()), before);
+    }
+    #[test] fn a_skip_recorded_by_another_finalizer_mid_finalize_is_retried() {
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("tally.db");
+        let mut a = Store::open(&path).unwrap();
+        let mut b = Store::open(&path).unwrap();
+        a.set_presence_required(true).unwrap();
+        gap_case(&mut a);
+        a.append_events(&[edit("d", 3_100_000)]).unwrap();
+        a.extend_coverage(&[(3_000_000, 3_500_000)]).unwrap();
+        a.set_watermark(PRESENCE_SOURCE, 3_300_000).unwrap();
+        let p = prepare(&a).unwrap();
+        b.append_ledger(&[], 3_300_000, p.scored_events, &[("zz".into(), 1, "x".into())]).unwrap();
+        assert!(matches!(commit(&mut a, p), Err(FinalizeError::Store(StoreError::Conflict))));
+        assert_eq!(a.ledger().unwrap().len(), 2);
     }
     #[test] fn retry_gives_up_after_three_attempts_and_only_on_conflict_or_chain_broken() {
         let mut calls = 0;

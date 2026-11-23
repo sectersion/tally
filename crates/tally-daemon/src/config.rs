@@ -24,6 +24,16 @@ impl Default for PresenceConfig {
     }
 }
 
+impl Config {
+    /// Rejects settings that contradict each other.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.presence.enabled && self.presence.require == Some(true) {
+            return Err("presence.require is true but presence.enabled is false; enable presence or set require = false".into());
+        }
+        Ok(())
+    }
+}
+
 impl PresenceConfig {
     pub fn required(&self) -> bool {
         self.require.unwrap_or(self.enabled)
@@ -113,6 +123,15 @@ mod tests {
         assert_eq!((c.run.dashboard, c.run.dashboard_port), (false, 7878));
     }
 
+    #[test]
+    fn require_without_enabled_is_rejected() {
+        let d = tempfile::tempdir().unwrap();
+        write(&d, "[presence]\nenabled = false\nrequire = true\n");
+        let e = load(d.path()).unwrap().validate().unwrap_err();
+        assert!(e.contains("presence.require") && e.contains("presence.enabled"), "{e}");
+        write(&d, "[presence]\nenabled = false\n");
+        assert!(load(d.path()).unwrap().validate().is_ok());
+    }
     #[test]
     fn presence_require_defaults_to_enabled() {
         let d = tempfile::tempdir().unwrap();

@@ -36,7 +36,7 @@ fn lunch_scenario_end_to_end() {
 
     let o = tally(&home, &["finalize"]);
     assert!(o.status.success(), "{}", err(&o));
-    assert_eq!(out(&o), "appended 2, final 2, provisional 0");
+    assert_eq!(out(&o), "appended 2, skipped 0, final 2, provisional 0");
 
     let o = tally(&home, &["status"]);
     let s = out(&o);
@@ -58,7 +58,7 @@ fn lunch_scenario_end_to_end() {
     let s = out(&tally(&home, &["status"]));
     assert!(s.lines().any(|l| l == "events: 3"), "{s}");
 
-    assert_eq!(out(&tally(&home, &["finalize"])), "appended 0, final 2, provisional 0");
+    assert_eq!(out(&tally(&home, &["finalize"])), "appended 0, skipped 0, final 2, provisional 0");
 }
 
 #[test]

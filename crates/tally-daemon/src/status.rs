@@ -21,14 +21,15 @@ pub fn status(store: &Store) -> Result<Status, StoreError> {
     let horizon = store.horizon()?;
     let events = store.events()?;
     let ledger = store.ledger()?;
+    let skipped = store.skipped()?.len();
     let finalized_through = Some(store.finalized_through()?).filter(|&t| t != i64::MIN);
     Ok(Status {
         events: events.len(),
         final_claims: ledger.len(),
-        provisional_claims: score(&events).len().saturating_sub(ledger.len()),
+        provisional_claims: score(&events).len().saturating_sub(ledger.len() + skipped),
         verified_s: ledger.iter().map(|e| u64::from(e.verified_s)).sum(),
         unverified_s: ledger.iter().map(|e| u64::from(e.unverified_s)).sum(),
-        skipped_claims: store.skipped()?.len(),
+        skipped_claims: skipped,
         horizon,
         finalized_through,
         last_hash: ledger.last().map_or(GENESIS_HASH, |e| e.hash.as_str()).to_string(),
@@ -72,6 +73,13 @@ mod tests {
         assert_eq!(st.verified_s, 220);                            // 120 (first action) + 100 (b)
         assert_eq!((st.horizon, st.finalized_through), (Some(1_000_000), Some(1_000_000)));
         assert_eq!(st.last_hash, s.ledger().unwrap()[1].hash);
+    }
+    #[test] fn provisional_claims_exclude_skipped_ones() {
+        let mut s = store_with_two_final_claims();
+        s.append_events(&[edit("c", 2_000_000)]).unwrap();
+        s.append_ledger(&[], 1_000_000, 2, &[("c".into(), 2_000_000, "no_presence_coverage".into())]).unwrap();
+        let st = status(&s).unwrap();
+        assert_eq!((st.provisional_claims, st.skipped_claims), (0, 1));
     }
     #[test] fn empty_store_status() {
         let st = status(&Store::open_in_memory().unwrap()).unwrap();

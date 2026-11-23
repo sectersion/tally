@@ -97,7 +97,12 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
 }
 
 /// The sources for this config. Claude Code reads `projects_dir`, default `~/.claude/projects`.
-pub fn sources(cfg: &Config, home: &Path, store: &Store) -> Vec<Box<dyn Source>> {
+/// Also records the enabled ids (the finalize horizon ignores disabled sources) and fills
+/// missing project identities; failures there are reported on stderr, not fatal.
+pub fn sources(cfg: &Config, home: &Path, store: &mut Store) -> Vec<Box<dyn Source>> {
+    if let Err(e) = crate::project::backfill_identities(store) {
+        eprintln!("project identity backfill failed: {e}");
+    }
     let mut v: Vec<Box<dyn Source>> = vec![];
     if cfg.presence.enabled {
         v.push(Box::new(crate::presence::PresenceSource::new(crate::presence::default_platform())));
@@ -110,15 +115,24 @@ pub fn sources(cfg: &Config, home: &Path, store: &Store) -> Vec<Box<dyn Source>>
     }
     // The git source is always on (no `[git]` config); with no registered repos it polls nothing.
     // It reads agent markers through its own connection to the db file under `home`.
-    let repos = store
-        .repos_to_poll()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(local_id, root)| crate::git::RepoRef { local_id, root: root.into() })
-        .collect();
-    if let Ok(own) = Store::open(&home.join("tally.db")) {
-        let lookup = crate::git::StoreLookup { store: own, claude_enabled: cc.enabled };
-        v.push(Box::new(crate::git::GitSource::new(repos, Box::new(lookup))));
+    match (store.repos_to_poll(), Store::open(&home.join("tally.db"))) {
+        (Ok(repos), Ok(own)) => {
+            let repos = repos.into_iter().map(|(local_id, root)| crate::git::RepoRef { local_id, root: root.into() }).collect();
+            let lookup = crate::git::StoreLookup { store: own, claude_enabled: cc.enabled };
+            v.push(Box::new(crate::git::GitSource::new(repos, Box::new(lookup))));
+        }
+        (repos, own) => {
+            if let Err(e) = repos {
+                eprintln!("git source disabled: listing repositories failed: {e}");
+            }
+            if let Err(e) = own {
+                eprintln!("git source disabled: opening the database failed: {e}");
+            }
+        }
+    }
+    let ids: Vec<&str> = v.iter().map(|s| s.id()).collect();
+    if let Err(e) = store.set_enabled_sources(&ids) {
+        eprintln!("recording enabled sources failed: {e}");
     }
     v
 }
@@ -262,14 +276,18 @@ mod tests {
     #[test]
     fn sources_registers_presence_only_when_enabled_and_git_always() {
         let d = tempfile::tempdir().unwrap();
-        let s = Store::open(&d.path().join("tally.db")).unwrap();
+        let mut s = Store::open(&d.path().join("tally.db")).unwrap();
         let mut cfg = Config::default();
         cfg.claude_code.enabled = false;
         cfg.presence.enabled = true;
-        let ids = |c: &Config| sources(c, d.path(), &s).iter().map(|x| x.id().to_string()).collect::<Vec<_>>();
+        s.set_watermark("presence", 5).unwrap();
+        s.set_watermark("git", 100).unwrap();
+        let mut ids = |c: &Config| sources(c, d.path(), &mut s).iter().map(|x| x.id().to_string()).collect::<Vec<_>>();
         assert_eq!(ids(&cfg), ["presence", "git"]);
         cfg.presence.enabled = false;
         assert_eq!(ids(&cfg), ["git"]);
+        // the disabled presence watermark no longer holds the horizon
+        assert_eq!(s.horizon().unwrap(), Some(100));
     }
     #[test]
     fn a_zero_interval_ticks_every_second() {

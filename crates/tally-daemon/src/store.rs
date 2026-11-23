@@ -41,6 +41,10 @@ pub struct Store {
     pub(crate) conn: Connection,
 }
 
+/// `source_state` owner of run-level facts (no source has this id).
+const RUN_STATE: &str = "_run";
+const ENABLED_KEY: &str = "enabled_sources";
+
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, ts INTEGER NOT NULL, json TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
@@ -90,7 +94,11 @@ impl Store {
                 |r| r.get(0),
             )?;
             if !have {
-                conn.execute_batch(&format!("ALTER TABLE projects ADD COLUMN {col} TEXT"))?;
+                // another process may have migrated between the check and here
+                match conn.execute_batch(&format!("ALTER TABLE projects ADD COLUMN {col} TEXT")) {
+                    Err(e) if e.to_string().contains("duplicate column name") => {}
+                    r => r?,
+                }
             }
         }
         Ok(Store { conn })
@@ -174,9 +182,26 @@ impl Store {
         Ok(self.conn.query_row("SELECT ts FROM watermarks WHERE source = ?1", [source], |r| r.get(0)).optional()?)
     }
 
-    /// Minimum watermark over all sources; `None` if there are none.
+    /// Records which sources `tally run` has enabled; `horizon` then ignores the rest.
+    pub fn set_enabled_sources(&mut self, ids: &[&str]) -> Result<(), StoreError> {
+        self.set_state(RUN_STATE, &BTreeMap::from([(ENABLED_KEY.to_string(), ids.join(","))]))
+    }
+
+    /// Minimum watermark over the enabled sources (all of them if `tally run` never recorded
+    /// the set, see `set_enabled_sources`); `None` if there are none. A disabled source's old
+    /// watermark row stays but no longer holds the horizon back.
     pub fn horizon(&self) -> Result<Option<i64>, StoreError> {
-        Ok(self.conn.query_row("SELECT MIN(ts) FROM watermarks", [], |r| r.get(0))?)
+        let enabled = self.get_state(RUN_STATE)?.remove(ENABLED_KEY);
+        let mut st = self.conn.prepare("SELECT source, ts FROM watermarks")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut min: Option<i64> = None;
+        for row in rows {
+            let (source, ts) = row?;
+            if enabled.as_ref().is_none_or(|e| e.split(',').any(|i| i == source)) {
+                min = Some(min.map_or(ts, |m| m.min(ts)));
+            }
+        }
+        Ok(min)
     }
 
     /// `i64::MIN` until the first `append_ledger`.
@@ -262,6 +287,7 @@ impl Store {
     /// `entries` still moves it. `scored_events` is how many events with `ts <= finalized_through`
     /// the caller scored; if the stored count differs, another writer added one meanwhile and
     /// nothing is written (`Conflict`). Events are never deleted, so equal counts mean equal sets.
+    /// Does not check the skipped count; see `append_ledger_checked`.
     pub fn append_ledger(
         &mut self,
         entries: &[LedgerEntry],
@@ -269,10 +295,29 @@ impl Store {
         scored_events: usize,
         skips: &[(String, i64, String)],
     ) -> Result<(), StoreError> {
+        self.append_ledger_checked(entries, finalized_through, scored_events, skips, None)
+    }
+
+    /// Like `append_ledger`; with `Some(n)`, also `Conflict` if the stored skipped_claims
+    /// count is not `n` (another finalizer recorded skips since the caller read them).
+    pub fn append_ledger_checked(
+        &mut self,
+        entries: &[LedgerEntry],
+        finalized_through: i64,
+        scored_events: usize,
+        skips: &[(String, i64, String)],
+        skipped_seen: Option<usize>,
+    ) -> Result<(), StoreError> {
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let stored: i64 = tx.query_row("SELECT COUNT(*) FROM events WHERE ts <= ?1", [finalized_through], |r| r.get(0))?;
         if usize::try_from(stored).ok() != Some(scored_events) {
             return Err(StoreError::Conflict);
+        }
+        if let Some(n) = skipped_seen {
+            let have: i64 = tx.query_row("SELECT COUNT(*) FROM skipped_claims", [], |r| r.get(0))?;
+            if usize::try_from(have).ok() != Some(n) {
+                return Err(StoreError::Conflict);
+            }
         }
         let last: Option<String> = tx
             .query_row("SELECT hash FROM ledger ORDER BY seq DESC LIMIT 1", [], |r| r.get(0))
@@ -437,6 +482,27 @@ mod tests {
         assert_eq!(s.horizon().unwrap(), Some(50));
         s.set_watermark("b", 10).unwrap();
         assert_eq!(s.horizon().unwrap(), Some(50));
+    }
+    #[test] fn a_disabled_source_does_not_hold_the_horizon_until_it_is_enabled_again() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_watermark("a", 100).unwrap(); s.set_watermark("old", 5).unwrap();
+        assert_eq!(s.horizon().unwrap(), Some(5));                 // key absent: every row counts
+        s.set_enabled_sources(&["a"]).unwrap();
+        assert_eq!(s.horizon().unwrap(), Some(100));
+        s.set_enabled_sources(&["a", "old"]).unwrap();             // next `tally run` start
+        assert_eq!(s.horizon().unwrap(), Some(5));
+        s.set_enabled_sources(&[]).unwrap();
+        assert_eq!(s.horizon().unwrap(), None);
+    }
+    #[test] fn a_skipped_row_between_prepare_and_append_is_a_conflict() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.append_ledger(&[], 10, 0, &[("a".into(), 5, "r".into())]).unwrap();
+        let e = entry("a1", GENESIS_HASH);
+        assert!(matches!(s.append_ledger_checked(std::slice::from_ref(&e), 20, 0, &[], Some(0)), Err(StoreError::Conflict)));
+        assert!(s.ledger().unwrap().is_empty());
+        assert_eq!(s.finalized_through().unwrap(), 10);
+        s.append_ledger_checked(&[e], 20, 0, &[], Some(1)).unwrap();
+        assert_eq!(s.ledger().unwrap().len(), 1);
     }
     #[test] fn ledger_appends_in_order_and_rejects_a_broken_link() {
         let mut s = Store::open_in_memory().unwrap();

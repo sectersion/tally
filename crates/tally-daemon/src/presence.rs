@@ -41,11 +41,13 @@ pub fn supported() -> bool {
 pub struct PresenceSource<P: Platform> {
     platform: P,
     coverage: Vec<Interval>,
+    /// The last sample failed; logged once per streak.
+    failing: bool,
 }
 
 impl<P: Platform> PresenceSource<P> {
     pub fn new(platform: P) -> Self {
-        Self { platform, coverage: Vec::new() }
+        Self { platform, coverage: Vec::new(), failing: false }
     }
 }
 
@@ -57,9 +59,17 @@ impl<P: Platform> Source for PresenceSource<P> {
     fn poll(&mut self, now_ms: i64, state: &mut dyn SourceState) -> Result<Poll, SourceError> {
         self.coverage.clear();
         let idle = match self.platform.idle_ms() {
-            Ok(i) => i,
+            Ok(i) => {
+                self.failing = false;
+                i
+            }
             // no step: the next good sample sees the gap
-            Err(PlatformError::Failed(_)) => return Ok(Poll { events: vec![], watermark: None }),
+            Err(PlatformError::Failed(msg)) => {
+                if !std::mem::replace(&mut self.failing, true) {
+                    eprintln!("presence: idle sample failed: {msg}; coverage has a gap");
+                }
+                return Ok(Poll { events: vec![], watermark: None });
+            }
             Err(e @ PlatformError::Unsupported) => return Err(SourceError::Other(e.to_string())),
         };
         let mut t = Tracker::load(state);
@@ -246,6 +256,45 @@ mod tests {
         let p = src.poll(s(5), &mut st).unwrap();
         assert!(p.events.is_empty() && p.watermark.is_none());
         assert!(src.take_coverage().is_empty());
+    }
+
+    #[test]
+    fn a_failure_streak_is_flagged_once_and_clears_on_a_good_sample() {
+        let fail = || Err(PlatformError::Failed("x".into()));
+        let mut src = source(vec![fail(), fail(), Ok(0)]);
+        let mut st: BTreeMap<String, String> = BTreeMap::new();
+        assert!(!src.failing);
+        src.poll(s(0), &mut st).unwrap();
+        assert!(src.failing);
+        src.poll(s(5), &mut st).unwrap();
+        assert!(src.failing);
+        src.poll(s(10), &mut st).unwrap();
+        assert!(!src.failing);
+    }
+
+    #[test]
+    fn backward_jump_with_an_open_span_closes_it_at_the_last_sample() {
+        let mut t = Tracker::default();
+        t.step(s(0), 0);
+        let open = t.step(s(40), 40_000);
+        assert_eq!(open.watermark, s(0) - 1);
+        let st = t.step(s(20), 0);
+        assert_eq!(st.closed, vec![IdleSpan { start: s(0), end: s(40) }]);
+        assert!(st.coverage.is_empty());
+        assert!(st.watermark >= open.watermark);
+        assert!(t.step(s(25), 0).watermark >= st.watermark);
+    }
+
+    #[test]
+    fn a_closed_span_is_cleared_in_saved_state() {
+        let mut t = Tracker::default();
+        t.step(s(0), 0);
+        t.step(s(40), 40_000);
+        assert!(!t.step(s(60), 0).closed.is_empty());
+        let mut m: BTreeMap<String, String> = BTreeMap::new();
+        t.save(&mut m);
+        assert_eq!(m.get("open_start").map(String::as_str), Some(""));
+        assert_eq!(Tracker::load(&m).open, None);
     }
 
     #[test]

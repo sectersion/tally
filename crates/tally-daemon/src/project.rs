@@ -70,6 +70,15 @@ pub fn repo_identity(root: &Path) -> RepoIdentity {
     }
 }
 
+/// Stores the identity of every project registered before identities existed (both fields
+/// NULL), so it groups without a new `tally project add`. Never touches public names.
+pub fn backfill_identities(store: &mut Store) -> Result<(), StoreError> {
+    for p in store.projects()?.into_iter().filter(|p| p.common_dir.is_none() && p.remote.is_none()) {
+        store.set_project_identity(&p.local_id, &repo_identity(Path::new(&p.root)))?;
+    }
+    Ok(())
+}
+
 /// `https://user:tok@GitHub.com/O/r.git` and `git@github.com:o/r` both give `github.com/o/r`.
 pub fn normalize_remote(url: &str) -> String {
     let lower = url.trim().to_lowercase();
@@ -80,7 +89,13 @@ pub fn normalize_remote(url: &str) -> String {
     let auth_end = rest.find('/').unwrap_or(rest.len());
     let rest = rest[..auth_end].rfind('@').map_or(rest, |i| &rest[i + 1..]);
     let mut out = rest.to_string();
-    if !scheme {
+    if scheme {
+        // `host:22/o/r` -> `host/o/r`
+        let host_end = out.find('/').unwrap_or(out.len());
+        if let Some(i) = out[..host_end].rfind(':').filter(|&i| out[i + 1..host_end].bytes().all(|b| b.is_ascii_digit())) {
+            out.replace_range(i..host_end, "");
+        }
+    } else {
         // scp-like `host:owner/repo`
         if let Some(i) = out.find(':').filter(|&i| out.find('/').is_none_or(|sl| i < sl)) {
             out.replace_range(i..=i, "/");
@@ -224,6 +239,8 @@ mod tests {
         assert_eq!(normalize_remote("https://github.com/Sectersion/tally.git"), "github.com/sectersion/tally");
         assert_eq!(normalize_remote("git@github.com:sectersion/tally"), "github.com/sectersion/tally");
         assert_eq!(normalize_remote("https://user:tok@github.com/o/r/"), "github.com/o/r");
+        assert_eq!(normalize_remote("ssh://git@github.com:22/o/r.git"), "github.com/o/r");
+        assert_eq!(normalize_remote("https://host:8443/o/r"), "host/o/r");
     }
 
     fn git_available() -> bool {
@@ -262,6 +279,26 @@ mod tests {
         assert!(a.common_dir.is_some());
         assert_eq!(a.common_dir, b.common_dir);
         assert_ne!(project_id(&main).unwrap(), project_id(&wt).unwrap());
+    }
+    #[test]
+    fn backfill_fills_null_identities_and_keeps_names() {
+        if !git_available() { return; }
+        let t = tempfile::tempdir().unwrap();
+        let (main, wt) = (t.path().join("main"), t.path().join("wt"));
+        init(&main);
+        worktree(&main, &wt, "f");
+        let mut s = Store::open_in_memory().unwrap();
+        let (m, w) = (normalize_path(&main.to_string_lossy()), normalize_path(&wt.to_string_lossy()));
+        s.register_project("m", &m, Some("o/r")).unwrap();
+        s.register_project("w", &w, None).unwrap();
+        s.register_project("gone", &normalize_path(&t.path().join("missing").to_string_lossy()), None).unwrap();
+        backfill_identities(&mut s).unwrap();
+        let rows = s.projects().unwrap();
+        assert!(rows[0].common_dir.is_some());
+        assert_eq!(rows[0].common_dir, rows[1].common_dir);
+        assert_eq!((rows[0].public_name.as_deref(), rows[1].public_name.as_deref()), (Some("o/r"), None));
+        assert_eq!((rows[2].common_dir.as_deref(), rows[2].remote.as_deref()), (None, None));
+        assert_eq!(s.repos_to_poll().unwrap().len(), 2);
     }
     #[test]
     fn two_clones_of_one_remote_share_the_remote() {
