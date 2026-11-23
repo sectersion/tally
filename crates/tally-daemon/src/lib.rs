@@ -20,6 +20,8 @@ pub mod status;
 pub mod store;
 pub mod sync;
 pub mod testrun;
+#[cfg(any(test, feature = "test-kit"))]
+pub mod test_kit;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub use project::{find_git_root, normalize_path, project_id, project_id_from_normalized};

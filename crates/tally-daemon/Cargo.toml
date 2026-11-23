@@ -12,6 +12,13 @@ name = "tally_daemon"
 name = "tally"
 path = "src/main.rs"
 
+[features]
+test-kit = []
+
+[[test]]
+name = "golden"
+required-features = ["test-kit"]
+
 [dependencies]
 tally-scoring = { path = "../tally-scoring", features = ["text"] }
 sha2 = "0.10"
