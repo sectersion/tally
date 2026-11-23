@@ -55,6 +55,8 @@ One container or VM running `bun run start` behind a TLS-terminating proxy (C7 r
 - 120 requests/min per token (burst 30), single instance (in-process limiter).
 - Per minute: sign-in and GitHub connect 20 per ip, `/v1/device/code` 10 per ip, session form posts 60 per user, `/u` and `/p` pages 120 per ip, badges 600 per ip (table: `LIMITS` in `src/ratelimit.ts`). Webhooks are not limited. Over a limit is `429` with `retry-after: 60`.
 - Failed auth is limited per client ip. Behind a proxy, set `TRUST_PROXY=1` so the client ip is the last `x-forwarded-for` hop (the one the proxy appended); otherwise every client shares the proxy's address. Never set it without a proxy that appends that header: clients could then pick their own ip.
+- `TRUST_PROXY=1` assumes exactly one proxy in front, and that proxy appends the client address. With a chain of proxies the last hop is the inner proxy, and every client shares its bucket.
+- Limits are per ip, so users behind one shared NAT (a school, an event) share the sign-in and page buckets. IPv6 addresses are keyed by their /64 and IPv4-mapped IPv6 by the IPv4 address.
 
 ## Monthly cost envelope check
 

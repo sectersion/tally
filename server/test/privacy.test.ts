@@ -27,12 +27,24 @@ const P = {
   verification_status: "verified-leakcheck",
   reason: "leakcheck_reason",
   feature: "leakcheck_feature",
-  label: "leakcheck-label",
+  projectLabel: "leakcheck-label-project",
+  userLabel: "leakcheck-label-user",
   message: "leakcheck-message",
   authorName: "Leakcheck Author",
   authorEmail: "leakcheck-author@example.invalid",
+  ghToken: "leakcheck-ghtoken",
+  deviceName: "leakcheck-device",
+  csrf: `leakcheck-csrf-${tag}`,
 };
-const NEEDLES = [...Object.values(P), "LEAKCHECK"];
+const NEEDLES = [...Object.values(P), "LEAKCHECK", "leakcheck-label"];
+/** The needles found in a response; the one scan used for every route. */
+const leaksIn = (text: string) => NEEDLES.filter((bad) => text.includes(bad));
+
+test("the scan finds a planted needle (positive control)", () => {
+  expect(leaksIn(`<p>${P.message}</p>`)).toEqual([P.message]);
+  expect(leaksIn(`<td>${P.sub}</td>`)).toContain("LEAKCHECK");
+  expect(leaksIn("<p>nothing private</p>")).toEqual([]);
+});
 
 async function firstEvent(url: string): Promise<string> {
   const ac = new AbortController();
@@ -71,9 +83,21 @@ test("no public route shows a private value, and receipts never store them", asy
   await sql`insert into ledger_entries (chain_id, seq, hash, prev_hash, action_id, ts, kind, verified_s, unverified_s, entry)
     values (${c.id}, 0, ${`${tag}`.padStart(64, "0")}, ${"0".repeat(64)}, 'a0', ${Date.now() - 60_000}, 'prompt', 1800, 60, ${JSON.stringify(entry)}::json)`;
 
-  // Token labels, project and user scoped.
-  await sql`insert into device_tokens (project_id, token_hash, label) values (${pid}, ${hashToken(`p${tag}`)}, ${P.label})`;
-  await sql`insert into device_tokens (user_id, token_hash, label) values (${uid}, ${hashToken(`u${tag}`)}, ${P.label})`;
+  // Token labels, project and user scoped; a GitHub user token; a pending device code; a session.
+  await sql`insert into device_tokens (project_id, token_hash, label) values (${pid}, ${hashToken(`p${tag}`)}, ${P.projectLabel})`;
+  await sql`insert into device_tokens (user_id, token_hash, label) values (${uid}, ${hashToken(`u${tag}`)}, ${P.userLabel})`;
+  await sql`insert into github_user_tokens (user_id, github_user_id, access_token, expires_at)
+    values (${uid}, ${Math.floor(Math.random() * 1e12)}, ${P.ghToken}, now() + interval '1 hour')`;
+  await sql`insert into device_codes (code_hash, user_code, device_name, user_id, expires_at)
+    values (${hashToken(`d${tag}`)}, ${`LC${tag}`.slice(0, 9)}, ${P.deviceName}, ${uid}, now() + interval '10 minutes')`;
+  await sql`insert into sessions (token_hash, user_id, csrf, expires_at)
+    values (${hashToken(`s${tag}`)}, ${uid}, ${P.csrf}, now() + interval '1 day')`;
+  const [seeded] = await sql`select
+      (select count(*)::int from device_tokens where project_id = ${pid} or user_id = ${uid}) as tokens,
+      (select count(*)::int from github_user_tokens where user_id = ${uid}) as gh,
+      (select count(*)::int from device_codes where user_id = ${uid}) as codes,
+      (select count(*)::int from sessions where user_id = ${uid}) as sessions`;
+  expect(seeded).toEqual({ tokens: 2, gh: 1, codes: 1, sessions: 1 });
 
   // A linked repo and a validly signed push through the real webhook route.
   const repo = Math.floor(Math.random() * 1e12);
@@ -137,10 +161,10 @@ test("no public route shows a private value, and receipts never store them", asy
     seen.push(`${path}\n${JSON.stringify([...res.headers])}\n${await res.text()}`);
   }
   seen.push(await firstEvent(`${base}/p/${name}/events`));
-  expect(seen.find((t) => t.startsWith(`/p/${name}\n`))).toContain(name); // a real page, not an error
-  const leaks = seen.flatMap((t) =>
-    NEEDLES.filter((bad) => t.includes(bad)).map((bad) => `${t.split("\n")[0]}: ${bad}`),
-  );
+  // Positive controls: real pages with the public values the scan reads past.
+  expect(seen.find((t) => t.startsWith(`/p/${name}\n`))).toContain(name);
+  expect(seen.find((t) => t.startsWith(`/u/${handle}\n`))).toContain(`/p/${name}`);
+  const leaks = seen.flatMap((t) => leaksIn(t).map((bad) => `${t.split("\n")[0]}: ${bad}`));
   expect(leaks).toEqual([]);
 
   // Stored evidence keeps no message, author name or email.

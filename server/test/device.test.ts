@@ -210,8 +210,8 @@ test("device names are 1..64 chars and the body is strict", async () => {
   expect((await post("/v1/device/code", { device_name: "a", extra: 1 })).status).toBe(400);
 });
 
-test("/v1/device/code is limited to 10 per minute per ip", async () => {
-  const s = mk();
+test("/v1/device/code is limited to a burst of 10 per ip", async () => {
+  const s = mk({ device: { perMin: 1, burst: 10 } }); // the real burst; no refill mid-test
   try {
     const statuses: number[] = [];
     let r = new Response();

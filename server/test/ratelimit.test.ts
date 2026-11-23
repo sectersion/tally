@@ -2,7 +2,14 @@ import { afterAll, expect, test } from "bun:test";
 import { createServer } from "../src/app.ts";
 import { testConfig } from "../src/config.ts";
 import { connect } from "../src/db.ts";
-import { clientIp, createLimiter, LIMITS, type Limiter, type Limits } from "../src/ratelimit.ts";
+import {
+  clientIp,
+  createLimiter,
+  ipKey,
+  LIMITS,
+  type Limiter,
+  type Limits,
+} from "../src/ratelimit.ts";
 import { createSession } from "../src/session.ts";
 import { seedFixture } from "./helpers.ts";
 
@@ -20,7 +27,7 @@ test("bucket allows burst then refuses, then refills", () => {
 
 test("HTTP 429 after the burst", async () => {
   const p = await seedFixture(sql, "acme/demo-10");
-  const s = createServer({ cfg: testConfig(), sql, port: 0, limiter: createLimiter(60, 2) });
+  const s = createServer({ cfg: testConfig(), sql, port: 0, limiter: createLimiter(1, 2) });
   try {
     const get = () =>
       fetch(`http://localhost:${s.port}/v1/ledger/${p.projectId}/head`, {
@@ -38,7 +45,7 @@ test("HTTP 429 after the burst", async () => {
 
 test("failed auth is limited by ip", async () => {
   const p = await seedFixture(sql, "acme/demo-11");
-  const s = createServer({ cfg: testConfig(), sql, port: 0, limiter: createLimiter(60, 2) });
+  const s = createServer({ cfg: testConfig(), sql, port: 0, limiter: createLimiter(1, 2) });
   try {
     const bad = async () =>
       (await fetch(`http://localhost:${s.port}/v1/ledger/${p.projectId}/head`)).status;
@@ -126,8 +133,11 @@ test("the key table is the brief's", () => {
   });
 });
 
-test("auth:<ip> is 20 per minute across login, callback and the GitHub flow", async () => {
-  await withServer({}, async (url) => {
+// HTTP tests keep the real burst but refill 1/min, so no token comes back mid-test on a slow machine.
+const slow = (k: keyof Limits): Partial<Limits> => ({ [k]: { perMin: 1, burst: LIMITS[k].burst } });
+
+test("auth:<ip> is a burst of 20 across login, callback and the GitHub flow", async () => {
+  await withServer({ limits: slow("auth") }, async (url) => {
     const { statuses, last } = await hammer(21, () => fetch(`${url}/auth/login`, manual));
     expect(statuses.slice(0, 20).every((c) => c === 303)).toBe(true);
     await expectHtml429(last);
@@ -137,7 +147,7 @@ test("auth:<ip> is 20 per minute across login, callback and the GitHub flow", as
   });
 });
 
-test("form:<user_id> is 60 per minute over session POSTs, per user", async () => {
+test("form:<user_id> is a burst of 60 over session POSTs, per user", async () => {
   const mkUser = async () => {
     const id = crypto.randomUUID();
     await sql`insert into users (id, hca_sub) values (${id}, ${`sub!${id}`})`;
@@ -146,7 +156,7 @@ test("form:<user_id> is 60 per minute over session POSTs, per user", async () =>
   };
   const a = await mkUser();
   const b = await mkUser();
-  await withServer({}, async (url) => {
+  await withServer({ limits: slow("form") }, async (url) => {
     const post = (cookie: string, path = "/settings/handle") =>
       fetch(`${url}${path}`, { method: "POST", redirect: "manual", headers: { cookie } });
     const { statuses, last } = await hammer(61, () => post(a));
@@ -158,7 +168,7 @@ test("form:<user_id> is 60 per minute over session POSTs, per user", async () =>
 });
 
 test("page:<ip> covers /u, /p, fragments and events", async () => {
-  await withServer({ limits: { page: { perMin: 60, burst: 3 } } }, async (url) => {
+  await withServer({ limits: { page: { perMin: 1, burst: 3 } } }, async (url) => {
     const { statuses, last } = await hammer(4, () => fetch(`${url}/u/nobody`));
     expect(statuses).toEqual([404, 404, 404, 429]);
     await expectHtml429(last);
@@ -205,10 +215,28 @@ test("clientIp ignores x-forwarded-for unless TRUST_PROXY=1, then takes the last
 
 test("clientIp falls back to the peer on a malformed last hop; IPv6 works", () => {
   const s = peer("::1");
+  const loop = "0:0:0:0::/64";
   for (const bad of ["", "1.2.3.4, ", "1.2.3.4, nope", "1.2.3.4, 1.2.3.4:80", "999.1.1.1"])
-    expect(clientIp(xff(bad), s, { trustProxy: true })).toBe("::1");
-  expect(clientIp(xff("1.2.3.4, 2001:db8::7"), s, { trustProxy: true })).toBe("2001:db8::7");
-  expect(clientIp(new Request("http://x/"), s, { trustProxy: false })).toBe("::1");
+    expect(clientIp(xff(bad), s, { trustProxy: true })).toBe(loop);
+  expect(clientIp(xff("1.2.3.4, 2001:db8::7"), s, { trustProxy: true })).toBe("2001:db8:0:0::/64");
+  expect(clientIp(new Request("http://x/"), s, { trustProxy: false })).toBe(loop);
+});
+
+test("IPv6 is keyed by /64; IPv4-mapped addresses key as IPv4", () => {
+  const k = ipKey;
+  expect(k("2001:db8:1:2::a")).toBe(k("2001:0DB8:1:2:ffff:ffff:ffff:ffff")); // one /64
+  expect(k("2001:db8:1:2:3:4:5:6")).toBe("2001:db8:1:2::/64");
+  expect(k("2001:db8:1:2::a")).not.toBe(k("2001:db8:1:3::a")); // the next /64
+  expect(k("fe80::1%eth0")).toBe("fe80:0:0:0::/64");
+  expect(k("::ffff:1.2.3.4")).toBe("1.2.3.4");
+  expect(k("::ffff:102:304")).toBe("1.2.3.4");
+  expect(k("1.2.3.4")).toBe("1.2.3.4");
+  expect(k("64:ff9b::1.2.3.4")).toBe("64:ff9b:0:0::/64");
+  // Two hosts in one /64 share a bucket through the route too.
+  const s = peer("10.0.0.1");
+  const a = clientIp(xff("2001:db8:1:2::a"), s, { trustProxy: true });
+  const b = clientIp(xff("2001:db8:1:2::b"), s, { trustProxy: true });
+  expect(a).toBe(b);
 });
 
 test("routes key by the trusted last hop only when TRUST_PROXY=1", async () => {
