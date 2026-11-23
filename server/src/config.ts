@@ -3,6 +3,8 @@ export type Config = { port: number; databaseUrl: string; logLevel: LogLevel };
 
 export const MAX_BODY_BYTES = 1_048_576;
 export const MAX_BATCH = 1000;
+// Traffic budget: a daemon uploads about every 300 s and commits every 300 s, so 120/min per
+// token leaves two orders of magnitude for retries.
 export const RATE_PER_MIN = 120;
 export const RATE_BURST = 30;
 
