@@ -151,3 +151,8 @@ These override anything in an individual plan that disagrees. Each plan was amen
 12. **CLI shape:** `tally hook` is a subcommand group: `hook test-run -- <cmd>` (plan 04), `hook cursor <event>` and `hook install cursor` (plan 08). `tally login --browser` belongs to plan 12.
 13. **Presence model (plan 04 is authoritative):** names `Platform`, `PlatformError { Unsupported, Failed }`, files `presence.rs` and `presence_win.rs`, coverage in the store, uncovered claims skipped with reason `no_presence_coverage`, `[presence] enabled/require`. Plan 12's macOS and Linux sources implement plan 04's trait and turn on its defaults for those platforms.
 14. **Privacy statements** must list everything that can leave the machine: ledger entries and head hashes (sync, plan 07), badge data (plan 05), and scrubbed session text only on explicit `tally submit` (plan 10).
+
+## Refinements to apply while executing (from the final plan review; not blocking)
+
+- **Plan 08 Task 19, `hash_writes`:** compare against `normalize_path(&root.to_string_lossy())` (production roots from `project_for_dir` are canonicalized, so on Windows they carry a `\?\` prefix and backslashes), and require the written path to equal that root or start with it followed by `/`, so `C:/tallyproj2/x` is not treated as inside `C:/tallyproj`. Add a test with a verbatim-prefix root.
+- **Plan 03, `bash_kind`:** trim each segment before stripping, and compare tokens after trimming trailing `)`, `"` and `'`; also handle `bash -c '<a && b>'` by stripping the `bash -c`/`sh -c` prefix before splitting on `&&`. Add `(git commit)`, `bash -c "git commit"` and `cd x && (git commit -m x)` to the tests. A miss is the unsafe direction: plan 04 would record the agent's commit as a user commit.
