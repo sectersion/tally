@@ -1,0 +1,27 @@
+import type { SQL } from "bun";
+import { createServer } from "../src/app.ts";
+import { createProjectToken } from "../src/auth.ts";
+import type { LedgerEntry } from "../src/schema.ts";
+import fixture from "./fixtures/chain.json";
+
+// Fixture claims (acme/demo-N): each name is usable once per database (run `bun run db:reset` locally).
+// | N          | claimed by              |
+// | 1          | wasm and schema tests   |
+// | 2..7, -alt | Task 6 (upload)         |
+// | 8          | Task 7                  |
+// | 9          | Task 8                  |
+// | 10..16     | Task 9 (any)            |
+
+export const chains = fixture as unknown as Record<string, LedgerEntry[]>;
+
+export async function seed(sql: SQL, publicName = `t/${crypto.randomUUID()}`) {
+  const { projectId, token } = await createProjectToken(sql, publicName);
+  return { projectId, token, publicName };
+}
+
+export const seedFixture = (sql: SQL, name: string) => seed(sql, name);
+
+export function start(sql: SQL) {
+  const s = createServer({ sql, port: 0 });
+  return { url: `http://localhost:${s.port}`, stop: () => s.stop(true) };
+}

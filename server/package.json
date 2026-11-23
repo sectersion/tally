@@ -8,6 +8,9 @@
   "scripts": {
     "start": "bun src/main.ts",
     "migrate": "bun scripts/migrate.ts",
+    "token:create": "bun scripts/token.ts create",
+    "token:revoke": "bun scripts/token.ts revoke",
+    "db:reset": "psql \"$DATABASE_URL\" -c \"drop schema public cascade; create schema public\"",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
