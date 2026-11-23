@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS ledger(seq INTEGER PRIMARY KEY, hash TEXT NOT NULL, e
 CREATE TABLE IF NOT EXISTS source_state(source TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(source, key));
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS coverage(start_ts INTEGER NOT NULL, end_ts INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS adapter_health(source TEXT PRIMARY KEY, found_files INTEGER NOT NULL, records INTEGER NOT NULL, skipped INTEGER NOT NULL, errors INTEGER NOT NULL, format TEXT NOT NULL, last_event_ts INTEGER, counters TEXT NOT NULL, checked_ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS skipped_claims(action_id TEXT PRIMARY KEY, ts INTEGER NOT NULL, reason TEXT NOT NULL);
 CREATE TRIGGER IF NOT EXISTS skipped_no_update BEFORE UPDATE ON skipped_claims
 BEGIN SELECT RAISE(ABORT, 'skipped_claims is append-only'); END;
@@ -192,6 +193,51 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Upserts one source's adapter health. Only the runner calls this.
+    pub fn put_health(&mut self, source: &str, h: &crate::source::Health, checked_ts: i64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO adapter_health(source, found_files, records, skipped, errors, format, last_event_ts, counters, checked_ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(source) DO UPDATE SET found_files = excluded.found_files, records = excluded.records,
+               skipped = excluded.skipped, errors = excluded.errors, format = excluded.format,
+               last_event_ts = excluded.last_event_ts, counters = excluded.counters, checked_ts = excluded.checked_ts",
+            params![
+                source,
+                h.files_found as i64,
+                h.records as i64,
+                h.skipped as i64,
+                h.errors as i64,
+                h.format,
+                h.last_event_ts,
+                serde_json::to_string(&h.counters).unwrap_or_else(|_| "[]".into()),
+                checked_ts
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every stored health row as `(source, health, checked_ts)`, ordered by source.
+    pub fn get_health(&self) -> Result<Vec<(String, crate::source::Health, i64)>, StoreError> {
+        let mut st = self.conn.prepare(
+            "SELECT source, found_files, records, skipped, errors, format, last_event_ts, counters, checked_ts
+             FROM adapter_health ORDER BY source",
+        )?;
+        let rows = st.query_map([], |r| {
+            let counters: String = r.get(7)?;
+            let h = crate::source::Health {
+                files_found: r.get::<_, i64>(1)? as usize,
+                records: r.get::<_, i64>(2)? as usize,
+                skipped: r.get::<_, i64>(3)? as usize,
+                errors: r.get::<_, i64>(4)? as usize,
+                format: r.get(5)?,
+                last_event_ts: r.get(6)?,
+                counters: serde_json::from_str(&counters).unwrap_or_default(),
+            };
+            Ok((r.get(0)?, h, r.get(8)?))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// One source's watermark; `None` if it never set one.

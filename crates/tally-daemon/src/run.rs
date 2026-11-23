@@ -33,7 +33,14 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
                 continue;
             }
         };
-        let p = match src.poll(now_ms, &mut st) {
+        let polled = src.poll(now_ms, &mut st);
+        // Health is persisted after every poll, Ok or Err; a failure here changes nothing else.
+        if let Some(h) = src.take_health() {
+            if let Err(e) = store.put_health(&id, &h, now_ms) {
+                r.errors.push(format!("source {id}: {e}"));
+            }
+        }
+        let p = match polled {
             Ok(p) => p,
             Err(e) => {
                 r.errors.push(format!("source {id}: {e}"));
@@ -234,6 +241,29 @@ mod tests {
         assert_eq!(s.get_state("good").unwrap()["polls"], "1");
         assert_eq!(s.horizon().unwrap(), Some(500_000));
         assert_eq!(r.finalized.unwrap().final_total, 1);
+    }
+    #[test]
+    fn runner_persists_take_health() {
+        use crate::source::Health;
+        struct H(Vec<Option<Health>>);
+        impl Source for H {
+            fn id(&self) -> &str {
+                "h"
+            }
+            fn poll(&mut self, _: i64, _: &mut dyn SourceState) -> Result<Poll, SourceError> {
+                Ok(Poll { events: vec![], watermark: None })
+            }
+            fn take_health(&mut self) -> Option<Health> {
+                self.0.remove(0)
+            }
+        }
+        let mut s = Store::open_in_memory().unwrap();
+        let h = Health { records: 3, format: "v1".into(), ..Default::default() };
+        let mut srcs: Vec<Box<dyn Source>> = vec![Box::new(H(vec![Some(h.clone()), None]))];
+        run_once(&mut s, &mut srcs, &mut [], 10);
+        assert_eq!(s.get_health().unwrap(), [("h".to_string(), h.clone(), 10)]);
+        run_once(&mut s, &mut srcs, &mut [], 20);
+        assert_eq!(s.get_health().unwrap(), [("h".to_string(), h, 10)]);
     }
     #[test]
     fn no_watermark_leaves_the_horizon_alone() {

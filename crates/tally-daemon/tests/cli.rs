@@ -462,3 +462,16 @@ fn repair_on_a_clean_store_prints_ok_and_new_epoch_is_refused() {
     assert!(!o.status.success());
     assert!(err(&o).contains("invalid value"), "{}", err(&o));
 }
+
+#[test]
+fn doctor_prints_a_line_per_configured_source() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    tally_daemon::store::Store::open(&home.join("tally.db")).unwrap();
+    let o = tally(&home, &["doctor"]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(out(&o), "claude-code  no_logs  files=0  last=never  format=-  errors=0/0");
+    let o = tally(&home, &["doctor", "--json"]);
+    assert!(out(&o).contains("\"status\": \"no_logs\""), "{}", out(&o));
+}

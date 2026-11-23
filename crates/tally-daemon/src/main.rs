@@ -80,6 +80,11 @@ enum Cmd {
         #[arg(long, value_enum, requires = "new_epoch")]
         reason: Option<tally_daemon::repair::Reason>,
     },
+    /// Per-harness log health (files found, last event, parse error rate, format). Always exits 0.
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
     Status,
     Verify,
     /// Check downloaded published chain files; needs no home or database. Exits 1 if any fail.
@@ -310,6 +315,18 @@ fn main() -> Result<()> {
                         Ok(c) => println!("{} {}: server has {}", c.project, c.ruleset, c.server_count),
                         Err(e) => eprintln!("{p}: {e}"),
                     }
+                }
+            }
+        }
+        Cmd::Doctor { json } => {
+            let cfg = config::load(&home)?;
+            let configured: Vec<&str> = if cfg.claude_code.enabled { vec!["claude-code"] } else { vec![] };
+            let r = tally_daemon::doctor::report(&store, &configured)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&r)?);
+            } else {
+                for h in &r {
+                    println!("{}", tally_daemon::doctor::line(h));
                 }
             }
         }
