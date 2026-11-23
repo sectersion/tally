@@ -1,0 +1,40 @@
+:root {
+  --bg: #ffffff; --fg: #1a1a1a; --muted: #555555; --card: #f4f5f7; --line: #c9ccd2;
+  --accent: #0b5cad; --accent2: #7a3e00; --warn-bg: #fff4d6;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a; --fg: #eceef1; --muted: #b4b9c2; --card: #1e2128; --line: #444a55;
+    --accent: #6cb2ff; --accent2: #ffb870; --warn-bg: #3a3014;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, sans-serif; }
+header, main, footer { max-width: 72rem; margin: 0 auto; padding: 0.5rem 1rem; }
+nav a { margin-right: 1rem; color: var(--accent); }
+nav a[aria-current="page"] { font-weight: 700; text-decoration: none; border-bottom: 2px solid var(--accent); }
+a:focus-visible, button:focus-visible, select:focus-visible, [tabindex]:focus-visible {
+  outline: 3px solid var(--accent); outline-offset: 2px;
+}
+h2:focus { outline: none; }
+code { background: var(--card); padding: 0.1rem 0.4rem; border-radius: 4px; }
+.grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr)); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 1rem; overflow-wrap: anywhere; }
+.big { font-size: 2.5rem; font-weight: 700; margin: 0; }
+.muted { color: var(--muted); }
+.banner { background: var(--warn-bg); border: 1px solid var(--line); padding: 0.5rem 1rem; border-radius: 6px; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border-bottom: 1px solid var(--line); padding: 0.25rem 0.5rem; text-align: left; }
+.bar { background: var(--line); height: 0.75rem; border-radius: 4px; }
+.bar > span { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+.replay { display: grid; gap: 1rem; grid-template-columns: minmax(12rem, 1fr) 3fr; }
+@media (max-width: 40rem) { .replay { grid-template-columns: 1fr; } }
+.sessions { list-style: none; padding: 0; }
+.sessions button { width: 100%; text-align: left; margin-bottom: 0.25rem; padding: 0.4rem; background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+.sessions button[aria-pressed="true"] { border: 2px solid var(--accent); }
+ol.timeline { padding-left: 1.5rem; }
+svg text { fill: var(--fg); font-size: 11px; }
+svg .v { fill: var(--accent); }
+svg .u { fill: url(#hatch); stroke: var(--accent2); }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
