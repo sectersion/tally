@@ -179,7 +179,7 @@ test("approval page escapes the device name", async () => {
   });
   const html = await r.text();
   expect(html).not.toContain("<script>");
-  expect(html).toContain("&#60;script&#62;");
+  expect(html).toContain("&lt;script&gt;");
 });
 
 test("device names are 1..64 chars and the body is strict", async () => {

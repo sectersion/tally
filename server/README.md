@@ -50,6 +50,7 @@ One container or VM running `bun run start` behind a TLS-terminating proxy (C7 r
 
 ## Limits
 
+- Every `/v1` response is JSON; pages outside `/v1` are server-rendered HTML.
 - Body 1 MiB, 1000 entries per batch. A body over 2 MiB is rejected by Bun itself with an empty-body 413; the JSON `body_too_large` applies between 1 and 2 MiB.
 - 120 requests/min per token (burst 30), single instance (in-process limiter).
 - Failed auth is limited per client ip; behind a proxy all clients share the proxy's address.

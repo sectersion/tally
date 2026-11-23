@@ -277,7 +277,7 @@ test("settings page escapes repo names; connect/install/setup redirects", async 
   const html = await page.text();
   expect(page.status).toBe(200);
   expect(html).not.toContain("<script>");
-  expect(html).toContain("&#60;script&#62;");
+  expect(html).toContain("&lt;script&gt;");
   const inst = await fetch(`${base}/github/install`, {
     redirect: "manual",
     headers: { cookie: u.cookie },

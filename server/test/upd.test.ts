@@ -187,7 +187,7 @@ test("settings page lists matches escaped, with Link; linked shows Unlink", asyn
     (await fetch(`${base}${p.path}/settings`, { headers: { cookie: u.cookie } })).text();
   const html = await get();
   expect(html).toContain(
-    "Found in Unified Projects DB: &#60;b&#62;Prog&#60;/b&#62;, approved 2026-09-28",
+    "Found in Unified Projects DB: &lt;b&gt;Prog&lt;/b&gt;, approved 2026-09-28",
   );
   expect(html).not.toContain("<b>Prog");
   expect(html).toContain(`action="${p.path}/upd-link"`);

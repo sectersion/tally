@@ -14,6 +14,7 @@ import {
   verifySignature,
 } from "./github.ts";
 import { authorizeUrl, exchange } from "./hca.ts";
+import { html, notFound, page, type Safe } from "./html.ts";
 import {
   appendEntries,
   badge,
@@ -62,22 +63,7 @@ const redirect = (to: string, setCookies: string[] = []) => {
   return new Response(null, { status: 303, headers });
 };
 
-// Local until Task 8's shared html helper lands; every interpolated value goes through esc().
-const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
-const page = (status: number, body: string) =>
-  new Response(
-    `<!doctype html><meta charset="utf-8"><title>Link device</title>${body.startsWith("<") ? body : `<p>${esc(body)}</p>`}`,
-    {
-      status,
-      headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
-    },
-  );
-
-const html = (status: number, title: string, body: string) =>
-  new Response(`<!doctype html><meta charset="utf-8"><title>${esc(title)}</title>${body}`, {
-    status,
-    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
-  });
+const STATIC = new Set(["style.css", "live.js", "review.js"]);
 
 /** Same-site paths only. Printable ASCII: browsers strip tabs/newlines from URLs, so "/\t/evil" would become "//evil". */
 const safeReturn = (rt: string | null) => (rt && /^\/(?![/\\])[\x21-\x7e]*$/.test(rt) ? rt : "/");
@@ -179,6 +165,20 @@ export function createServer(deps: Deps) {
     // and readJson answers the JSON 413 for everything in between (Content-Length is checked first).
     maxRequestBodySize: 2 * MAX_BODY_BYTES,
     routes: {
+      "/static/:file": {
+        GET: async (req) => {
+          const f = req.params.file;
+          if (!STATIC.has(f)) return notFound();
+          const file = Bun.file(new URL(`../static/${f}`, import.meta.url));
+          if (!(await file.exists())) return notFound();
+          return new Response(file, {
+            headers: {
+              "cache-control": "public, max-age=3600",
+              "x-content-type-options": "nosniff",
+            },
+          });
+        },
+      },
       "/healthz": { GET: () => Response.json({ ok: true }) },
       "/v1/ledger/:project/entries": {
         POST: handle("/v1/ledger/:project/entries", async (req, server) => {
@@ -315,13 +315,19 @@ export function createServer(deps: Deps) {
           const s = await requireUser(sql, req);
           const code = new URL(req.url).searchParams.get("code") ?? "";
           const name = await pendingDevice(sql, code);
-          if (name === null) return page(400, "This code is no longer valid");
-          const c = esc(code.trim().toUpperCase());
+          const viewer = { handle: null, csrf: s.csrf };
+          if (name === null)
+            return page("Link device", html`<p>This code is no longer valid</p>`, {
+              status: 400,
+              viewer,
+            });
+          const c = code.trim().toUpperCase();
           return page(
-            200,
-            `<p>Link device '${esc(name)}' to your Tally account? Check that this code matches your terminal: <strong>${c}</strong></p>
-<form method="post" action="/device"><input type="hidden" name="csrf" value="${esc(s.csrf)}"><input type="hidden" name="user_code" value="${c}">
+            "Link device",
+            html`<p>Link device '${name}' to your Tally account? Check that this code matches your terminal: <strong>${c}</strong></p>
+<form method="post" action="/device"><input type="hidden" name="csrf" value="${s.csrf}"><input type="hidden" name="user_code" value="${c}">
 <button name="decision" value="approve">Approve</button> <button name="decision" value="deny">Deny</button></form>`,
+            { viewer },
           );
         }),
         POST: handle("/device", async (req) => {
@@ -330,9 +336,17 @@ export function createServer(deps: Deps) {
           requireCsrf(cfg, req, s, form);
           const d = form.get("decision");
           if (d !== "approve" && d !== "deny") throw new HttpError(400, { error: "bad_decision" });
+          const viewer = { handle: null, csrf: s.csrf };
           if (!(await decide(sql, String(form.get("user_code") ?? ""), s.userId, d === "approve")))
-            return page(400, "This code is no longer valid");
-          return page(200, d === "approve" ? "Device linked. Return to your terminal." : "Denied.");
+            return page("Link device", html`<p>This code is no longer valid</p>`, {
+              status: 400,
+              viewer,
+            });
+          return page(
+            "Link device",
+            html`<p>${d === "approve" ? "Device linked. Return to your terminal." : "Denied."}</p>`,
+            { viewer },
+          );
         }),
       },
       "/settings/tokens/:id/revoke": {
@@ -534,49 +548,47 @@ export function createServer(deps: Deps) {
           const linked = await sql`select r.id, r.full_name from project_repos l
             join github_repos r on r.id = l.github_repo_id
             where l.project_id = ${p.id} and l.unlinked_at is null`;
-          const csrf = `<input type="hidden" name="csrf" value="${esc(s.csrf)}">`;
-          const action = `/p/${esc(p.public_name)}`;
-          let repos = "";
+          const csrf = html`<input type="hidden" name="csrf" value="${s.csrf}">`;
+          const action = `/p/${p.public_name}`;
+          const back = `${action}/settings`;
+          let repos: Safe;
           if (linked.length) {
-            repos = `<p>Linked: ${esc(linked[0].full_name)}</p>
+            repos = html`<p>Linked: ${linked[0].full_name}</p>
 <form method="post" action="${action}/unlink-repo">${csrf}<button>Unlink</button></form>`;
           } else if (!(await userToken(sql, s.userId))) {
-            repos = `<p><a href="/github/connect?return_to=${encodeURIComponent(`/p/${p.public_name}/settings`)}">Connect GitHub</a> to link a repo (<a href="/github/install">install the App</a> first).</p>`;
+            repos = html`<p><a href="/github/connect?return_to=${encodeURIComponent(back)}">Connect GitHub</a> to link a repo (<a href="/github/install">install the App</a> first).</p>`;
           } else {
-            const list = await withGhToken(s.userId, `/p/${p.public_name}/settings`, () =>
-              userRepos(sql, s.userId, fetchFn),
-            );
-            repos = `<ul>${list
-              .map(
-                (r) =>
-                  `<li>${esc(r.full_name)} <form method="post" action="${action}/link-repo" style="display:inline">${csrf}<input type="hidden" name="repo_id" value="${r.id}"><button>Link</button></form></li>`,
-              )
-              .join("")}</ul><p><a href="/github/install">Install the App on more repos</a></p>`;
+            const list = await withGhToken(s.userId, back, () => userRepos(sql, s.userId, fetchFn));
+            repos = html`<ul>${list.map(
+              (r) =>
+                html`<li>${r.full_name} <form class="inline" method="post" action="${action}/link-repo">${csrf}<input type="hidden" name="repo_id" value="${r.id}"><button>Link</button></form></li>`,
+            )}</ul><p><a href="/github/install">Install the App on more repos</a></p>`;
           }
-          let upd = "";
+          let upd = html``;
           if (linked.length) {
             const [{ upd_record_id: cur }] =
               await sql`select upd_record_id from projects where id = ${p.id}`;
-            if (cur)
-              upd += `<p>${esc((await updLabel(cur, linked[0].full_name, fetchFn)) ?? "")}</p>
-<form method="post" action="${action}/upd-unlink">${csrf}<button>Unlink</button></form>`;
+            const curRow = cur
+              ? html`<p>${(await updLabel(cur, linked[0].full_name, fetchFn)) ?? ""}</p>
+<form method="post" action="${action}/upd-unlink">${csrf}<button>Unlink</button></form>`
+              : html``;
+            let found: Safe;
             try {
-              const found = await findUpdEntries(linked[0].full_name, fetchFn);
-              upd += `<ul>${found
+              found = html`<ul>${(await findUpdEntries(linked[0].full_name, fetchFn))
                 .filter((e) => e.id !== cur)
                 .map(
                   (e) =>
-                    `<li>Found in Unified Projects DB: ${esc(e.ysws)}, approved ${e.approved_at === null ? "(not yet)" : esc(new Date(e.approved_at * 1000).toISOString().slice(0, 10))} <form method="post" action="${action}/upd-link" style="display:inline">${csrf}<input type="hidden" name="record_id" value="${esc(e.id)}"><button>Link</button></form></li>`,
-                )
-                .join("")}</ul>`;
+                    html`<li>Found in Unified Projects DB: ${e.ysws}, approved ${e.approved_at === null ? "(not yet)" : new Date(e.approved_at * 1000).toISOString().slice(0, 10)} <form class="inline" method="post" action="${action}/upd-link">${csrf}<input type="hidden" name="record_id" value="${e.id}"><button>Link</button></form></li>`,
+                )}</ul>`;
             } catch {
-              upd += "<p>Unified Projects DB is unavailable right now.</p>";
+              found = html`<p>Unified Projects DB is unavailable right now.</p>`;
             }
+            upd = html`${curRow}${found}`;
           }
-          return html(
-            200,
+          return page(
             p.public_name,
-            `<h1>${esc(p.public_name)}</h1><p>server id: ${esc(p.id)}</p><pre>${esc(`tally project link <path> --server-id ${p.id}`)}</pre>${repos}${upd}`,
+            html`<h1>${p.public_name}</h1><p>server id: ${p.id}</p><pre>${`tally project link <path> --server-id ${p.id}`}</pre>${repos}${upd}`,
+            { viewer: { handle: null, csrf: s.csrf } },
           );
         }),
       },
