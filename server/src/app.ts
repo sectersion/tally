@@ -30,15 +30,18 @@ import {
   recordCommit,
   verifiedSeconds,
 } from "./ledger.ts";
+import { createLive, type Live } from "./live.ts";
 import { log } from "./log.ts";
 import {
   deleteAccount,
   homePage,
   profilePage,
+  projectFragment,
   projectPage,
   saveProfile,
   settingsPage,
   viewerOf,
+  visibleProject,
 } from "./pages.ts";
 import {
   bumpChange,
@@ -79,6 +82,8 @@ type Deps = {
   cfg: Config;
   /** GitHub calls; tests stub it. */
   fetchFn?: typeof fetch;
+  /** SSE hub; main.ts passes its own so SIGTERM can close every stream. */
+  live?: Live;
 };
 
 const b64url = (b: ArrayBuffer | Uint8Array) => Buffer.from(b as Uint8Array).toString("base64url");
@@ -134,6 +139,7 @@ export function createServer(deps: Deps) {
   const { sql } = deps;
   const { cfg } = deps;
   const fetchFn = deps.fetchFn ?? fetch;
+  const live = deps.live ?? createLive(sql);
   const ruleset = deps.ruleset ?? rulesetVersion();
   const limiter = deps.limiter ?? createLimiter();
   const deviceLimiter = deps.deviceLimiter ?? createLimiter(10, 10); // /v1/device/code: 10 per minute per ip
@@ -317,6 +323,26 @@ export function createServer(deps: Deps) {
             fetchFn,
           ),
         ),
+      },
+      "/p/:owner/:name/fragment": {
+        GET: handle("/p/:owner/:name/fragment", async (req) =>
+          projectFragment(
+            sql,
+            cfg,
+            req.params.owner,
+            req.params.name,
+            await getSession(sql, req),
+            fetchFn,
+          ),
+        ),
+      },
+      "/p/:owner/:name/events": {
+        GET: handle("/p/:owner/:name/events", async (req, server) => {
+          const { owner, name } = req.params;
+          const p = await visibleProject(sql, owner, name, await getSession(sql, req));
+          if (!p) return notFound();
+          return live.stream(req, server, p.id, ip(server, req));
+        }),
       },
       "/settings": {
         GET: handle("/settings", async (req) =>

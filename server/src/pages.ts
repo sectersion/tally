@@ -1,6 +1,7 @@
 import type { SQL } from "bun";
 import type { Config } from "./config.ts";
 import {
+  CSP,
   formatHours,
   formatMinutes,
   html,
@@ -95,20 +96,41 @@ const FLAGS = {
   pushed_late: "pushed more than 7 days after its claimed time",
 } as const;
 
-export async function projectPage(
+type ProjectRow = {
+  id: string;
+  public_name: string;
+  public: boolean;
+  owner_id: string;
+  upd_record_id: string | null;
+  change_seq: string;
+  handle: string | null;
+  profile_public: boolean;
+};
+
+/** The project at /p/:owner/:name if this viewer may see it (public, or theirs); else null. */
+export async function visibleProject(
   sql: SQL,
-  cfg: Pick<Config, "publicBaseUrl">,
   owner: string,
   name: string,
   s: Session | null,
-  fetchFn: typeof fetch,
-): Promise<Response> {
+): Promise<ProjectRow | null> {
   const [p] = await sql`select p.id, p.public_name, p.public, p.owner_id, p.upd_record_id,
       p.change_seq, u.handle, u.profile_public
     from projects p join users u on u.id = p.owner_id
     where lower(p.public_name) = lower(${`${owner}/${name}`})`;
   const mine = !!s && p?.owner_id === s.userId;
-  if (!p || (!p.public && !mine)) return notFound();
+  return !p || (!p.public && !mine) ? null : (p as ProjectRow);
+}
+
+/** The project page's <main> content: the one renderer for the page and its live fragment. */
+async function projectMain(
+  sql: SQL,
+  cfg: Pick<Config, "publicBaseUrl">,
+  p: ProjectRow,
+  s: Session | null,
+  fetchFn: typeof fetch,
+): Promise<Safe> {
+  const mine = !!s && p.owner_id === s.userId;
   const [hours, daily, windows, [repo], revoked, [head]] = await Promise.all([
     projectHours(sql, p.id),
     projectDaily(sql, p.id, 90),
@@ -151,9 +173,9 @@ export async function projectPage(
       )}</tbody></table>`
     : html`<p>No pushes witnessed yet</p>`;
 
-  const body = html`<h1>${p.public_name}</h1>${
+  return html`<h1>${p.public_name}</h1>${
     !p.public ? html`<p role="note">This project is private: only you can see this page.</p>` : none
-  }${numbers}${p.profile_public ? html`<p>Owner: <a href="/u/${p.handle}">${p.handle}</a></p>` : none}${
+  }${numbers}${p.profile_public && p.handle ? html`<p>Owner: <a href="/u/${p.handle}">${p.handle}</a></p>` : none}${
     repo
       ? html`<p>GitHub: <a href="https://github.com/${repo.full_name}">${repo.full_name}</a>${was && was !== repo.full_name ? ` (was ${was})` : ""}</p>`
       : none
@@ -165,7 +187,41 @@ export async function projectPage(
 <h2>Witnessed pushes</h2><p>Each row shows the verified time recorded after the previous witnessed push and up to the moment the server received this one: it anchors the clock to the push and says nothing about effort. Times marked claimed come from the push and are not checked.</p>${pushes}
 <p>Ledger head last committed ${head?.t ? utc(head.t) : "never"}</p>
 <h2>Badge</h2><pre>${`![tracked with Tally](${cfg.publicBaseUrl}/badge/${p.public_name}.svg)`}</pre>`;
+}
+
+export async function projectPage(
+  sql: SQL,
+  cfg: Pick<Config, "publicBaseUrl">,
+  owner: string,
+  name: string,
+  s: Session | null,
+  fetchFn: typeof fetch,
+): Promise<Response> {
+  const p = await visibleProject(sql, owner, name, s);
+  if (!p) return notFound();
+  const body = await projectMain(sql, cfg, p, s, fetchFn);
   return page(p.public_name, body, { live: p.id, viewer: viewerOf(s) });
+}
+
+/** GET /p/:owner/:name/fragment: the page's <main> content for live.js, never cached. */
+export async function projectFragment(
+  sql: SQL,
+  cfg: Pick<Config, "publicBaseUrl">,
+  owner: string,
+  name: string,
+  s: Session | null,
+  fetchFn: typeof fetch,
+): Promise<Response> {
+  const p = await visibleProject(sql, owner, name, s);
+  if (!p) return notFound();
+  return new Response((await projectMain(sql, cfg, p, s, fetchFn)).__html, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "content-security-policy": CSP,
+      "x-content-type-options": "nosniff",
+      "cache-control": "no-store",
+    },
+  });
 }
 
 const DELETE_PHRASE = "delete my account";

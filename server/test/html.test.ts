@@ -71,11 +71,14 @@ test("static serves only the allowlist", async () => {
   expect(css.headers.get("cache-control")).toBe("public, max-age=3600");
   expect(css.headers.get("content-type")).toContain("text/css");
   await css.text();
+  const js = await fetch(`${base}/static/live.js`);
+  expect(js.status).toBe(200);
+  expect(js.headers.get("content-type")).toContain("javascript");
+  expect((await js.text()).split("\n").length).toBeLessThan(40);
   for (const p of [
     "/static/../package.json",
     "/static/package.json",
     "/static/%2e%2e/package.json",
-    "/static/live.js",
     "/static/review.js",
     "/static/",
   ]) {
@@ -99,6 +102,7 @@ test("no HTML route emits inline style= or on*= attributes", async () => {
   for (const p of [
     `/p/${handle}/p/settings`,
     `/p/${handle}/p`,
+    `/p/${handle}/p/fragment`,
     `/u/${handle}`,
     "/",
     "/settings",

@@ -1,4 +1,4 @@
-//! Prints the server test fixture: 16 six-entry chains, one per project `acme/demo-N`, plus two
+//! Prints the server test fixture: 18 six-entry chains, one per project `acme/demo-N`, plus two
 //! divergent chains for the upload tests: `acme/demo-7-alt` (another genesis chain for
 //! `acme/demo-7`), `acme/demo-4-alt` (shares entries 0..3 with `acme/demo-4`, then diverges) and
 //! `acme/demo-3-2099` (demo-3's entries rehashed at ruleset `2099.01-0`) and `acme/demo-14-big`
@@ -27,7 +27,7 @@ fn prompts(project: &str, secs: &[i64]) -> Vec<Event> {
 
 fn main() {
     let mut out = BTreeMap::new();
-    for n in 1..=16 {
+    for n in 1..=18 {
         let name = format!("acme/demo-{n}");
         let events = prompts(&name, &[0, 600, 1200, 1800, 2400, 3000]);
         out.insert(name, chain(&score(&events), GENESIS_HASH));

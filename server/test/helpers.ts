@@ -20,6 +20,7 @@ import fixture from "./fixtures/chain.json";
 // | 14-big     | entries: 3e9 verified_s |
 // | 15         | projects: change_seq bump |
 // | 16         | projects: hours vs chains |
+// | 17, 18     | live: upload, second process |
 
 export const chains = fixture as unknown as Record<string, LedgerEntry[]>;
 
