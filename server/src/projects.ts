@@ -1,4 +1,5 @@
 import type { SQL } from "bun";
+import { type AccessibleRepo, linkRepoTx } from "./github.ts";
 
 const NAME = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/;
 const HANDLE = /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/;
@@ -8,18 +9,31 @@ const RESERVED = new Set(
 
 export const validName = (name: string): boolean => NAME.test(name);
 
-const unique = (e: unknown): boolean => {
+export const unique = (e: unknown): boolean => {
   if (typeof e !== "object" || e === null) return false;
   const x = e as { errno?: unknown; code?: unknown };
   return x.errno === "23505" || x.code === "23505";
 };
 
-/** The first segment must be the user's handle (or, from Task 5, a GitHub repo they proved access to). */
-export async function nameAllowed(sql: SQL, userId: string, name: string): Promise<boolean> {
+const repoNamed = (repos: AccessibleRepo[], name: string) =>
+  repos.find((r) => r.full_name.toLowerCase() === name.toLowerCase());
+
+const constraint = (e: unknown): string | undefined =>
+  (e as { constraint?: string } | null)?.constraint;
+
+/**
+ * The first segment must be the user's handle, or the name must equal (case-insensitively) the
+ * full_name of a GitHub repo in `repos`, which the caller fetched live for this user.
+ */
+export async function nameAllowed(
+  sql: SQL,
+  userId: string,
+  name: string,
+  repos: AccessibleRepo[] = [],
+): Promise<boolean> {
   const [u] = await sql`select handle from users where id = ${userId}`;
   const owner = (name.split("/")[0] ?? "").toLowerCase();
-  // TODO(task 5): or name equals the full_name of a GitHub repo the user has proved access to.
-  return !!u?.handle && u.handle === owner;
+  return (!!u?.handle && u.handle === owner) || !!repoNamed(repos, name);
 }
 
 /** A handle can be set once: renaming would orphan `handle/` project names. */
@@ -45,15 +59,28 @@ export async function createProject(
   sql: SQL,
   userId: string,
   name: string,
-): Promise<{ id: string } | { error: "bad_name" | "not_allowed" | "taken" }> {
+  /** Live GitHub lookup for owner/repo names; only called when the handle rule does not apply. */
+  listRepos?: () => Promise<AccessibleRepo[]>,
+): Promise<{ id: string } | { error: "bad_name" | "not_allowed" | "taken" | "repo_linked" }> {
   if (!validName(name)) return { error: "bad_name" };
-  if (!(await nameAllowed(sql, userId, name))) return { error: "not_allowed" };
+  let repo: AccessibleRepo | undefined;
+  if (!(await nameAllowed(sql, userId, name))) {
+    repo = listRepos ? repoNamed(await listRepos(), name) : undefined;
+    if (!repo) return { error: "not_allowed" };
+  }
   const id = crypto.randomUUID();
   try {
-    await sql`insert into projects (id, public_name, owner_id) values (${id}, ${name}, ${userId})`;
+    await sql.begin(async (tx) => {
+      await tx`insert into projects (id, public_name, owner_id) values (${id}, ${name}, ${userId})`;
+      if (repo) {
+        await linkRepoTx(tx, id, repo);
+        await bumpChange(tx, id);
+      }
+    });
     return { id };
   } catch (e) {
-    if (unique(e)) return { error: "taken" };
+    if (unique(e))
+      return { error: constraint(e) === "project_repos_one_live" ? "repo_linked" : "taken" };
     throw e;
   }
 }

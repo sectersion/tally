@@ -227,6 +227,6 @@ test("project settings: owner toggles public, others get 404", async () => {
   expect(page.status).toBe(200);
   const text = await page.text();
   expect(text).toContain(id);
-  expect(text).toContain(`tally project link <path> --server-id ${id}`);
+  expect(text).toContain(`tally project link &#60;path&#62; --server-id ${id}`);
   expect((await get(other)).status).toBe(404);
 });

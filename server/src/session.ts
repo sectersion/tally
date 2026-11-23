@@ -21,6 +21,12 @@ export const oauthCookie = (cfg: Base, state: string) =>
   `${OAUTH_COOKIE}=${state}; ${attrs(cfg, 600, "/auth/callback")}`;
 export const clearOauthCookie = (cfg: Base) =>
   `${OAUTH_COOKIE}=; ${attrs(cfg, 0, "/auth/callback")}`;
+/** The same binding for the GitHub connect flow, under its own name and path. */
+export const GH_OAUTH_COOKIE = "tally_gh_oauth";
+export const ghOauthCookie = (cfg: Base, state: string) =>
+  `${GH_OAUTH_COOKIE}=${state}; ${attrs(cfg, 600, "/github/callback")}`;
+export const clearGhOauthCookie = (cfg: Base) =>
+  `${GH_OAUTH_COOKIE}=; ${attrs(cfg, 0, "/github/callback")}`;
 
 export function cookieValue(req: Request, name: string): string | null {
   return (

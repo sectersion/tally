@@ -3,6 +3,14 @@ import { hashToken, newToken, requireToken } from "./auth.ts";
 import { type Config, MAX_BATCH, MAX_BODY_BYTES } from "./config";
 import { createDeviceCode, decide, pendingDevice, pollDeviceToken } from "./device.ts";
 import { HttpError, json, parse, readJson } from "./errors.ts";
+import {
+  accessibleRepos,
+  exchangeCode,
+  authorizeUrl as ghAuthorizeUrl,
+  linkRepoTx,
+  userRepos,
+  userToken,
+} from "./github.ts";
 import { authorizeUrl, exchange } from "./hca.ts";
 import {
   appendEntries,
@@ -13,14 +21,17 @@ import {
   verifiedSeconds,
 } from "./ledger.ts";
 import { log } from "./log.ts";
-import { createProject, projectHours, setHandle } from "./projects.ts";
+import { bumpChange, createProject, projectHours, setHandle, unique } from "./projects.ts";
 import { createLimiter, type Limiter } from "./ratelimit.ts";
 import { CommitBody, DeviceCodeBody, DeviceTokenBody, UploadBody } from "./schema.ts";
 import {
   clearCookie,
+  clearGhOauthCookie,
   clearOauthCookie,
   cookieValue,
   createSession,
+  GH_OAUTH_COOKIE,
+  ghOauthCookie,
   OAUTH_COOKIE,
   oauthCookie,
   requireCsrf,
@@ -37,6 +48,8 @@ type Deps = {
   limiter?: Limiter;
   deviceLimiter?: Limiter;
   cfg: Config;
+  /** GitHub calls; tests stub it. */
+  fetchFn?: typeof fetch;
 };
 
 const b64url = (b: ArrayBuffer | Uint8Array) => Buffer.from(b as Uint8Array).toString("base64url");
@@ -56,6 +69,15 @@ const page = (status: number, body: string) =>
       headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
     },
   );
+
+const html = (status: number, title: string, body: string) =>
+  new Response(`<!doctype html><meta charset="utf-8"><title>${esc(title)}</title>${body}`, {
+    status,
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+  });
+
+/** Same-site paths only. Printable ASCII: browsers strip tabs/newlines from URLs, so "/\t/evil" would become "//evil". */
+const safeReturn = (rt: string | null) => (rt && /^\/(?![/\\])[\x21-\x7e]*$/.test(rt) ? rt : "/");
 
 type Srv = Server<undefined>;
 const ip = (server: Srv, req: Request) => `ip:${server.requestIP(req)?.address ?? "unknown"}`;
@@ -97,6 +119,7 @@ function handle<P extends string>(
 export function createServer(deps: Deps) {
   const { sql } = deps;
   const { cfg } = deps;
+  const fetchFn = deps.fetchFn ?? fetch;
   const ruleset = deps.ruleset ?? rulesetVersion();
   const limiter = deps.limiter ?? createLimiter();
   const deviceLimiter = deps.deviceLimiter ?? createLimiter(10, 10); // /v1/device/code: 10 per minute per ip
@@ -174,9 +197,7 @@ export function createServer(deps: Deps) {
       "/auth/login": {
         GET: handle("/auth/login", async (req, server) => {
           limit(ip(server, req));
-          const rt = new URL(req.url).searchParams.get("return_to") ?? "/";
-          // Printable ASCII only: browsers strip tabs/newlines from URLs, so "/\t/evil" would become "//evil".
-          const returnTo = /^\/(?![/\\])[\x21-\x7e]*$/.test(rt) ? rt : "/";
+          const returnTo = safeReturn(new URL(req.url).searchParams.get("return_to"));
           const state = newToken();
           const nonce = newToken();
           const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
@@ -307,8 +328,113 @@ export function createServer(deps: Deps) {
           const form = await formOf(req);
           requireCsrf(cfg, req, s, form);
           const name = String(form.get("name") ?? "");
-          const r = await createProject(sql, s.userId, name);
+          const r = await createProject(sql, s.userId, name, () =>
+            userRepos(sql, s.userId, fetchFn),
+          );
           return redirect("error" in r ? `/settings?error=${r.error}` : `/p/${name}`);
+        }),
+      },
+      "/github/connect": {
+        GET: handle("/github/connect", async (req, server) => {
+          const s = await requireUser(sql, req);
+          limit(ip(server, req));
+          const state = newToken();
+          const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
+          const challenge = b64url(
+            await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)),
+          );
+          await sql`delete from oauth_states where expires_at < now()`;
+          await sql`insert into oauth_states (state_hash, verifier, nonce, return_to, expires_at)
+            values (${hashToken(state)}, ${verifier}, ${s.userId}, ${safeReturn(new URL(req.url).searchParams.get("return_to"))}, now() + interval '10 minutes')`;
+          return redirect(ghAuthorizeUrl(cfg, state, challenge), [ghOauthCookie(cfg, state)]);
+        }),
+      },
+      "/github/callback": {
+        GET: handle("/github/callback", async (req, server) => {
+          const s = await requireUser(sql, req);
+          limit(ip(server, req));
+          const q = new URL(req.url).searchParams;
+          const code = q.get("code");
+          const state = q.get("state");
+          if (!code || !state) throw new HttpError(400, { error: "bad_callback" });
+          const bound = cookieValue(req, GH_OAUTH_COOKIE);
+          if (!bound || !same(bound, state)) throw new HttpError(400, { error: "bad_state" });
+          // nonce holds the user who started the flow: a state cannot be completed by someone else.
+          const [st] =
+            await sql`delete from oauth_states where state_hash = ${hashToken(state)} and nonce = ${s.userId} and expires_at > now() returning verifier, return_to`;
+          if (!st) throw new HttpError(400, { error: "bad_state" });
+          let g: Awaited<ReturnType<typeof exchangeCode>>;
+          try {
+            g = await exchangeCode(cfg, code, st.verifier, fetchFn);
+          } catch (e) {
+            log("warn", "github exchange failed", { reason: e instanceof Error ? e.message : "?" });
+            throw new HttpError(502, { error: "github_failed" });
+          }
+          await sql.begin(async (tx) => {
+            // One GitHub account maps to one Tally user: the newest proof wins.
+            await tx`delete from github_user_tokens where github_user_id = ${g.githubUserId} and user_id <> ${s.userId}`;
+            await tx`insert into github_user_tokens (user_id, github_user_id, access_token, expires_at)
+              values (${s.userId}, ${g.githubUserId}, ${g.token}, now() + ${`${g.expiresIn} seconds`}::interval)
+              on conflict (user_id) do update set github_user_id = excluded.github_user_id,
+                access_token = excluded.access_token, expires_at = excluded.expires_at`;
+          });
+          return redirect(st.return_to, [clearGhOauthCookie(cfg)]);
+        }),
+      },
+      "/github/setup": {
+        GET: handle("/github/setup", async (req) => {
+          // The query is an untrusted hint: log it, never act on it.
+          log("info", "github setup", {
+            setup_action: (new URL(req.url).searchParams.get("setup_action") ?? "").slice(0, 20),
+          });
+          return redirect("/github/connect");
+        }),
+      },
+      "/github/install": {
+        GET: handle("/github/install", async (req) => {
+          await requireUser(sql, req);
+          return redirect(`https://github.com/apps/${cfg.githubAppSlug}/installations/new`);
+        }),
+      },
+      "/p/:owner/:name/link-repo": {
+        POST: handle("/p/:owner/:name/link-repo", async (req) => {
+          const s = await requireUser(sql, req);
+          const form = await formOf(req);
+          requireCsrf(cfg, req, s, form);
+          const p = await ownedProject(s.userId, req.params.owner, req.params.name);
+          const token = await userToken(sql, s.userId);
+          if (!token) throw new HttpError(303, { error: "github_required" }, "/github/connect");
+          const raw = String(form.get("repo_id") ?? "");
+          // Re-fetched from GitHub: the form only names a candidate.
+          const repo = /^\d{1,15}$/.test(raw)
+            ? (await accessibleRepos(token, fetchFn)).find((r) => r.id === Number(raw))
+            : undefined;
+          if (!repo) throw new HttpError(403, { error: "forbidden" });
+          try {
+            await sql.begin(async (tx) => {
+              await linkRepoTx(tx, p.id, repo);
+              await bumpChange(tx, p.id);
+            });
+          } catch (e) {
+            if (unique(e))
+              throw new HttpError(409, { error: "repo already linked to another project" });
+            throw e;
+          }
+          return redirect(`/p/${p.public_name}/settings`);
+        }),
+      },
+      "/p/:owner/:name/unlink-repo": {
+        POST: handle("/p/:owner/:name/unlink-repo", async (req) => {
+          const s = await requireUser(sql, req);
+          requireCsrf(cfg, req, s, await formOf(req));
+          const p = await ownedProject(s.userId, req.params.owner, req.params.name);
+          // project_repos is state, not evidence: this is its one allowed update.
+          await sql.begin(async (tx) => {
+            const r = await tx`update project_repos set unlinked_at = now()
+              where project_id = ${p.id} and unlinked_at is null returning github_repo_id`;
+            if (r.length) await bumpChange(tx, p.id);
+          });
+          return redirect(`/p/${p.public_name}/settings`);
         }),
       },
       "/p/:owner/:name/settings": {
@@ -320,13 +446,34 @@ export function createServer(deps: Deps) {
           await sql`update projects set public = ${form.get("public") === "on"} where id = ${p.id}`;
           return redirect(`/p/${p.public_name}/settings`);
         }),
-        // Plain text until Task 9 builds the real page; Task 4 adds the device tokens.
+        // Placeholder HTML until Task 9 builds the real page; every value is escaped.
         GET: handle("/p/:owner/:name/settings", async (req) => {
           const s = await requireUser(sql, req);
           const p = await ownedProject(s.userId, req.params.owner, req.params.name);
-          return new Response(
-            `${p.public_name}\nserver id: ${p.id}\ntally project link <path> --server-id ${p.id}\n`,
-            { headers: { "content-type": "text/plain; charset=utf-8" } },
+          const linked = await sql`select r.id, r.full_name from project_repos l
+            join github_repos r on r.id = l.github_repo_id
+            where l.project_id = ${p.id} and l.unlinked_at is null`;
+          const csrf = `<input type="hidden" name="csrf" value="${esc(s.csrf)}">`;
+          const action = `/p/${esc(p.public_name)}`;
+          let repos = "";
+          if (linked.length) {
+            repos = `<p>Linked: ${esc(linked[0].full_name)}</p>
+<form method="post" action="${action}/unlink-repo">${csrf}<button>Unlink</button></form>`;
+          } else if (!(await userToken(sql, s.userId))) {
+            repos = `<p><a href="/github/connect?return_to=${encodeURIComponent(`/p/${p.public_name}/settings`)}">Connect GitHub</a> to link a repo (<a href="/github/install">install the App</a> first).</p>`;
+          } else {
+            const list = await userRepos(sql, s.userId, fetchFn);
+            repos = `<ul>${list
+              .map(
+                (r) =>
+                  `<li>${esc(r.full_name)} <form method="post" action="${action}/link-repo" style="display:inline">${csrf}<input type="hidden" name="repo_id" value="${r.id}"><button>Link</button></form></li>`,
+              )
+              .join("")}</ul><p><a href="/github/install">Install the App on more repos</a></p>`;
+          }
+          return html(
+            200,
+            p.public_name,
+            `<h1>${esc(p.public_name)}</h1><p>server id: ${esc(p.id)}</p><pre>${esc(`tally project link <path> --server-id ${p.id}`)}</pre>${repos}`,
           );
         }),
       },
