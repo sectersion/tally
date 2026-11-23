@@ -496,3 +496,115 @@ fn commit_heads_skips_projects_without_a_token() {
     assert!(matches!(&out[..], [(p, Ok(()))] if p == "owner/repo"), "{out:?}");
     assert_eq!(last["srv_1"], local(&s)[0].hash);
 }
+
+// ---- privacy guard (Task 8) ----
+// Enforces the first Global Constraint: only ledger entries and head hashes leave the machine.
+// When a later plan adds a field to a request, change this test on purpose.
+#[test]
+fn nothing_but_ledger_entries_and_head_hashes_leaves_the_machine() {
+    use std::collections::BTreeSet;
+    use tally_scoring::LedgerEntry;
+    const TOKEN: &str = "tok_SECRET_beyond_header";
+    const ID1: &str = "LOCALID_one_0123456789abcdef";
+    const ID2: &str = "LOCALID_two_0123456789abcdef";
+
+    let f = FakeServer::start(TOKEN);
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("config.toml"), format!("[sync]\nenabled = true\nserver = '{}'\n", f.url)).unwrap();
+    let bin = |args: &[&str], stdin: Option<&str>| {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut c = Command::new(env!("CARGO_BIN_EXE_tally"))
+            .arg("--home").arg(&home).args(args)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let mut si = c.stdin.take().unwrap();
+        if let Some(s) = stdin {
+            si.write_all(s.as_bytes()).unwrap();
+        }
+        drop(si);
+        let o = c.wait_with_output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    };
+    bin(&["login", "--server-id", "srv_1"], Some(&format!("{TOKEN}\n")));
+
+    let repo = t.path().join("PRIVATE_PATH_MARKER").join("repo");
+    let other = t.path().join("OTHER_PROJECT_MARKER");
+    for d in [&repo, &other] {
+        std::fs::create_dir_all(d.join(".git")).unwrap();
+    }
+    let mut s = Store::open(&home.join("tally.db")).unwrap();
+    s.register_project(ID1, repo.to_str().unwrap(), Some("owner/repo")).unwrap();
+    s.set_server_id(ID1, "srv_1").unwrap();
+    s.register_project(ID2, other.to_str().unwrap(), None).unwrap();
+
+    // prompt, edit and idle for both projects; batch `b` starts well past the previous watermark
+    let batch = |s: &mut Store, b: i64| {
+        let base = b * 10_000_000;
+        let mut evs = vec![];
+        for (n, id) in [(0, ID1), (1, ID2)] {
+            let ts = base + n * 1_000;
+            let mut edit = prompt(&format!("u{b}{n}"), ts + 10_000, id);
+            edit.kind = Kind::UserEdit { file_hash: "ab".repeat(32), lines_changed: 3 };
+            let mut idle = prompt(&format!("i{b}{n}"), ts + 20_000, id);
+            idle.kind = Kind::Idle { end_ts: ts + 1_000_000 };
+            evs.extend([prompt(&format!("p{b}{n}"), ts, id), edit, idle]);
+        }
+        s.append_events(&evs).unwrap();
+        s.set_watermark("src", base + 5_000_000).unwrap();
+        finalize(s).unwrap();
+        tally_daemon::published::sync(s, true).unwrap();
+    };
+    batch(&mut s, 0);
+    let mut tk = SyncTicker::new();
+    assert!(tk.tick(&mut s, &f.url, &home, 0));
+    batch(&mut s, 1);
+    assert!(tk.tick(&mut s, &f.url, &home, COMMIT_INTERVAL_MS));
+    batch(&mut s, 2);
+    drop(s);
+    let before = upload_sizes(&f).len();
+    bin(&["sync"], None);
+    assert!(upload_sizes(&f).len() > before, "the binary should have uploaded the last batch");
+
+    let reqs = f.requests();
+    let entry_keys: BTreeSet<&str> = ["v", "ruleset", "action_id", "ts", "project", "kind", "verified_s",
+        "unverified_s", "reasons", "features", "prev_hash", "hash"].into();
+    let allowed: BTreeSet<&str> = ["host", "user-agent", "authorization", "content-type", "content-length",
+        "accept", "accept-encoding", "connection"].into();
+    let keys = |v: &serde_json::Value| -> BTreeSet<String> { v.as_object().unwrap().keys().cloned().collect() };
+    let set = |a: &[&str]| -> BTreeSet<String> { a.iter().map(|s| s.to_string()).collect() };
+    for r in &reqs {
+        let everything = format!("{} {} {:?} {}", r.method, r.path, r.headers, r.body);
+        // the token is only ever the authorization header value
+        let without_auth = format!("{} {} {:?} {}", r.method, r.path,
+            r.headers.iter().filter(|(k, _)| k != "authorization").collect::<Vec<_>>(), r.body);
+        assert!(!without_auth.contains("tok_SECRET"), "token leaked outside authorization: {without_auth}");
+        assert!(r.headers.iter().any(|(k, v)| k == "authorization" && v == &format!("Bearer {TOKEN}")));
+        for secret in ["PRIVATE_PATH_MARKER", "OTHER_PROJECT_MARKER", "LOCALID_"] {
+            assert!(!everything.contains(secret), "{secret} leaked in {everything}");
+        }
+        let names: BTreeSet<&str> = r.headers.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(names.is_subset(&allowed), "{names:?}");
+        assert!(r.headers.iter().any(|(k, v)| k == "user-agent" && v.starts_with("tally/") && !v.contains(' ')));
+        match (r.method.as_str(), r.path.rsplit('/').next().unwrap().split('?').next().unwrap()) {
+            ("GET", "head") => assert!(r.body.is_empty()),
+            ("POST", "entries") => {
+                let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+                assert_eq!(keys(&v), set(&["entries", "prev_hash"]));
+                for e in v["entries"].as_array().unwrap() {
+                    assert_eq!(keys(e), entry_keys.iter().map(|s| s.to_string()).collect());
+                    assert_eq!(e["project"], "owner/repo"); // public name, never the server id
+                    let _: LedgerEntry = serde_json::from_value(e.clone()).unwrap();
+                }
+            }
+            ("POST", "commit") => {
+                let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+                assert_eq!(keys(&v), set(&["hash", "ts"]));
+                assert_eq!(v["hash"].as_str().unwrap().len(), 64);
+            }
+            other => panic!("unexpected request {other:?}"),
+        }
+    }
+    assert!(reqs.iter().any(|r| r.path.contains("/entries")) && reqs.iter().any(|r| r.path.contains("/commit")));
+}
