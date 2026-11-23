@@ -44,7 +44,11 @@ pub trait Source {
     /// Returns new events plus an optional watermark: a promise that this source will never again
     /// emit an event with `ts <=` the watermark. The runner raises the horizon to the minimum
     /// watermark across sources, and claims under it can finalize. `None` leaves the promise as is.
-    /// Cursor changes made through `state` are persisted only if `poll` returns `Ok`.
+    /// A returned watermark must be below the start of every open `agent_busy` span, and below the
+    /// timestamp of every line not yet read in full (a partial last line included).
+    /// Cursor changes made through `state` are persisted only if `poll` returns `Ok` and the runner
+    /// then succeeds in `append_events` (a late batch is the exception: state is still saved) and
+    /// in `set_watermark`; on any other store failure nothing is persisted and the next tick retries.
     fn poll(&mut self, now_ms: i64, state: &mut dyn SourceState) -> Result<Poll, SourceError>;
 }
 
