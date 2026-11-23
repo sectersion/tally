@@ -45,6 +45,7 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
         // Each retry removes the one event the store named, so known ids at or before finalized_through
         // still count as duplicates, not as dropped.
         // ponytail: one retry per late event (O(late x batch)); filter by finalized_through + id lookup if batches of late events get big.
+        let coverage = src.take_coverage();
         let (mut events, mut dropped) = (p.events, 0);
         let appended = loop {
             match store.append_events(&events) {
@@ -67,6 +68,11 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
                 r.errors.push(format!("source {id}: {e}"));
                 continue;
             }
+        }
+        // Coverage goes in before the watermark: finalize must never see a horizon past stored coverage.
+        if let Err(e) = store.extend_coverage(&coverage) {
+            r.errors.push(format!("source {id}: {e}"));
+            continue;
         }
         if let Some(w) = p.watermark {
             if let Err(e) = store.set_watermark(&id, w) {
@@ -93,6 +99,9 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
 /// The sources for this config. Claude Code reads `projects_dir`, default `~/.claude/projects`.
 pub fn sources(cfg: &Config, _home: &Path, _store: &Store) -> Vec<Box<dyn Source>> {
     let mut v: Vec<Box<dyn Source>> = vec![];
+    if cfg.presence.enabled {
+        v.push(Box::new(crate::presence::PresenceSource::new(crate::presence::default_platform())));
+    }
     let cc = &cfg.claude_code;
     if let Some(dir) = cc.projects_dir.clone().or_else(|| dirs::home_dir().map(|h| h.join(".claude").join("projects"))) {
         if cc.enabled {
@@ -217,6 +226,39 @@ mod tests {
         assert_eq!(w, 3_000_000);
     }
     #[test]
+    fn coverage_is_stored_before_the_watermark_moves() {
+        struct Cov;
+        impl Source for Cov {
+            fn id(&self) -> &str {
+                "cov"
+            }
+            fn poll(&mut self, _: i64, _: &mut dyn SourceState) -> Result<Poll, SourceError> {
+                Ok(Poll { events: vec![], watermark: Some(9) })
+            }
+            fn take_coverage(&mut self) -> Vec<crate::store::Interval> {
+                vec![(1, 5)]
+            }
+        }
+        let mut s = Store::open_in_memory().unwrap();
+        // make the watermark write fail: coverage must already be stored by then
+        s.conn.execute("DROP TABLE watermarks", []).unwrap();
+        let mut srcs: Vec<Box<dyn Source>> = vec![Box::new(Cov)];
+        let r = run_once(&mut s, &mut srcs, &mut [], 0);
+        assert!(r.errors.iter().any(|e| e.starts_with("source cov:")), "{:?}", r.errors);
+        assert_eq!(s.coverage().unwrap(), [(1, 5)]);
+    }
+    #[test]
+    fn sources_registers_presence_only_when_enabled() {
+        let s = Store::open_in_memory().unwrap();
+        let mut cfg = Config::default();
+        cfg.claude_code.enabled = false;
+        cfg.presence.enabled = true;
+        let ids = |c: &Config| sources(c, Path::new("."), &s).iter().map(|x| x.id().to_string()).collect::<Vec<_>>();
+        assert_eq!(ids(&cfg), ["presence"]);
+        cfg.presence.enabled = false;
+        assert!(ids(&cfg).is_empty());
+    }
+    #[test]
     fn a_zero_interval_ticks_every_second() {
         assert_eq!((effective_interval(0), effective_interval(15)), (1, 15));
         assert_eq!(effective_interval(u64::MAX), 86_400);
@@ -250,6 +292,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.run.interval_secs = 3600;
         cfg.claude_code.enabled = false;
+        cfg.presence.enabled = false;
         run_loop(&mut s, &cfg, d.path(), &stop);
     }
 }

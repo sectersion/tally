@@ -1,7 +1,91 @@
-//! Idle-span and coverage tracking from periodic "ms since last input" samples. Pure logic.
-use crate::source::SourceState;
+//! Idle-span and coverage tracking from periodic "ms since last input" samples, plus the source.
+use crate::source::{Poll, Source, SourceError, SourceState};
 use crate::store::Interval;
 use tally_scoring::ruleset::IDLE_SAMPLE_MIN_MS;
+use tally_scoring::{Event, Kind};
+
+#[derive(thiserror::Error, Debug)]
+pub enum PlatformError {
+    #[error("presence is not supported on this platform")]
+    Unsupported,
+    #[error("{0}")]
+    Failed(String),
+}
+
+pub trait Platform {
+    fn idle_ms(&mut self) -> Result<u64, PlatformError>;
+}
+
+pub struct UnsupportedPlatform;
+
+impl Platform for UnsupportedPlatform {
+    fn idle_ms(&mut self) -> Result<u64, PlatformError> {
+        Err(PlatformError::Unsupported)
+    }
+}
+
+#[cfg(windows)]
+pub fn default_platform() -> impl Platform {
+    crate::presence_win::WindowsPlatform
+}
+#[cfg(not(windows))]
+pub fn default_platform() -> impl Platform {
+    UnsupportedPlatform
+}
+
+/// Whether `default_platform()` can sample idle time.
+pub fn supported() -> bool {
+    cfg!(windows)
+}
+
+pub struct PresenceSource<P: Platform> {
+    platform: P,
+    coverage: Vec<Interval>,
+}
+
+impl<P: Platform> PresenceSource<P> {
+    pub fn new(platform: P) -> Self {
+        Self { platform, coverage: Vec::new() }
+    }
+}
+
+impl<P: Platform> Source for PresenceSource<P> {
+    fn id(&self) -> &str {
+        PRESENCE_SOURCE
+    }
+
+    fn poll(&mut self, now_ms: i64, state: &mut dyn SourceState) -> Result<Poll, SourceError> {
+        self.coverage.clear();
+        let idle = match self.platform.idle_ms() {
+            Ok(i) => i,
+            // no step: the next good sample sees the gap
+            Err(PlatformError::Failed(_)) => return Ok(Poll { events: vec![], watermark: None }),
+            Err(e @ PlatformError::Unsupported) => return Err(SourceError::Other(e.to_string())),
+        };
+        let mut t = Tracker::load(state);
+        let step = t.step(now_ms, idle);
+        t.save(state);
+        self.coverage = step.coverage;
+        let events = step
+            .closed
+            .iter()
+            .map(|s| Event {
+                v: 1,
+                id: format!("presence:idle:{}", s.start),
+                ts: s.start,
+                source: PRESENCE_SOURCE.into(),
+                project: None,
+                session: None,
+                kind: Kind::Idle { end_ts: s.end },
+            })
+            .collect();
+        Ok(Poll { events, watermark: Some(step.watermark) })
+    }
+
+    fn take_coverage(&mut self) -> Vec<Interval> {
+        std::mem::take(&mut self.coverage)
+    }
+}
 
 /// Watermark name of the presence source; `finalize` needs it when presence is required.
 pub const PRESENCE_SOURCE: &str = "presence";
@@ -112,6 +196,64 @@ mod tests {
             wm = st.watermark;
         }
         (c, cov, wm)
+    }
+
+    struct FakePlatform(std::collections::VecDeque<Result<u64, PlatformError>>);
+    impl Platform for FakePlatform {
+        fn idle_ms(&mut self) -> Result<u64, PlatformError> {
+            self.0.pop_front().unwrap()
+        }
+    }
+    fn source(samples: Vec<Result<u64, PlatformError>>) -> PresenceSource<FakePlatform> {
+        PresenceSource::new(FakePlatform(samples.into()))
+    }
+
+    #[test]
+    fn source_emits_a_closed_idle_event_with_a_stable_id_and_coverage() {
+        let mut src = source(vec![Ok(0), Ok(40_000), Ok(55_000), Ok(100)]);
+        let mut st: BTreeMap<String, String> = BTreeMap::new();
+        let mut events = vec![];
+        let mut cov = vec![];
+        for secs in [0, 40, 55, 101] {
+            events.extend(src.poll(s(secs), &mut st).unwrap().events);
+            cov.extend(src.take_coverage());
+        }
+        assert_eq!(events.len(), 1);
+        let e = &events[0];
+        assert_eq!((e.id.as_str(), e.source.as_str(), e.ts), (format!("presence:idle:{}", s(0)).as_str(), "presence", s(0)));
+        assert_eq!((&e.project, &e.session), (&None, &None));
+        assert_eq!(e.kind, Kind::Idle { end_ts: s(101) - 100 });
+        assert_eq!(cov, vec![(s(0), s(40)), (s(40), s(55)), (s(55), s(101))]);
+        assert!(src.take_coverage().is_empty());
+    }
+
+    #[test]
+    fn open_span_returns_a_watermark_below_its_start() {
+        let mut src = source(vec![Ok(0), Ok(40_000)]);
+        let mut st: BTreeMap<String, String> = BTreeMap::new();
+        src.poll(s(0), &mut st).unwrap();
+        let p = src.poll(s(40), &mut st).unwrap();
+        assert!(p.events.is_empty());
+        assert_eq!(p.watermark, Some(s(0) - 1));
+    }
+
+    #[test]
+    fn failed_sample_gives_no_watermark_and_no_coverage() {
+        let mut src = source(vec![Ok(0), Err(PlatformError::Failed("x".into()))]);
+        let mut st: BTreeMap<String, String> = BTreeMap::new();
+        src.poll(s(0), &mut st).unwrap();
+        src.take_coverage();
+        let p = src.poll(s(5), &mut st).unwrap();
+        assert!(p.events.is_empty() && p.watermark.is_none());
+        assert!(src.take_coverage().is_empty());
+    }
+
+    #[test]
+    fn unsupported_platform_is_an_error_not_silence() {
+        let mut src = PresenceSource::new(UnsupportedPlatform);
+        let mut st: BTreeMap<String, String> = BTreeMap::new();
+        let e = src.poll(s(0), &mut st).err().unwrap();
+        assert_eq!(e.to_string(), "presence is not supported on this platform");
     }
 
     #[test]

@@ -89,6 +89,10 @@ fn main() -> Result<()> {
             if let Some(n) = interval_secs {
                 cfg.run.interval_secs = n;
             }
+            if cfg.presence.required() && !tally_daemon::presence::supported() {
+                bail!("presence.require is true but presence is not supported on this platform; set [presence] require = false in config.toml");
+            }
+            store.set_presence_required(cfg.presence.required())?;
             if once {
                 let mut srcs = sources(&cfg, &home, &store);
                 let r = run_once(&mut store, &mut srcs, &mut hooks(&cfg, &home), now_ms());
