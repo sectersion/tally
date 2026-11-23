@@ -57,6 +57,8 @@ pub struct ProjectReport {
 pub struct PublishReport {
     pub projects: Vec<ProjectReport>,
     pub pushed: bool,
+    /// Entries this push added to the remote (may exceed the rows stored this run after a failed push).
+    pub pushed_entries: usize,
 }
 
 impl PublishReport {
@@ -79,7 +81,13 @@ impl PublishReport {
                 s += &format!("  badge: {}\n", badge_json(p.verified_s).trim_end());
             }
         }
-        s += if dry_run { "dry run: nothing written, nothing pushed\n" } else if self.pushed { "pushed\n" } else { "nothing to push\n" };
+        s += &if dry_run {
+            "dry run: nothing written, nothing pushed\n".to_string()
+        } else if self.pushed {
+            format!("pushed {} entries\n", self.pushed_entries)
+        } else {
+            "nothing to push\n".to_string()
+        };
         s
     }
 }
@@ -133,7 +141,7 @@ pub fn publish_once(
         rendered.push((name, files));
     }
     if dry_run {
-        return Ok(PublishReport { projects, pushed: false });
+        return Ok(PublishReport { projects, pushed: false, pushed_entries: 0 });
     }
 
     type Files = Vec<(String, String)>;
@@ -142,6 +150,7 @@ pub fn publish_once(
         by_remote.entry(cfg.remote_for(&name)).or_default().push((name, files));
     }
     let mut pushed = false;
+    let mut pushed_entries = 0;
     for (remote, group) in by_remote {
         let host = Hosting::new(home, &remote, &cfg.branch);
         host.sync_down()?;
@@ -173,9 +182,12 @@ pub fn publish_once(
                 files.push((path, text));
             }
         }
-        pushed |= host.commit_and_push(&files, &format!("tally: publish {count} new entries"))?;
+        if host.commit_and_push(&files, &format!("tally: publish {count} new entries"))? {
+            pushed = true;
+            pushed_entries += count;
+        }
     }
-    Ok(PublishReport { projects, pushed })
+    Ok(PublishReport { projects, pushed, pushed_entries })
 }
 
 pub const RETRY_MS: i64 = 3_600_000;
@@ -203,11 +215,16 @@ impl Scheduler {
         }
         Ok(self.last_failure_ms.is_none_or(|f| now_ms - f >= RETRY_MS))
     }
+    // ponytail: no git timeout; a hung remote stalls this tick. Upgrade path: deadline + kill in Hosting::git.
     pub fn tick(&mut self, store: &mut Store, cfg: &PublishConfig, home: &Path, today: i64, now_ms: i64) {
         match self.due(store, today, now_ms, cfg.enabled) {
             Ok(true) => {}
             Ok(false) => return,
-            Err(e) => return eprintln!("publish failed: {e}"),
+            Err(e) => {
+                // once per RETRY_MS, not every tick
+                self.last_failure_ms = Some(now_ms);
+                return eprintln!("publish failed: {e}");
+            }
         }
         let done = publish_once(store, cfg, home, false).map_err(|e| e.to_string()).and_then(|r| {
             store.meta_set("last_publish_day", today).map(|_| r).map_err(|e| e.to_string())
@@ -216,7 +233,7 @@ impl Scheduler {
             Ok(r) => {
                 self.last_failure_ms = None;
                 if r.pushed {
-                    eprintln!("published {} entries", r.projects.iter().map(|p| p.new_entries).sum::<usize>());
+                    eprintln!("published {} entries", r.pushed_entries);
                 }
             }
             Err(e) => {
@@ -339,7 +356,10 @@ mod tests {
         ));
         assert_eq!(s.published_rows("owner/repo").unwrap().len(), 2);
         let (bare, url) = bare_remote();
-        assert!(publish_once(&mut s, &cfg(&url), home.path(), false).unwrap().pushed);
+        let r = publish_once(&mut s, &cfg(&url), home.path(), false).unwrap();
+        assert!(r.pushed);
+        assert_eq!((r.pushed_entries, r.projects[0].new_entries), (2, 0));
+        assert!(r.render_text(false).ends_with("pushed 2 entries\n"));
         let (bare2, url2) = bare_remote();
         let home2 = tempfile::tempdir().unwrap();
         publish_once(&mut named_store(), &cfg(&url2), home2.path(), false).unwrap();

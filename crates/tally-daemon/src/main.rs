@@ -127,7 +127,7 @@ fn main() -> Result<()> {
                         c.project.as_deref().unwrap_or("none"), c.ruleset.as_deref().unwrap_or("none"), h.trim_end_matches(" h"));
                 }
                 Err(e) => {
-                    println!("{e}");
+                    println!("{}: {e}", f.display());
                     failed = true;
                 }
             }
@@ -180,6 +180,9 @@ fn main() -> Result<()> {
         }
         Cmd::Hook { .. } | Cmd::VerifyPublished { .. } => unreachable!("handled before the store is opened"),
         Cmd::Project { cmd: ProjectCmd::Add { path, name } } => {
+            if let Some(n) = name.as_deref().filter(|n| !tally_daemon::published::valid_public_name(n)) {
+                bail!("invalid project name {n:?}; use owner/repo (letters, digits, '.', '_', '-')");
+            }
             let (id, adopted) = register_git_project_matched(&mut store, &path, name.as_deref())?;
             if let Some((name, via)) = adopted {
                 eprintln!("matched {name} via {via}");

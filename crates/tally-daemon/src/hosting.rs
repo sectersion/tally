@@ -26,6 +26,11 @@ impl Hosting {
         Hosting { dir: home.join("publish").join(&h[..12]), remote: remote.into(), branch: branch.into() }
     }
 
+    fn user_sets_ssh_command(&self) -> bool {
+        Command::new("git").current_dir(&self.dir).args(["config", "--get", "core.sshCommand"]).env("LC_ALL", "C").output()
+            .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
+    }
+
     fn scrub(&self, s: &str) -> String {
         let mut out = s.replace(&self.remote, "<remote>");
         // userinfo is everything before the LAST '@' of the authority (passwords may contain '@')
@@ -38,8 +43,15 @@ impl Hosting {
         out.trim().to_string()
     }
 
+    // ponytail: no git timeout, so a hung remote blocks `Scheduler::tick` (and the run loop) until git gives up;
+    // upgrade path: spawn + wait with a deadline and kill.
     fn git(&self, args: &[&str]) -> Result<String, HostingError> {
-        let out = Command::new("git")
+        let mut cmd = Command::new("git");
+        // HTTPS prompts are off via GIT_TERMINAL_PROMPT; keep ssh from prompting too unless the user chose an ssh command.
+        if std::env::var_os("GIT_SSH_COMMAND").is_none() && !self.user_sets_ssh_command() {
+            cmd.args(["-c", "core.sshCommand=ssh -o BatchMode=yes"]);
+        }
+        let out = cmd
             .current_dir(&self.dir)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GCM_INTERACTIVE", "never")
@@ -85,7 +97,11 @@ impl Hosting {
 
     /// Relative paths of `<dir>/ledger-*.json` files already in the clone.
     pub fn ledger_files(&self, dir: &str) -> Result<Vec<String>, HostingError> {
-        let Ok(rd) = std::fs::read_dir(self.dir.join(dir)) else { return Ok(Vec::new()) };
+        let rd = match std::fs::read_dir(self.dir.join(dir)) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
         let mut out = Vec::new();
         for e in rd {
             let n = e?.file_name().to_string_lossy().into_owned();

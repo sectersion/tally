@@ -240,7 +240,7 @@ fn publish_pushes_once_then_has_nothing_to_push() {
     std::fs::write(home.join("config.toml"), format!("[publish]\nremote = '{}'\n", bare.display())).unwrap();
     let o = tally(&home, &["publish"]);
     assert!(o.status.success(), "{}", err(&o));
-    assert!(out(&o).contains("wrote owner/repo/badge.json") && out(&o).ends_with("pushed"), "{}", out(&o));
+    assert!(out(&o).contains("wrote owner/repo/badge.json") && out(&o).ends_with("pushed 2 entries"), "{}", out(&o));
     let o = tally(&home, &["publish"]);
     assert!(o.status.success(), "{}", err(&o));
     assert!(out(&o).ends_with("nothing to push") && !out(&o).contains("wrote"), "{}", out(&o));
@@ -312,5 +312,14 @@ fn verify_published_checks_files_without_creating_a_database() {
     let o = tally(&home, &["verify-published", gf.to_str().unwrap(), bf.to_str().unwrap()]);
     assert_eq!(o.status.code(), Some(1));
     assert!(out(&o).contains("FAIL at entry"), "{}", out(&o));
+    assert!(out(&o).contains(&format!("{}: FAIL at entry", bf.display())), "{}", out(&o));
     assert!(!home.join("tally.db").exists());
+}
+
+#[test]
+fn project_add_rejects_a_name_that_is_not_owner_slash_repo() {
+    let t = tempfile::tempdir().unwrap();
+    let o = tally(&t.path().join("home"), &["project", "add", t.path().to_str().unwrap(), "--name", "foo"]);
+    assert!(!o.status.success());
+    assert!(err(&o).contains("invalid project name"), "{}", err(&o));
 }

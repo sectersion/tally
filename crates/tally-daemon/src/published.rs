@@ -74,10 +74,9 @@ fn same_claim(a: &LedgerEntry, b: &LedgerEntry) -> bool {
         == (&b.action_id, b.ts, &b.kind, b.verified_s, b.unverified_s, &b.reasons, &b.features, &b.ruleset)
 }
 
-/// Main chain verifies; every published row matches its main row and maps to its project; each chain verifies alone.
+/// Main chain verifies; every published row matches its main row and has a valid project name; each chain verifies alone.
 pub fn check(store: &Store) -> Result<(), PublishError> {
     verify_ledger(store)?;
-    let names = store.project_names()?;
     let main: HashMap<i64, LedgerEntry> = store.ledger_rows()?.into_iter().collect();
     for project in store.published_projects()? {
         let rows = store.published_rows(&project)?;
@@ -88,11 +87,8 @@ pub fn check(store: &Store) -> Result<(), PublishError> {
             if !same_claim(m, &r.entry) {
                 return Err(bad("main row differs"));
             }
-            let mapped = m.project.as_deref().and_then(|p| resolve(&names, p));
-            if !valid_public_name(&project)
-                || r.entry.project.as_deref() != Some(project.as_str())
-                || mapped != Some(project.as_str())
-            {
+            // The link to the main row is proven by `same_claim` + `main_seq`; a later rename must not break it.
+            if !valid_public_name(&project) || r.entry.project.as_deref() != Some(project.as_str()) || m.project.is_none() {
                 return Err(bad("project mapping"));
             }
             chains.entry(&r.entry.ruleset).or_default().push(r.entry.clone());
@@ -242,6 +238,25 @@ mod tests {
         let entries: Vec<_> = s.published_rows("owner/repo").unwrap().into_iter().map(|r| r.entry).collect();
         assert_eq!(entries.len(), 3);
         assert!(tally_scoring::verify_chain(&entries, GENESIS_HASH).is_ok());
+    }
+    #[test] fn renaming_a_project_keeps_the_old_chain_and_starts_a_new_one() {
+        // claims finalized under the local id, so the rename re-maps them
+        let mut s = store_with_ledger(None);
+        s.register_project("p1", "C:/r", Some("owner/repo")).unwrap();
+        sync(&mut s, true).unwrap();
+        let old = s.published_rows("owner/repo").unwrap();
+        s.register_project("p1", "C:/r", Some("owner/new")).unwrap();
+        assert_eq!(sync(&mut s, true).unwrap().len(), 2);
+        assert_eq!(s.published_rows("owner/repo").unwrap(), old);
+        assert_eq!(s.published_rows("owner/new").unwrap().len(), 2);
+        assert_eq!(sync(&mut s, true).unwrap().len(), 0);
+        check(&s).unwrap();
+        // claims already stamped with the old public name stay on the old chain; a rename never wedges publishing
+        let mut s = store_with_ledger(Some("owner/repo"));
+        sync(&mut s, true).unwrap();
+        s.register_project("p1", "C:/r", Some("owner/new")).unwrap();
+        assert!(sync(&mut s, true).unwrap().is_empty());
+        check(&s).unwrap();
     }
     #[test] fn dry_run_writes_nothing() {
         let mut s = store_with_ledger(Some("owner/repo"));
