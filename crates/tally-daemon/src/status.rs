@@ -9,6 +9,7 @@ pub struct Status {
     pub provisional_claims: usize,
     pub verified_s: u64,
     pub unverified_s: u64,
+    pub skipped_claims: usize,
     pub horizon: Option<i64>,
     /// `None` until the first finalization.
     pub finalized_through: Option<i64>,
@@ -27,6 +28,7 @@ pub fn status(store: &Store) -> Result<Status, StoreError> {
         provisional_claims: score(&events).len().saturating_sub(ledger.len()),
         verified_s: ledger.iter().map(|e| u64::from(e.verified_s)).sum(),
         unverified_s: ledger.iter().map(|e| u64::from(e.unverified_s)).sum(),
+        skipped_claims: store.skipped()?.len(),
         horizon,
         finalized_through,
         last_hash: ledger.last().map_or(GENESIS_HASH, |e| e.hash.as_str()).to_string(),

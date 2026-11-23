@@ -42,6 +42,7 @@ fn lunch_scenario_end_to_end() {
     let s = out(&o);
     assert!(s.lines().any(|l| l == "final_claims: 2"), "{s}");
     assert!(s.lines().any(|l| l == "verified_s: 660"), "{s}");
+    assert!(s.lines().any(|l| l == "skipped_claims: 0"), "{s}");
 
     let o = tally(&home, &["verify"]);
     assert!(o.status.success());

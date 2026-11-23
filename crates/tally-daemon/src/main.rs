@@ -123,6 +123,7 @@ fn main() -> Result<()> {
             println!("provisional_claims: {}", s.provisional_claims);
             println!("verified_s: {}", s.verified_s);
             println!("unverified_s: {}", s.unverified_s);
+            println!("skipped_claims: {}", s.skipped_claims);
             println!("horizon: {}", s.horizon.map_or("none".to_string(), |h| h.to_string()));
             println!("finalized_through: {}", s.finalized_through.map_or("none".to_string(), |t| t.to_string()));
             println!("last_hash: {}", s.last_hash);

@@ -99,7 +99,7 @@ fn prepare(store: &Store) -> Result<Prepared, FinalizeError> {
 
 fn commit(store: &mut Store, p: Prepared) -> Result<FinalizeSummary, FinalizeError> {
     if let Some(h) = p.horizon {
-        store.append_ledger(&p.entries, h, p.scored_events)?;
+        store.append_ledger(&p.entries, h, p.scored_events, &[])?;
     }
     Ok(p.summary)
 }
