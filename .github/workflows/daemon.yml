@@ -1,5 +1,5 @@
 name: daemon
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 jobs:
   test:
     strategy:
@@ -12,3 +12,45 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p tally-daemon
       - run: cargo clippy -p tally-daemon --all-targets -- -D warnings
+  e2e:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      PORT: "8080"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.5
+      - run: cargo install wasm-pack --locked
+      - run: cd server && bun install && bun run wasm && bun run migrate
+      - name: Start server
+        run: cd server && (bun run start > ../server.log 2>&1 &)
+      - name: Wait for server
+        run: |
+          for i in $(seq 60); do
+            curl -s -o /dev/null http://localhost:8080/v1/ledger/x/head && exit 0
+            sleep 1
+          done
+          cat server.log; exit 1
+      - name: Create token and run test
+        run: |
+          out=$(cd server && bun run token:create e2e/run-$GITHUB_RUN_ID)
+          echo "$out"
+          export TALLY_E2E_SERVER=http://localhost:8080
+          export TALLY_E2E_PUBLIC_NAME=e2e/run-$GITHUB_RUN_ID
+          export TALLY_E2E_PROJECT_ID=$(echo "$out" | sed -n 's/^project_id: //p')
+          export TALLY_E2E_TOKEN=$(echo "$out" | sed -n 's/^token: //p')
+          cargo test -p tally-daemon --test e2e_server
