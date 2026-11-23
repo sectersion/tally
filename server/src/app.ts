@@ -41,6 +41,7 @@ import {
   same,
   sessionToken,
 } from "./session.ts";
+import { findUpdEntries, updLabel } from "./upd.ts";
 import { rulesetVersion } from "./wasm.ts";
 
 type Deps = {
@@ -163,6 +164,13 @@ export function createServer(deps: Deps) {
       await sql`select id, public_name from projects where lower(public_name) = lower(${`${owner}/${name}`}) and owner_id = ${userId}`;
     if (!p) throw new HttpError(404, { error: "not_found" });
     return p as { id: string; public_name: string };
+  };
+  /** full_name of the project's live linked GitHub repo, or null. */
+  const liveRepoName = async (projectId: string) => {
+    const [r] = await sql`select r.full_name from project_repos l
+      join github_repos r on r.id = l.github_repo_id
+      where l.project_id = ${projectId} and l.unlinked_at is null`;
+    return (r?.full_name as string | undefined) ?? null;
   };
   return Bun.serve({
     port: deps.port,
@@ -474,6 +482,37 @@ export function createServer(deps: Deps) {
           return redirect(`/p/${p.public_name}/settings`);
         }),
       },
+      "/p/:owner/:name/upd-link": {
+        POST: handle("/p/:owner/:name/upd-link", async (req) => {
+          const s = await requireUser(sql, req);
+          const form = await formOf(req);
+          requireCsrf(cfg, req, s, form);
+          const p = await ownedProject(s.userId, req.params.owner, req.params.name);
+          const full = await liveRepoName(p.id);
+          if (!full) throw new HttpError(400, { error: "link a GitHub repo first" });
+          const id = String(form.get("record_id") ?? "");
+          // Re-derived from the live list: the form only names a candidate.
+          if (!(await findUpdEntries(full, fetchFn)).some((e) => e.id === id))
+            throw new HttpError(400, { error: "not a match for the linked repo" });
+          await sql.begin(async (tx) => {
+            await tx`update projects set upd_record_id = ${id} where id = ${p.id}`;
+            await bumpChange(tx, p.id);
+          });
+          return redirect(`/p/${p.public_name}/settings`);
+        }),
+      },
+      "/p/:owner/:name/upd-unlink": {
+        POST: handle("/p/:owner/:name/upd-unlink", async (req) => {
+          const s = await requireUser(sql, req);
+          requireCsrf(cfg, req, s, await formOf(req));
+          const p = await ownedProject(s.userId, req.params.owner, req.params.name);
+          await sql.begin(async (tx) => {
+            await tx`update projects set upd_record_id = null where id = ${p.id}`;
+            await bumpChange(tx, p.id);
+          });
+          return redirect(`/p/${p.public_name}/settings`);
+        }),
+      },
       "/p/:owner/:name/settings": {
         POST: handle("/p/:owner/:name/settings", async (req) => {
           const s = await requireUser(sql, req);
@@ -509,10 +548,30 @@ export function createServer(deps: Deps) {
               )
               .join("")}</ul><p><a href="/github/install">Install the App on more repos</a></p>`;
           }
+          let upd = "";
+          if (linked.length) {
+            const [{ upd_record_id: cur }] =
+              await sql`select upd_record_id from projects where id = ${p.id}`;
+            if (cur)
+              upd += `<p>${esc((await updLabel(cur, linked[0].full_name, fetchFn)) ?? "")}</p>
+<form method="post" action="${action}/upd-unlink">${csrf}<button>Unlink</button></form>`;
+            try {
+              const found = await findUpdEntries(linked[0].full_name, fetchFn);
+              upd += `<ul>${found
+                .filter((e) => e.id !== cur)
+                .map(
+                  (e) =>
+                    `<li>Found in Unified Projects DB: ${esc(e.ysws)}, approved ${e.approved_at === null ? "(not yet)" : esc(new Date(e.approved_at * 1000).toISOString().slice(0, 10))} <form method="post" action="${action}/upd-link" style="display:inline">${csrf}<input type="hidden" name="record_id" value="${esc(e.id)}"><button>Link</button></form></li>`,
+                )
+                .join("")}</ul>`;
+            } catch {
+              upd += "<p>Unified Projects DB is unavailable right now.</p>";
+            }
+          }
           return html(
             200,
             p.public_name,
-            `<h1>${esc(p.public_name)}</h1><p>server id: ${esc(p.id)}</p><pre>${esc(`tally project link <path> --server-id ${p.id}`)}</pre>${repos}`,
+            `<h1>${esc(p.public_name)}</h1><p>server id: ${esc(p.id)}</p><pre>${esc(`tally project link <path> --server-id ${p.id}`)}</pre>${repos}${upd}`,
           );
         }),
       },
