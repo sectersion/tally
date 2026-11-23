@@ -157,7 +157,8 @@ pub fn bash_kind(command: &str) -> Option<BashKind> {
     let c = command.trim();
     // Splitting on single `&`/`|` also covers `&&`/`||`; extra splits (e.g. `2>&1`) can only add false
     // positives, the safe direction. A `bash -c '<a && b>'` is split too, and each half is stripped below.
-    if c.split(['&', '|', ';', '\n']).any(is_git_commit) {
+    // `{`/`}` split PowerShell 5.1 guards: `git add .; if ($?) { git commit -m x }`.
+    if c.split(['&', '|', ';', '\n', '{', '}']).any(is_git_commit) {
         Some(BashKind::Commit)
     } else if TEST_PREFIXES.iter().any(|p| c.starts_with(p)) {
         Some(BashKind::Test)
@@ -186,15 +187,13 @@ fn is_git_commit(seg: &str) -> bool {
         match t {
             [w, f, rest @ ..] if matches!(*w, "bash" | "sh" | "zsh") && f.starts_with('-') && f.contains('c') => t = rest,
             [w, rest @ ..] if matches!(*w, "env" | "sudo" | "time" | "command") || is_env_assign(w) => t = rest,
-            // `pwsh -NoProfile -Command "..."`: the wrapper and all its leading flags
+            // `pwsh [-flags [values]] -Command "..."`: skip to after `-c`/`-Command`; without one, skip leading flags.
             [w, rest @ ..] if matches!(w.to_ascii_lowercase().as_str(), "pwsh" | "pwsh.exe" | "powershell" | "powershell.exe") => {
-                t = rest;
-                while let [f, r @ ..] = t {
-                    if !f.starts_with('-') {
-                        break;
-                    }
-                    t = r;
-                }
+                let cmd = rest.iter().position(|f| f.eq_ignore_ascii_case("-c") || f.eq_ignore_ascii_case("-command"));
+                t = match cmd {
+                    Some(i) => &rest[i + 1..],
+                    None => &rest[rest.iter().take_while(|f| f.starts_with('-')).count()..],
+                };
             }
             _ => break,
         }
@@ -380,10 +379,21 @@ mod tests {
             "powershell -Command \"git add .; git commit -m x\"",
             "powershell.exe -NoProfile -Command 'git commit -m x'",
             "pwsh -c \"git commit\"",
+            "git add .; if ($?) { git commit -m x }",
+            "git add . ; if ($LASTEXITCODE -eq 0) { git commit -m x }",
+            "pwsh -ExecutionPolicy Bypass -Command \"git commit -m x\"",
+            "powershell -NoProfile -Command \"git add . ; git commit -m x\"",
         ] {
             assert_eq!(bash_kind(c), Some(BashKind::Commit), "{c}");
         }
-        for c in ["pwsh -Command \"git status\"", "powershell -NoProfile", "pwsh"] {
+        for c in [
+            "pwsh -Command \"git status\"",
+            "powershell -NoProfile",
+            "pwsh",
+            "echo \"git commit\"",
+            "git commit-tree x",
+            "if ($?) { echo \"git commit\" }",
+        ] {
             assert_eq!(bash_kind(c), None, "{c}");
         }
     }

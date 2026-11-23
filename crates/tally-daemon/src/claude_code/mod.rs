@@ -136,6 +136,11 @@ impl ClaudeCode {
     }
 }
 
+/// State encoding of the open turn: `"<uuid> <ts>"`, or `-` when closed.
+fn open_str(s: &Session) -> String {
+    s.open_turn.as_ref().map_or("-".to_owned(), |(u, t)| format!("{u} {t}"))
+}
+
 /// `(rel, path)` of `<dir>/*/*.jsonl`, sorted; a missing dir is empty.
 fn session_files(dir: &Path) -> Vec<(String, PathBuf)> {
     let mut v = Vec::new();
@@ -194,7 +199,10 @@ impl Source for ClaudeCode {
             };
             if chunk.rotated {
                 self.files.insert(rel.clone(), File { floor: last_ts, ..File::new(path) });
-            } else if self.files.get(rel).is_none_or(|f| f.fed_to != off) {
+            } else if self.files.get(rel).is_none_or(|f| {
+                // Saved state differs from memory (last tick not persisted, e.g. an expiry with no new lines).
+                f.fed_to != off || open_str(&f.session) != state.get(&open_key).unwrap_or_else(|| "-".into())
+            }) {
                 let floor = self.files.get(rel).and_then(|f| f.floor);
                 self.files.insert(rel.clone(), File { floor, ..File::new(path) });
                 if off > 0 {
@@ -219,8 +227,7 @@ impl Source for ClaudeCode {
                 state.set(&last_key, &m.to_string());
             }
             state.set(&off_key, &chunk.end.to_string());
-            let open = f.session.open_turn.as_ref().map_or("-".to_owned(), |(u, t)| format!("{u} {t}"));
-            state.set(&open_key, &open);
+            state.set(&open_key, &open_str(&f.session));
             events.extend(out);
         }
         if skipped > 0 {
@@ -241,6 +248,25 @@ mod tests {
 
     fn ts(i: usize) -> String {
         format!("2026-11-22T10:{:02}:{:02}.000Z", i / 60, i % 60)
+    }
+
+    #[test]
+    fn an_expiry_whose_state_was_not_saved_is_redone() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("p")).unwrap();
+        let t0 = ts(0);
+        let line = format!(r#"{{"type":"user","uuid":"p1","sessionId":"s","timestamp":"{t0}","origin":{{"kind":"human"}},"message":{{"content":"go"}}}}"#);
+        std::fs::write(d.path().join("p/s.jsonl"), line + "\n").unwrap();
+        let start = parse_rfc3339_ms(&t0).unwrap();
+        let mut src = ClaudeCode::new(d.path().to_path_buf());
+        let mut st = BTreeMap::from([("started".to_owned(), "1".to_owned())]);
+        assert_eq!(src.poll(start + 3_600_000, &mut st).unwrap().events.len(), 1); // the prompt
+        // No new lines; the stale turn expires, but this tick's store write fails.
+        let late = start + session::OPEN_SPAN_MAX_MS + 1;
+        assert_eq!(src.poll(late, &mut st.clone()).unwrap().events.len(), 1);
+        let p = src.poll(late, &mut st).unwrap();
+        let ids: Vec<_> = p.events.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["claude:s:p1:agent_busy"]);
     }
 
     #[test]
