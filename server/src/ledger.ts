@@ -1,5 +1,6 @@
 import type { SQL } from "bun";
 import { HttpError } from "./errors.ts";
+import { bumpChange } from "./projects.ts";
 import type { LedgerEntry } from "./schema.ts";
 import { rulesetVersion, verifyChain } from "./wasm.ts";
 
@@ -121,6 +122,7 @@ export async function appendEntries(
     const [u] =
       await tx`update chains set head_hash = ${last.hash}, count = ${count + fresh.length},
         verified_s = verified_s + ${added} where id = ${ch.id} returning head_hash, count`;
+    await bumpChange(tx, projectId);
     return { head_hash: u.head_hash, count: Number(u.count) };
   });
 }

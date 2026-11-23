@@ -18,7 +18,8 @@ import fixture from "./fixtures/chain.json";
 // | 12         | entries: mixed rulesets |
 // | 13         | entries: mid-chain resume |
 // | 14-big     | entries: 3e9 verified_s |
-// | 15, 16     | free                    |
+// | 15         | projects: change_seq bump |
+// | 16         | projects: hours vs chains |
 
 export const chains = fixture as unknown as Record<string, LedgerEntry[]>;
 

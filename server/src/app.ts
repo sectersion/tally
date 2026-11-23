@@ -12,6 +12,7 @@ import {
   verifiedSeconds,
 } from "./ledger.ts";
 import { log } from "./log.ts";
+import { createProject, projectHours, setHandle } from "./projects.ts";
 import { createLimiter, type Limiter } from "./ratelimit.ts";
 import { CommitBody, UploadBody } from "./schema.ts";
 import {
@@ -92,6 +93,15 @@ export function createServer(deps: Deps) {
       throw e;
     }
     limit(`tok:${tokenId}`);
+  };
+  /** Read the body once per request. */
+  const formOf = (req: Request) => req.formData().catch(() => new FormData());
+  /** The project at /p/:owner/:name if the session user owns it; otherwise 404 (never reveals existence). */
+  const ownedProject = async (userId: string, owner: string, name: string) => {
+    const [p] =
+      await sql`select id, public_name from projects where lower(public_name) = lower(${`${owner}/${name}`}) and owner_id = ${userId}`;
+    if (!p) throw new HttpError(404, { error: "not_found" });
+    return p as { id: string; public_name: string };
   };
   return Bun.serve({
     port: deps.port,
@@ -200,6 +210,64 @@ export function createServer(deps: Deps) {
         GET: handle("/settings", async (req) => {
           const s = await requireUser(sql, req);
           return json(200, { user_id: s.userId });
+        }),
+      },
+      "/settings/handle": {
+        POST: handle("/settings/handle", async (req) => {
+          const s = await requireUser(sql, req);
+          const form = await formOf(req);
+          requireCsrf(cfg, req, s, form);
+          const r = await setHandle(sql, s.userId, String(form.get("handle") ?? ""));
+          return redirect(r === "ok" ? "/settings" : `/settings?error=${r}`);
+        }),
+      },
+      "/projects": {
+        POST: handle("/projects", async (req) => {
+          const s = await requireUser(sql, req);
+          const form = await formOf(req);
+          requireCsrf(cfg, req, s, form);
+          const name = String(form.get("name") ?? "");
+          const r = await createProject(sql, s.userId, name);
+          return redirect("error" in r ? `/settings?error=${r.error}` : `/p/${name}`);
+        }),
+      },
+      "/p/:owner/:name/settings": {
+        POST: handle("/p/:owner/:name/settings", async (req) => {
+          const s = await requireUser(sql, req);
+          const form = await formOf(req);
+          requireCsrf(cfg, req, s, form);
+          const p = await ownedProject(s.userId, req.params.owner, req.params.name);
+          await sql`update projects set public = ${form.get("public") === "on"} where id = ${p.id}`;
+          return redirect(`/p/${p.public_name}/settings`);
+        }),
+        // Plain text until Task 9 builds the real page; Task 4 adds the device tokens.
+        GET: handle("/p/:owner/:name/settings", async (req) => {
+          const s = await requireUser(sql, req);
+          const p = await ownedProject(s.userId, req.params.owner, req.params.name);
+          return new Response(
+            `${p.public_name}\nserver id: ${p.id}\ntally project link <path> --server-id ${p.id}\n`,
+            { headers: { "content-type": "text/plain; charset=utf-8" } },
+          );
+        }),
+      },
+      "/v1/projects/:id/summary": {
+        GET: handle("/v1/projects/:id/summary", async (req, server) => {
+          limit(ip(server, req));
+          const [p] = await sql`select p.id, p.public_name, u.handle, u.profile_public
+            from projects p join users u on u.id = p.owner_id
+            where p.id = ${req.params.id} and p.public`;
+          if (!p) throw new HttpError(404, { error: "not_found" });
+          return json(
+            200,
+            {
+              id: p.id,
+              public_name: p.public_name,
+              owner_handle: p.profile_public ? p.handle : null,
+              ...(await projectHours(sql, p.id)),
+              last_commit_at: null, // TODO(task 6): newest push_receipts.received_at for the project
+            },
+            { "cache-control": "public, max-age=60" },
+          );
         }),
       },
       "/v1/projects/:id/badge.json": {
