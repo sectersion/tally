@@ -29,6 +29,8 @@ struct File {
     /// Session id for `expire`: the file stem until an entry names it.
     sid: String,
     project: Option<String>,
+    /// Git root of `project`, to make agent-written paths root-relative.
+    root: Option<PathBuf>,
     /// After a rotation: events at or before this ts were already sent and are dropped.
     floor: Option<i64>,
     /// Byte offset the in-memory session has consumed up to. If the saved `off:` differs (the last tick's
@@ -39,7 +41,7 @@ struct File {
 impl File {
     fn new(path: &Path) -> Self {
         let sid = path.file_stem().map_or(String::new(), |s| s.to_string_lossy().into_owned());
-        File { session: Session::default(), sid, project: None, floor: None, fed_to: 0 }
+        File { session: Session::default(), sid, project: None, root: None, floor: None, fed_to: 0 }
     }
 }
 
@@ -52,6 +54,20 @@ pub struct ClaudeCode {
     vocab_failed: HashSet<PathBuf>,
     /// Bytes per file per poll; `POLL_BUDGET` except in tests.
     budget: usize,
+    /// Hashed agent file writes `(file_hash, ts)` since the last `take_agent_writes`; never a path.
+    agent_writes: Vec<(String, i64)>,
+}
+
+/// `(file_hash, ts)` for each write under `root`; paths outside it are dropped, the path text is not kept.
+fn hash_writes(writes: &[(i64, String)], root: &Path, project_id: &str) -> Vec<(String, i64)> {
+    let root = crate::project::normalize_path(&root.to_string_lossy());
+    writes
+        .iter()
+        .filter_map(|(ts, p)| {
+            let rel = crate::heartbeat::rel_under(&root, &crate::project::normalize_path(p))?;
+            Some((crate::heartbeat::file_hash(project_id, &rel), *ts))
+        })
+        .collect()
 }
 
 impl ClaudeCode {
@@ -63,6 +79,7 @@ impl ClaudeCode {
             projects: HashMap::new(),
             vocabs: HashMap::new(),
             vocab_failed: HashSet::new(),
+            agent_writes: Vec::new(),
         }
     }
 
@@ -98,6 +115,7 @@ impl ClaudeCode {
                 let f = self.files.get_mut(rel).expect("file registered before feeding");
                 f.sid.clone_from(&e.meta().session);
                 f.project.clone_from(&project);
+                f.root.clone_from(&root);
                 f.session.feed(e, &Ctx { project, vocab }, out);
             }
         }
@@ -122,6 +140,7 @@ impl ClaudeCode {
             let lines = body.split(|b| *b == b'\n').map(|l| l.strip_suffix(b"\r").unwrap_or(l)).filter(|l| !l.is_empty());
             self.feed(rel, lines, &mut Vec::new());
         }
+        self.files.get_mut(rel).expect("registered").session.agent_writes.clear(); // warm-up writes are old news
         let s = &mut self.files.get_mut(rel).expect("registered").session;
         match open.as_deref().map(|o| o.split_once(' ')) {
             Some(None) => s.open_turn = None, // "-"
@@ -219,7 +238,10 @@ impl Source for ClaudeCode {
             } else {
                 f.session.expire(now_ms, &f.sid, f.project.clone(), &mut out);
             }
-            f.session.agent_writes.clear(); // plan 08 consumes these
+            let writes = std::mem::take(&mut f.session.agent_writes);
+            if let (Some(root), Some(id)) = (&f.root, &f.project) {
+                self.agent_writes.extend(hash_writes(&writes, root, id));
+            }
             if let Some(floor) = f.floor {
                 out.retain(|e| e.ts > floor);
             }
@@ -236,6 +258,10 @@ impl Source for ClaudeCode {
         let w = self.files.values().map(|f| f.session.limit()).fold(now_ms - WRITE_SLACK_MS, i64::min);
         Ok(Poll { events, watermark: cap.map(|c| c.min(w)) })
     }
+
+    fn take_agent_writes(&mut self) -> Vec<(String, i64)> {
+        std::mem::take(&mut self.agent_writes)
+    }
 }
 
 #[cfg(test)]
@@ -248,6 +274,53 @@ mod tests {
 
     fn ts(i: usize) -> String {
         format!("2026-11-22T10:{:02}:{:02}.000Z", i / 60, i % 60)
+    }
+
+    #[test]
+    fn hash_writes_hashes_root_relative_paths() {
+        let want = crate::heartbeat::file_hash("p", "src/a.rs");
+        let w = [
+            (1, r"C:\tallyproj\src\a.rs".to_owned()),
+            (2, "C:/tallyproj/src/a.rs".to_owned()),
+            (3, "D:/other/b.rs".to_owned()),
+            (4, "C:/tallyproj2/src/a.rs".to_owned()),
+        ];
+        let got = hash_writes(&w, Path::new("C:/tallyproj"), "p");
+        assert_eq!(got, [(want.clone(), 1), (want.clone(), 2)]);
+        assert!(!format!("{got:?}").contains("src/a.rs"));
+        // production roots are canonicalized: verbatim prefix and backslashes
+        assert_eq!(hash_writes(&w, Path::new(r"\\?\C:\tallyproj"), "p"), got);
+    }
+
+    #[test]
+    fn claude_edit_suppresses_the_matching_heartbeat() {
+        use crate::heartbeat::{map_heartbeats, server::Received, Heartbeat};
+        let d = tempfile::tempdir().unwrap();
+        let repo = std::fs::canonicalize(d.path()).unwrap().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::create_dir(d.path().join("p")).unwrap();
+        let file = crate::project::normalize_path(&repo.join("src/a.rs").to_string_lossy());
+        let cwd = crate::project::normalize_path(&repo.to_string_lossy());
+        let t0 = ts(0);
+        let line = format!(
+            r#"{{"type":"assistant","uuid":"a1","sessionId":"s","timestamp":"{t0}","cwd":"{cwd}","message":{{"content":[{{"type":"tool_use","id":"t1","name":"Edit","input":{{"file_path":"{file}"}}}}]}}}}"#
+        );
+        std::fs::write(d.path().join("p/s.jsonl"), line + "\n").unwrap();
+        let at = parse_rfc3339_ms(&t0).unwrap();
+        let mut src = ClaudeCode::new(d.path().to_path_buf());
+        let mut st = BTreeMap::from([("started".to_owned(), "1".to_owned())]);
+        src.poll(at + 3_600_000, &mut st).unwrap();
+        let w = src.take_agent_writes();
+        assert_eq!(w.len(), 1);
+        assert!(src.take_agent_writes().is_empty());
+        let hb: Heartbeat = serde_json::from_value(serde_json::json!({
+            "entity": repo.join("src/a.rs").to_string_lossy(), "type": "file", "time": (at + 2_000) as f64 / 1000.0, "is_write": true
+        }))
+        .unwrap();
+        let batch = [Received { hb, received_ms: at + 2_000 }];
+        let m = map_heartbeats(&batch, &project_for_dir, &|h, from, to| w.iter().any(|(wh, t)| wh == h && *t >= from && *t <= to), 0, &mut BTreeMap::new());
+        assert_eq!((m.stats.dropped_agent, m.events.len()), (1, 0));
     }
 
     #[test]

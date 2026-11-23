@@ -122,7 +122,7 @@ pub struct Mapped {
 }
 
 /// Path of `entity` under `root` (both normalized, component-aware, case-insensitive on Windows and macOS).
-fn rel_under(root: &str, entity: &str) -> Option<String> {
+pub(crate) fn rel_under(root: &str, entity: &str) -> Option<String> {
     let fold = cfg!(any(windows, target_os = "macos"));
     let (r, e) = if fold { (root.to_lowercase(), entity.to_lowercase()) } else { (root.to_string(), entity.to_string()) };
     let rest = e.strip_prefix(r.trim_end_matches('/'))?.strip_prefix('/')?;
