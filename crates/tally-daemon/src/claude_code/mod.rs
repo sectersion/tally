@@ -47,11 +47,14 @@ pub struct ClaudeCode {
     projects: HashMap<String, Option<(PathBuf, String)>>,
     vocabs: HashMap<PathBuf, (Instant, Vocab)>,
     vocab_failed: HashSet<PathBuf>,
+    /// Bytes per file per poll; `POLL_BUDGET` except in tests.
+    budget: usize,
 }
 
 impl ClaudeCode {
     pub fn new(projects_dir: PathBuf) -> Self {
         ClaudeCode {
+            budget: POLL_BUDGET,
             projects_dir,
             files: BTreeMap::new(),
             projects: HashMap::new(),
@@ -163,14 +166,22 @@ impl Source for ClaudeCode {
         }
         self.files.retain(|k, _| files.iter().any(|(rel, _)| rel == k));
         let (mut events, mut skipped) = (Vec::new(), 0);
+        // A file with complete lines left unread (budget hit or read error) holds the watermark below the
+        // newest timestamp it has shown; one that has shown none withholds the watermark for this poll.
+        let mut cap: Option<i64> = Some(i64::MAX);
+        let mut hold = |f: Option<&File>, last_ts: Option<i64>| {
+            let seen = f.map(|f| f.session.last_seen_ts).filter(|t| *t > 0).or(last_ts);
+            cap = cap.and_then(|c| seen.map(|t| c.min(t - 1)));
+        };
         for (rel, path) in &files {
             let (off_key, last_key, open_key) = (format!("off:{rel}"), format!("last_ts:{rel}"), format!("open:{rel}"));
             let off: u64 = state.get(&off_key).and_then(|v| v.parse().ok()).unwrap_or(0);
             let last_ts: Option<i64> = state.get(&last_key).and_then(|v| v.parse().ok());
-            let chunk = match tail::read_lines(path, off, POLL_BUDGET) {
+            let chunk = match tail::read_lines(path, off, self.budget) {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("source claude-code: {}: {e}", path.display());
+                    hold(self.files.get(rel), last_ts);
                     continue;
                 }
             };
@@ -185,7 +196,11 @@ impl Source for ClaudeCode {
             let mut out = Vec::new();
             skipped += self.feed(rel, chunk.lines.iter().map(Vec::as_slice), &mut out);
             let f = self.files.get_mut(rel).expect("registered");
-            f.session.expire(now_ms, &f.sid, f.project.clone(), &mut out);
+            if chunk.budget_hit {
+                hold(Some(f), last_ts); // and no expiry: the rest of the turn may be in the unread part
+            } else {
+                f.session.expire(now_ms, &f.sid, f.project.clone(), &mut out);
+            }
             f.session.agent_writes.clear(); // plan 08 consumes these
             if let Some(floor) = f.floor {
                 out.retain(|e| e.ts > floor);
@@ -202,6 +217,108 @@ impl Source for ClaudeCode {
             eprintln!("source claude-code: skipped {skipped} unreadable lines");
         }
         let w = self.files.values().map(|f| f.session.limit()).fold(now_ms - WRITE_SLACK_MS, i64::min);
-        Ok(Poll { events, watermark: Some(w) })
+        Ok(Poll { events, watermark: cap.map(|c| c.min(w)) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::run::run_once;
+    use crate::store::Store;
+    use line::parse_rfc3339_ms;
+    use std::io::Write;
+
+    fn ts(i: usize) -> String {
+        format!("2026-11-22T10:{:02}:{:02}.000Z", i / 60, i % 60)
+    }
+
+    #[test]
+    fn a_backlog_over_the_budget_holds_the_watermark_until_it_is_read() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("p")).unwrap();
+        let n = 200;
+        let body: String = (0..n)
+            .map(|i| {
+                let t = ts(i);
+                let x = "x".repeat(200);
+                format!(
+                    r#"{{"type":"assistant","uuid":"u{i}","sessionId":"s","timestamp":"{t}","message":{{"content":[{{"type":"text","text":"{x}"}}]}}}}"#
+                ) + "\n"
+            })
+            .collect();
+        std::fs::write(d.path().join("p/s.jsonl"), body).unwrap();
+        let mut src = ClaudeCode::new(d.path().to_path_buf());
+        src.budget = 4096;
+        let mut srcs: Vec<Box<dyn Source>> = vec![Box::new(src)];
+        let mut store = Store::open_in_memory().unwrap();
+        store.set_state("claude-code", &BTreeMap::from([("started".to_owned(), "1".to_owned())])).unwrap();
+        let now = parse_rfc3339_ms(&ts(n)).unwrap() + 3_600_000;
+        let mut polls = 0;
+        loop {
+            polls += 1;
+            let r = run_once(&mut store, &mut srcs, &mut [], now);
+            assert!(r.errors.is_empty(), "poll {polls}: {:?}", r.errors);
+            let seen = store.events().unwrap().len();
+            let h = store.horizon().unwrap();
+            if seen == n {
+                assert_eq!(h, Some(now - WRITE_SLACK_MS));
+                break;
+            }
+            let next_unread = parse_rfc3339_ms(&ts(seen)).unwrap();
+            assert!(h.is_none_or(|h| h < next_unread), "poll {polls}: horizon {h:?} passes unread data");
+            assert!(polls < 100);
+        }
+        assert!(polls > 5, "{polls}");
+    }
+
+    /// Makes `p` unopenable while the guard lives; `None` if the platform cannot (e.g. running as root).
+    fn lock(p: &Path) -> Option<Box<dyn std::any::Any>> {
+        #[cfg(windows)]
+        let g = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new().read(true).share_mode(0).open(p).ok().map(|f| Box::new(f) as Box<dyn std::any::Any>)
+        };
+        #[cfg(unix)]
+        let g = {
+            use std::os::unix::fs::PermissionsExt;
+            struct Restore(PathBuf);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o644));
+                }
+            }
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0)).unwrap();
+            Some(Box::new(Restore(p.to_path_buf())) as Box<dyn std::any::Any>)
+        };
+        std::fs::File::open(p).is_err().then_some(g).flatten()
+    }
+
+    #[test]
+    fn a_read_error_holds_the_watermark() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("p")).unwrap();
+        let f = d.path().join("p/s.jsonl");
+        let line = |i: usize| {
+            let t = ts(i);
+            format!(r#"{{"type":"assistant","uuid":"u{i}","sessionId":"s","timestamp":"{t}","message":{{"content":[{{"type":"text","text":"x"}}]}}}}"#) + "\n"
+        };
+        std::fs::write(&f, line(0) + &line(1)).unwrap();
+        let now = parse_rfc3339_ms(&ts(2)).unwrap() + 3_600_000;
+        let mut st = BTreeMap::from([("started".to_owned(), "1".to_owned())]);
+        let mut src = ClaudeCode::new(d.path().to_path_buf());
+        assert_eq!(src.poll(now, &mut st).unwrap().watermark, Some(now - WRITE_SLACK_MS));
+        std::fs::OpenOptions::new().append(true).open(&f).unwrap().write_all(line(2).as_bytes()).unwrap();
+        let Some(_g) = lock(&f) else {
+            eprintln!("cannot make a file unreadable here; skipping");
+            return;
+        };
+        let p = src.poll(now, &mut st).unwrap();
+        assert_eq!((p.events.len(), p.watermark), (0, Some(parse_rfc3339_ms(&ts(1)).unwrap() - 1)));
+        // a fresh process: no session yet, so last_ts (u1's ts) caps it
+        assert_eq!(ClaudeCode::new(d.path().to_path_buf()).poll(now, &mut st).unwrap().watermark, p.watermark);
+        // nothing seen at all: no promise
+        st.remove("last_ts:p/s.jsonl");
+        assert_eq!(ClaudeCode::new(d.path().to_path_buf()).poll(now, &mut st).unwrap().watermark, None);
     }
 }

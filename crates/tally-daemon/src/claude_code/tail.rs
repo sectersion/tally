@@ -8,6 +8,8 @@ pub struct Chunk {
     pub start: u64,
     pub end: u64,
     pub rotated: bool,
+    /// Stopped at the budget: more complete lines may follow.
+    pub budget_hit: bool,
 }
 
 /// Reads whole lines from `offset`. A last line without `\n` is not returned and `end` stays at its start.
@@ -37,7 +39,7 @@ pub fn read_lines(path: &Path, offset: u64, budget: usize) -> std::io::Result<Ch
             lines.push(buf.clone());
         }
     }
-    Ok(Chunk { lines, start, end, rotated })
+    Ok(Chunk { lines, start, end, rotated, budget_hit: total > budget })
 }
 
 #[cfg(test)]
@@ -65,9 +67,9 @@ mod tests {
         let big = "x".repeat(3_000_000);
         std::fs::write(&p, format!("{big}\na\nb\n")).unwrap();
         let c = read_lines(&p, 0, 1024).unwrap();
-        assert_eq!((c.lines.len(), c.lines[0].len()), (1, 3_000_000));
+        assert_eq!((c.lines.len(), c.lines[0].len(), c.budget_hit), (1, 3_000_000, true));
         let c = read_lines(&p, c.end, 1024).unwrap();
-        assert_eq!(c.lines, vec![b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!((c.lines, c.budget_hit), (vec![b"a".to_vec(), b"b".to_vec()], false));
     }
 
     #[test]
