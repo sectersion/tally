@@ -6,6 +6,7 @@ pub mod credentials;
 pub mod doctor;
 pub mod finalize;
 pub mod git;
+pub mod heartbeat;
 pub mod hosting;
 pub mod publish;
 pub mod ingest;

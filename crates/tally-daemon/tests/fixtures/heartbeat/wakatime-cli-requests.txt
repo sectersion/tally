@@ -1,0 +1,9 @@
+SYNTHETIC / UNVERIFIED: reconstructed from the documented WakaTime API, not captured.
+POST /api/v1/users/current/heartbeats.bulk HTTP/1.1
+Host: 127.0.0.1:25930
+Authorization: Basic <base64(api_key)>
+Content-Type: application/json
+User-Agent: wakatime/v1.90.0 (windows-10) go1.22 vscode/1.95 vscode-wakatime/25.0.0
+Accept: application/json
+
+[ see bulk.json ]
