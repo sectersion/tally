@@ -2,6 +2,7 @@ pub mod claude_code;
 pub mod config;
 pub mod finalize;
 pub mod ingest;
+pub mod presence;
 pub mod project;
 pub mod run;
 pub mod source;
