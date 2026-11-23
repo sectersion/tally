@@ -1,6 +1,7 @@
 import type { BunRequest, Server, SQL } from "bun";
 import { hashToken, newToken, requireToken } from "./auth.ts";
 import { type Config, MAX_BATCH, MAX_BODY_BYTES } from "./config";
+import { createDeviceCode, decide, pendingDevice, pollDeviceToken } from "./device.ts";
 import { HttpError, json, parse, readJson } from "./errors.ts";
 import { authorizeUrl, exchange } from "./hca.ts";
 import {
@@ -14,7 +15,7 @@ import {
 import { log } from "./log.ts";
 import { createProject, projectHours, setHandle } from "./projects.ts";
 import { createLimiter, type Limiter } from "./ratelimit.ts";
-import { CommitBody, UploadBody } from "./schema.ts";
+import { CommitBody, DeviceCodeBody, DeviceTokenBody, UploadBody } from "./schema.ts";
 import {
   clearCookie,
   clearOauthCookie,
@@ -29,7 +30,14 @@ import {
 } from "./session.ts";
 import { rulesetVersion } from "./wasm.ts";
 
-type Deps = { sql: SQL; port: number; ruleset?: string; limiter?: Limiter; cfg: Config };
+type Deps = {
+  sql: SQL;
+  port: number;
+  ruleset?: string;
+  limiter?: Limiter;
+  deviceLimiter?: Limiter;
+  cfg: Config;
+};
 
 const b64url = (b: ArrayBuffer | Uint8Array) => Buffer.from(b as Uint8Array).toString("base64url");
 const redirect = (to: string, setCookies: string[] = []) => {
@@ -37,6 +45,17 @@ const redirect = (to: string, setCookies: string[] = []) => {
   for (const c of setCookies) headers.append("set-cookie", c);
   return new Response(null, { status: 303, headers });
 };
+
+// Local until Task 8's shared html helper lands; every interpolated value goes through esc().
+const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+const page = (status: number, body: string) =>
+  new Response(
+    `<!doctype html><meta charset="utf-8"><title>Link device</title>${body.startsWith("<") ? body : `<p>${esc(body)}</p>`}`,
+    {
+      status,
+      headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+    },
+  );
 
 type Srv = Server<undefined>;
 const ip = (server: Srv, req: Request) => `ip:${server.requestIP(req)?.address ?? "unknown"}`;
@@ -80,6 +99,7 @@ export function createServer(deps: Deps) {
   const { cfg } = deps;
   const ruleset = deps.ruleset ?? rulesetVersion();
   const limiter = deps.limiter ?? createLimiter();
+  const deviceLimiter = deps.deviceLimiter ?? createLimiter(10, 10); // /v1/device/code: 10 per minute per ip
   const limit = (key: string) => {
     if (!limiter.take(key)) throw new HttpError(429, { error: "rate_limited" });
   };
@@ -219,6 +239,66 @@ export function createServer(deps: Deps) {
           requireCsrf(cfg, req, s, form);
           const r = await setHandle(sql, s.userId, String(form.get("handle") ?? ""));
           return redirect(r === "ok" ? "/settings" : `/settings?error=${r}`);
+        }),
+      },
+      "/v1/device/code": {
+        POST: handle("/v1/device/code", async (req, server) => {
+          if (!deviceLimiter.take(`device:${ip(server, req)}`))
+            throw new HttpError(429, { error: "rate_limited" });
+          const b = parse(DeviceCodeBody, await readJson(req));
+          const c = await createDeviceCode(sql, b.device_name);
+          return json(200, {
+            ...c,
+            verification_uri: `${cfg.publicBaseUrl}/device`,
+            verification_uri_complete: `${cfg.publicBaseUrl}/device?code=${c.user_code}`,
+            expires_in: 600,
+            interval: 5,
+          });
+        }),
+      },
+      "/v1/device/token": {
+        POST: handle("/v1/device/token", async (req) => {
+          const b = parse(DeviceTokenBody, await readJson(req));
+          const r = await pollDeviceToken(sql, b.device_code);
+          return json(r.status, r.body, { "cache-control": "no-store" });
+        }),
+      },
+      "/device": {
+        GET: handle("/device", async (req) => {
+          const s = await requireUser(sql, req);
+          const code = new URL(req.url).searchParams.get("code") ?? "";
+          const name = await pendingDevice(sql, code);
+          if (name === null) return page(400, "This code is no longer valid");
+          const c = esc(code.trim().toUpperCase());
+          return page(
+            200,
+            `<p>Link device '${esc(name)}' to your Tally account? Check that this code matches your terminal: <strong>${c}</strong></p>
+<form method="post" action="/device"><input type="hidden" name="csrf" value="${esc(s.csrf)}"><input type="hidden" name="user_code" value="${c}">
+<button name="decision" value="approve">Approve</button> <button name="decision" value="deny">Deny</button></form>`,
+          );
+        }),
+        POST: handle("/device", async (req) => {
+          const s = await requireUser(sql, req);
+          const form = await formOf(req);
+          requireCsrf(cfg, req, s, form);
+          const d = form.get("decision");
+          if (d !== "approve" && d !== "deny") throw new HttpError(400, { error: "bad_decision" });
+          if (!(await decide(sql, String(form.get("user_code") ?? ""), s.userId, d === "approve")))
+            return page(400, "This code is no longer valid");
+          return page(200, d === "approve" ? "Device linked. Return to your terminal." : "Denied.");
+        }),
+      },
+      "/settings/tokens/:id/revoke": {
+        POST: handle("/settings/tokens/:id/revoke", async (req) => {
+          const s = await requireUser(sql, req);
+          requireCsrf(cfg, req, s, await formOf(req));
+          const id = req.params.id;
+          const rows = /^\d{1,15}$/.test(id)
+            ? await sql`update device_tokens set revoked_at = now()
+                where id = ${id} and user_id = ${s.userId} and revoked_at is null returning id`
+            : [];
+          if (rows.length === 0) throw new HttpError(404, { error: "not_found" });
+          return redirect("/settings");
         }),
       },
       "/projects": {

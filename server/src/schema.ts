@@ -27,4 +27,7 @@ export const UploadBody = z
   .object({ prev_hash: Hash, entries: z.array(LedgerEntrySchema).min(1) })
   .strict();
 
+export const DeviceCodeBody = z.object({ device_name: z.string().min(1).max(64) }).strict();
+export const DeviceTokenBody = z.object({ device_code: z.string().min(1).max(128) }).strict();
+
 export const CommitBody = z.object({ hash: Hash, ts: z.number().int().nonnegative() }).strict();
