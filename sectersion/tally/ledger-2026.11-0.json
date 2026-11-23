@@ -1,0 +1,3 @@
+[
+{"v":1,"ruleset":"2026.11-0","action_id":"claude:48fef3d3-87bc-4b72-bcb5-d7b916f466df:d7dd5809-3717-4421-8c1f-750860d71ee0:prompt","ts":1795406562550,"project":"sectersion/tally","kind":"prompt","verified_s":120,"unverified_s":0,"reasons":["first_action"],"features":{"chars":372,"novelty_bytes":170,"relevance_pm":857},"prev_hash":"0000000000000000000000000000000000000000000000000000000000000000","hash":"56c412cd360b9048099e328430c02274ce0643c841b54bb0bc2c0e80e0c3902d"}
+]
