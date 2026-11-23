@@ -1,7 +1,7 @@
 //! Moves claims whose interrupt window has closed under the horizon into the ledger.
 use crate::presence::PRESENCE_SOURCE;
 use crate::store::{Store, StoreError};
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use tally_scoring::ruleset::{FIRST_ACTION_MS, INTERRUPT_FOLLOW_MS, MAX_INTERVAL_MS};
 use tally_scoring::{chain, score, LedgerEntry, GENESIS_HASH};
 
@@ -20,15 +20,15 @@ pub struct FinalizeSummary {
 pub enum FinalizeError {
     #[error(transparent)]
     Store(#[from] StoreError),
-    #[error("ledger diverges from re-scored claims at index {index} (action {action_id})")]
-    Divergence { index: usize, action_id: String },
+    #[error("ledger diverges from re-scored claims at index {index} (action {action_id}, field {field})")]
+    Divergence { index: usize, action_id: String, field: &'static str },
     #[error("ledger was written under ruleset {ledger} but this build scores with {current}; finalize will not append across a ruleset change")]
     RulesetChanged { ledger: String, current: String },
 }
 
 /// A claim is final iff `ts + INTERRUPT_FOLLOW_MS <= horizon`. The stored ledger must be a
-/// prefix of the re-scored claims, compared by `(action_id, ts, verified_s, unverified_s)`;
-/// `project` is not compared, so naming a project later does not diverge the past.
+/// prefix of the re-scored claims, compared by every claim field but `project`;
+/// naming a project later does not diverge the past.
 ///
 /// The horizon can go down when a new, slower source registers. Claims already ledgered are
 /// never withdrawn and `finalized_through` never moves back; later claims wait for the new
@@ -84,7 +84,18 @@ struct Prepared {
     summary: FinalizeSummary,
 }
 
-fn prepare(store: &Store) -> Result<Prepared, FinalizeError> {
+/// The read half of `prepare`, shared with `check_derivation`: everything read, re-scored and
+/// checked against the ledger.
+struct Derived {
+    guard: bool,
+    horizon: Option<i64>,
+    scored_events: usize,
+    claims: Vec<tally_scoring::Claim>,
+    skipped: BTreeSet<String>,
+    ledger: Vec<LedgerEntry>,
+}
+
+fn derive(store: &Store) -> Result<Derived, FinalizeError> {
     // Read order matters: horizon first. Every event with ts <= h was committed before the
     // watermark reached h, so events read after the horizon are a superset of what h covers,
     // and claims final under h depend only on events <= h. Reading events first could score
@@ -101,12 +112,7 @@ fn prepare(store: &Store) -> Result<Prepared, FinalizeError> {
             c.project = Some(name.clone());
         }
     }
-    // Read after the horizon, so it holds every interval the horizon implies.
-    let coverage = if guard { store.coverage()? } else { Vec::new() };
-    let skipped: HashSet<String> = store.skipped()?.into_iter().map(|(id, ..)| id).collect();
-    // Indexes into `claims` of every claim not already skipped.
-    let kept: Vec<usize> = (0..claims.len()).filter(|&i| !skipped.contains(&claims[i].action_id)).collect();
-
+    let skipped: BTreeSet<String> = store.skipped()?.into_iter().map(|(id, ..)| id).collect();
     let ledger = store.ledger()?;
     if let Some(last) = ledger.last().filter(|e| e.ruleset != tally_scoring::RULESET_VERSION) {
         return Err(FinalizeError::RulesetChanged {
@@ -114,14 +120,43 @@ fn prepare(store: &Store) -> Result<Prepared, FinalizeError> {
             current: tally_scoring::RULESET_VERSION.to_string(),
         });
     }
-    for (index, e) in ledger.iter().enumerate() {
-        let same = kept.get(index).map(|&i| &claims[i]).is_some_and(|c| {
-            (&c.action_id, c.ts, c.verified_s, c.unverified_s) == (&e.action_id, e.ts, e.verified_s, e.unverified_s)
-        });
-        if !same {
-            return Err(FinalizeError::Divergence { index, action_id: e.action_id.clone() });
-        }
+    if let Some((index, field)) = first_divergence(&ledger, &claims, &skipped) {
+        let action_id = ledger[index].action_id.clone();
+        return Err(FinalizeError::Divergence { index, action_id, field });
     }
+    Ok(Derived { guard, horizon, scored_events, claims, skipped, ledger })
+}
+
+/// Verifies the stored ledger is a prefix of the re-scored claims; writes nothing.
+pub fn check_derivation(store: &Store) -> Result<(), FinalizeError> {
+    derive(store).map(|_| ())
+}
+
+/// First ledger index that differs from the claims (minus `skipped`, never ledgered) and the
+/// first differing field; `"missing"` when the ledger is longer than the claims. `project` is
+/// not compared.
+fn first_divergence(ledger: &[LedgerEntry], claims: &[tally_scoring::Claim], skipped: &BTreeSet<String>) -> Option<(usize, &'static str)> {
+    let mut kept = claims.iter().filter(|c| !skipped.contains(&c.action_id));
+    ledger.iter().enumerate().find_map(|(i, e)| {
+        let Some(c) = kept.next() else { return Some((i, "missing")) };
+        let field = if c.action_id != e.action_id { "action_id" }
+            else if c.ts != e.ts { "ts" }
+            else if c.kind != e.kind { "kind" }
+            else if c.verified_s != e.verified_s { "verified_s" }
+            else if c.unverified_s != e.unverified_s { "unverified_s" }
+            else if c.reasons != e.reasons { "reasons" }
+            else if c.features != e.features { "features" }
+            else { return None };
+        Some((i, field))
+    })
+}
+
+fn prepare(store: &Store) -> Result<Prepared, FinalizeError> {
+    let Derived { guard, horizon, scored_events, claims, skipped, ledger } = derive(store)?;
+    // Read after the horizon, so it holds every interval the horizon implies.
+    let coverage = if guard { store.coverage()? } else { Vec::new() };
+    // Indexes into `claims` of every claim not already skipped.
+    let kept: Vec<usize> = (0..claims.len()).filter(|&i| !skipped.contains(&claims[i].action_id)).collect();
 
     let (mut new, mut skips) = (Vec::new(), Vec::new());
     for &i in kept.get(ledger.len()..).unwrap_or(&[]) {
@@ -408,7 +443,7 @@ mod tests {
         s.conn.execute("INSERT INTO events (id, ts, json) VALUES (?1, ?2, ?3)",
             rusqlite::params![idle.id, idle.ts, serde_json::to_string(&idle).unwrap()]).unwrap();
         let before = (s.ledger().unwrap(), s.skipped().unwrap());
-        assert!(matches!(finalize(&mut s), Err(FinalizeError::Divergence { index: 2, ref action_id }) if action_id == "d"));
+        assert!(matches!(finalize(&mut s), Err(FinalizeError::Divergence { index: 2, ref action_id, .. }) if action_id == "d"));
         assert_eq!((s.ledger().unwrap(), s.skipped().unwrap()), before);
     }
     #[test] fn a_skip_recorded_by_another_finalizer_mid_finalize_is_retried() {
@@ -426,13 +461,56 @@ mod tests {
         assert_eq!(a.ledger().unwrap().len(), 2);
         assert_eq!(finalize(&mut a).unwrap().appended, 1);        // the retry sees the new skip and succeeds
     }
+    #[test] fn a_changed_feature_with_a_valid_hash_is_a_divergence() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.append_events(&[prompt("a", 0, 600)]).unwrap();
+        s.set_watermark("src", 1_000_000).unwrap();
+        finalize(&mut s).unwrap();
+        // what a different build would have written: same seconds, other features, correct hash
+        let mut e = s.ledger().unwrap().remove(0);
+        let key = e.features.keys().next().expect("prompt claims carry features").clone();
+        *e.features.get_mut(&key).unwrap() += 1;
+        e.hash = tally_scoring::ledger::entry_hash(&e);
+        let names: Vec<String> = s.conn.prepare("SELECT name FROM sqlite_master WHERE type='trigger'").unwrap()
+            .query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        for n in names { s.conn.execute(&format!("DROP TRIGGER {n}"), []).unwrap(); }
+        s.conn.execute("UPDATE ledger SET hash = ?1, entry_json = ?2 WHERE seq = 1",
+            rusqlite::params![e.hash, serde_json::to_string(&e).unwrap()]).unwrap();
+        assert!(matches!(check_derivation(&s), Err(FinalizeError::Divergence { index: 0, field: "features", .. })));
+        assert!(matches!(finalize(&mut s), Err(FinalizeError::Divergence { field: "features", .. })));
+    }
+    #[test] fn check_derivation_passes_on_a_clean_store_and_writes_nothing() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.append_events(&[prompt("a", 0, 600), edit("b", 100_000)]).unwrap();
+        s.set_watermark("src", 1_000_000).unwrap();
+        finalize(&mut s).unwrap();
+        let before = (s.ledger().unwrap(), s.finalized_through().unwrap());
+        check_derivation(&s).unwrap();
+        assert_eq!((s.ledger().unwrap(), s.finalized_through().unwrap()), before);
+    }
+    /// "a" is not covered (skipped); "b"'s interval starts at a.ts and is covered (ledgered).
+    fn store_with_one_skipped_and_one_ledgered_claim() -> Store {
+        let mut s = guarded();
+        s.append_events(&[prompt("a", 1_000_000, 600), edit("b", 1_100_000)]).unwrap();
+        s.extend_coverage(&[(1_000_000, 3_000_000)]).unwrap();
+        s.set_watermark(PRESENCE_SOURCE, 3_000_000).unwrap();
+        finalize(&mut s).unwrap();
+        s
+    }
+    #[test] fn a_skipped_claim_does_not_trigger_divergence() {
+        let mut s = store_with_one_skipped_and_one_ledgered_claim();
+        assert_eq!(s.skipped().unwrap().len(), 1);
+        assert_eq!(s.ledger().unwrap().len(), 1);
+        check_derivation(&s).unwrap();
+        finalize(&mut s).unwrap();
+    }
     #[test] fn retry_gives_up_after_three_attempts_and_only_on_conflict_or_chain_broken() {
         let mut calls = 0;
         let r: Result<(), _> = retry(|| { calls += 1; Err(FinalizeError::Store(StoreError::Conflict)) });
         assert!(matches!(r, Err(FinalizeError::Store(StoreError::Conflict))));
         assert_eq!(calls, 3);
         calls = 0;
-        let r: Result<(), _> = retry(|| { calls += 1; Err(FinalizeError::Divergence { index: 0, action_id: "x".into() }) });
+        let r: Result<(), _> = retry(|| { calls += 1; Err(FinalizeError::Divergence { index: 0, action_id: "x".into(), field: "ts" }) });
         assert!(r.is_err());
         assert_eq!(calls, 1);
     }
