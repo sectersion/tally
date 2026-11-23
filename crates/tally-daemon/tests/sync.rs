@@ -56,6 +56,17 @@ fn api_maps_every_c7_status() {
 }
 
 #[test]
+fn api_treats_a_redirect_as_a_retryable_error() {
+    let f = FakeServer::start("tok");
+    let api = Api::new(&f.url, "tok");
+    f.fail_next(1, 302);
+    assert!(matches!(api.commit("srv_1", GENESIS_HASH, 1), Err(ApiError::Server(302))));
+    f.fail_next(1, 302);
+    let e = api.head("srv_1", R).unwrap_err();
+    assert!(matches!(e, ApiError::Server(302)) && e.retryable());
+}
+
+#[test]
 fn api_errors_never_contain_the_token() {
     let f = FakeServer::start("tok");
     f.down(true);

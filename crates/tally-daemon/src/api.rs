@@ -46,7 +46,7 @@ fn classify(e: ureq::Error) -> ApiError {
             404 => ApiError::NotFound,
             413 => ApiError::TooLarge,
             409 | 422 => {
-                let v: serde_json::Value = resp.into_json().unwrap_or_default();
+                let v: serde_json::Value = serde_json::from_reader(resp.into_reader()).unwrap_or_default();
                 if code == 409 {
                     match v["head_hash"].as_str() {
                         Some(h) => ApiError::Conflict { head_hash: h.into() },
@@ -79,15 +79,20 @@ impl Api {
 
     fn send(&self, req: ureq::Request, body: Option<serde_json::Value>) -> Result<ureq::Response, ApiError> {
         let req = req.set("Authorization", &format!("Bearer {}", self.token));
-        match body {
-            Some(b) => req.set("Content-Type", "application/json").send_json(b),
+        let r = match body {
+            Some(b) => req.set("Content-Type", "application/json").send_string(&b.to_string()),
             None => req.call(),
         }
-        .map_err(classify)
+        .map_err(classify)?;
+        // With redirects(0) ureq may hand back a 3xx as Ok.
+        match r.status() {
+            200..=299 => Ok(r),
+            c => Err(ApiError::Server(c)),
+        }
     }
 
     fn parse_head(r: ureq::Response) -> Result<Head, ApiError> {
-        r.into_json().map_err(|_| ApiError::Network("BadBody".into()))
+        serde_json::from_reader(r.into_reader()).map_err(|_| ApiError::Network("BadBody".into()))
     }
 
     pub fn head(&self, server_id: &str, ruleset: &str) -> Result<Head, ApiError> {
