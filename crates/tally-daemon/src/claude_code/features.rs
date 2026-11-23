@@ -28,7 +28,7 @@ pub fn project_vocab(root: &Path) -> std::io::Result<Vocab> {
             (md.is_file() && md.len() <= MAX_FILE_BYTES).then_some((md.modified().ok()?, path))
         })
         .collect();
-    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.sort_by_key(|f| std::cmp::Reverse(f.0));
     let mut vocab = Vocab::default();
     for (_, path) in files {
         if vocab.is_full() {

@@ -293,7 +293,7 @@ mod tests {
                     let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o644));
                 }
             }
-            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0)).unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o000)).unwrap();
             Some(Box::new(Restore(p.to_path_buf())) as Box<dyn std::any::Any>)
         };
         std::fs::File::open(p).is_err().then_some(g).flatten()
