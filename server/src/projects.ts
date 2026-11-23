@@ -129,24 +129,30 @@ export async function commitWindows(
   projectId: string,
   limit = 50,
 ): Promise<CommitWindow[]> {
+  // Commits of one push share received_at: the head goes first, so it carries the window.
+  // limit + 1 newest before the join, so the oldest shown row still has its lower bound; each
+  // window is then an index range on ledger_entries (chain_id, ts).
   const rows = await sql`with w as (
-      select distinct on (sha) sha, github_repo_id, received_at, claimed_ts from push_receipts
+      select distinct on (sha) sha, github_repo_id, received_at, claimed_ts, is_head from push_receipts
       where project_id = ${projectId} order by sha, received_at
+    ), n as (
+      select * from w order by received_at desc, is_head, sha desc limit ${limit + 1}
     ), o as (
-      select w.*, floor(extract(epoch from received_at) * 1000)::bigint as r_ms,
-        floor(extract(epoch from lag(received_at) over (order by received_at, sha)) * 1000)::bigint as l_ms
-      from w
+      select n.*, floor(extract(epoch from received_at) * 1000)::bigint as r_ms,
+        floor(extract(epoch from lag(received_at) over (order by received_at, is_head desc, sha)) * 1000)::bigint as l_ms
+      from n
     )
-    select o.sha, coalesce(r.full_name, '') as full_name, o.received_at, o.claimed_ts,
-      coalesce(sum(e.verified_s), 0)::bigint as v,
+    select o.sha, coalesce(r.full_name, '') as full_name, o.received_at, o.claimed_ts, s.v,
       case when o.claimed_ts > o.r_ms + 300000 then 'claimed_after_receipt'
            when o.r_ms - o.claimed_ts > 7 * 86400000 then 'pushed_late' end as flag
     from o
     left join github_repos r on r.id = o.github_repo_id
-    left join (ledger_entries e join chains c on c.id = e.chain_id and c.project_id = ${projectId})
-      on e.ts <= o.r_ms and (o.l_ms is null or e.ts > o.l_ms)
-    group by o.sha, r.full_name, o.received_at, o.claimed_ts, o.r_ms
-    order by o.received_at desc, o.sha desc limit ${limit}`;
+    cross join lateral (
+      select coalesce(sum(e.verified_s), 0)::bigint as v
+      from chains c join ledger_entries e on e.chain_id = c.id
+      where c.project_id = ${projectId} and e.ts <= o.r_ms and e.ts > coalesce(o.l_ms, -1)
+    ) s
+    order by o.received_at desc, o.is_head, o.sha desc limit ${limit}`;
   return rows.map(
     (r: {
       sha: string;

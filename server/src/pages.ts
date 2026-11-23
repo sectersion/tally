@@ -163,7 +163,7 @@ async function projectMain(
         )}</tbody></table>`
     : html`<p>No verified time in the last 90 days.</p>`;
   const pushes = windows.length
-    ? html`<table><thead><tr><th>Commit</th><th>Received by server</th><th>Claimed</th><th>Verified since previous</th><th>Note</th></tr></thead><tbody>${windows.map(
+    ? html`<table><thead><tr><th>Commit</th><th>Received by server</th><th>Claimed</th><th>Ledger-claimed verified time since the previous push</th><th>Note</th></tr></thead><tbody>${windows.map(
         (w) =>
           html`<tr><td>${
             w.full_name
@@ -184,7 +184,7 @@ async function projectMain(
       html`<p>GitHub App removed on ${r.at.toISOString().slice(0, 10)}; pushes after this are not witnessed</p>`,
   )}${mine ? html`<p><a href="/p/${p.public_name}/settings">Project settings</a></p>` : none}
 <h2>Daily verified time</h2>${days}
-<h2>Witnessed pushes</h2><p>Each row shows the verified time recorded after the previous witnessed push and up to the moment the server received this one: it anchors the clock to the push and says nothing about effort. Times marked claimed come from the push and are not checked.</p>${pushes}
+<h2>Witnessed pushes</h2><p>Each row sums the verified time of ledger entries timestamped after the previous witnessed push and at or before this one. The push times are the server's; the ledger times are claimed by the device. It says nothing about effort. Times marked claimed come from the push and are not checked.</p>${pushes}
 <p>Ledger head last committed ${head?.t ? utc(head.t) : "never"}</p>
 <h2>Badge</h2><pre>${`![tracked with Tally](${cfg.publicBaseUrl}/badge/${p.public_name}.svg)`}</pre>`;
 }

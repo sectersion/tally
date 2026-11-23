@@ -228,6 +228,42 @@ test("commit windows split verified time at each witnessed push", async () => {
   ]);
 });
 
+test("commit windows return the newest 50; the oldest returned keeps its lower bound", async () => {
+  const { id } = await projectWithOwner();
+  const T = 1_800_000_000_000;
+  // Commit i is received at T + 10 s * i; entry i (v = i + 1) sits 5 s before it.
+  await ledger(
+    id,
+    Array.from({ length: 55 }, (_, i) => ({ ts: T + i * 10_000 - 5_000, v: i + 1 })),
+  );
+  for (let i = 0; i < 55; i++)
+    await receipt(id, `${i}`.padStart(40, "0"), new Date(T + i * 10_000));
+  const w = await commitWindows(sql, id);
+  expect(w).toHaveLength(50);
+  expect(w[0]?.sha).toBe("54".padStart(40, "0"));
+  expect(w[49]?.sha).toBe("5".padStart(40, "0"));
+  expect(w.map((x) => x.verified_s)).toEqual(Array.from({ length: 50 }, (_, k) => 55 - k));
+});
+
+test("commits of one push: the head commit carries the window", async () => {
+  const { id } = await projectWithOwner();
+  const T = 1_800_000_000_000;
+  await ledger(id, [{ ts: T - 1000, v: 60 }]);
+  const d = crypto.randomUUID();
+  await sql`insert into webhook_deliveries (delivery_id, event) values (${d}, 'push')`;
+  for (const [sha, head] of [
+    ["0".repeat(40), false],
+    ["f".repeat(40), true],
+  ] as const)
+    await sql`insert into push_receipts (delivery_id, sha, github_repo_id, project_id, ref, is_head, forced, received_at)
+      values (${d}, ${sha}, 1, ${id}, 'refs/heads/main', ${head}, false, ${new Date(T)})`;
+  const w = await commitWindows(sql, id);
+  expect(w.map((x) => [x.sha[0], x.verified_s])).toEqual([
+    ["0", 0],
+    ["f", 60],
+  ]);
+});
+
 test("commit window flags are informational", async () => {
   const { id } = await projectWithOwner();
   const T = 1_800_000_000_000;
@@ -255,6 +291,8 @@ test("a replayed push does not move the commit's received time", async () => {
   expect(t).toContain("2026-01-02 03:04:05 UTC");
   expect(t).not.toContain("2026-01-09 03:04:05 UTC");
   expect(t).toContain("2026-01-02 03:00:00 UTC (claimed)");
+  expect(t).toContain("<th>Ledger-claimed verified time since the previous push</th>");
+  expect(t).toContain("the ledger times are claimed by the device");
 });
 
 test("renamed repo shows the new name and 'was' the old", async () => {
