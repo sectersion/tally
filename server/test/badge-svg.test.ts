@@ -183,6 +183,11 @@ test("rate limited per ip", async () => {
     expect(r.headers.get("cache-control")).toBe("no-store");
     expect(r.headers.get("retry-after")).toBe("60");
     expect(await r.text()).toContain("rate limited");
+    const j = await fetch(`http://localhost:${s.port}/badge/x/y.json`);
+    expect(j.status).toBe(429);
+    expect(j.headers.get("cache-control")).toBe("no-store");
+    expect(j.headers.get("retry-after")).toBe("60");
+    expect(await j.json()).toMatchObject({ message: "rate limited", color: "lightgrey" });
   } finally {
     s.stop(true);
   }
@@ -204,5 +209,12 @@ test("if-none-match: weak, listed and * all match; others get 200", async () => 
   for (const inm of [`W/${etag}`, `"x", ${etag}`, "*", `"x",W/${etag} , "y"`])
     expect((await get(`/badge/${p.name}.svg`, { "if-none-match": inm })).status).toBe(304);
   for (const inm of [`"x"`, `"x", "y"`, `${etag.slice(0, -1)}9"`])
+    expect((await get(`/badge/${p.name}.svg`, { "if-none-match": inm })).status).toBe(200);
+});
+
+test("private never answers 304", async () => {
+  const p = await project({ public: false });
+  const etag = (await get(`/badge/${p.name}.svg`)).headers.get("etag") ?? "";
+  for (const inm of [etag, "*"])
     expect((await get(`/badge/${p.name}.svg`, { "if-none-match": inm })).status).toBe(200);
 });

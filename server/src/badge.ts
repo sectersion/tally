@@ -70,10 +70,10 @@ export async function badgeResponse(
       "cache-control": "public, max-age=300, stale-while-revalidate=3600",
       etag,
     };
+    if (!p.public) return out(200, "private", "lightgrey", cache);
     const tags = (ifNoneMatch ?? "").split(",").map((t) => t.trim().replace(/^W\//, ""));
     if (tags.includes(etag) || tags.includes("*"))
       return new Response(null, { status: 304, headers: cache });
-    if (!p.public) return out(200, "private", "lightgrey", cache);
     const s = (await verifiedSeconds(sql, p.id)) ?? 0;
     const b = badge(s);
     return out(200, b.message, "blue", cache);
