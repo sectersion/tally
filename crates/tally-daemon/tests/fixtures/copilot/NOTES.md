@@ -1,20 +1,43 @@
-# Copilot spike notes (docs-only; spike NOT run)
+# Copilot spike notes
 
-Legend: OBSERVED = stated by vendor docs (read via fetch, not on-disk). UNVERIFIED = third-party/blog or inference. Nothing here was seen on a real machine; no fixture is committed because we will not invent data.
+Primary format: Copilot CLI / agent host `events.jsonl` (the adapter reads only this). Spike run 2026-11-23 on the plan author's Windows machine by reading real files; no vendor docs were needed for anything marked OBSERVED.
 
-## Copilot CLI
-- OBSERVED: default root `~/.copilot` (Windows: by extension `%USERPROFILE%\.copilot`), overridden wholesale by `COPILOT_HOME`. https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference
-- OBSERVED: `session-state/<session-id>/events.jsonl` (event log, powers --resume/--continue); `session-store.db` (SQLite, rebuildable); `logs/process-{timestamp}-{pid}.log`. Same URL.
-- OBSERVED: docs do NOT document the events.jsonl schema or any timestamp field. Same URL.
-- UNVERIFIED: each line is JSON with `type`, `timestamp`, `id`, `data`; token totals only in `session.shutdown` (`data.modelMetrics`), cumulative across resumes, absent if no clean shutdown. https://usekibble.com/blog/where-github-copilot-keeps-its-usage-logs
-- UNVERIFIED: Windows `session-state` path explicitly (docs only give Windows for permissions-config.json).
+Legend: OBSERVED = seen in a real file on this machine (evidence given). UNVERIFIED = vendor docs, third-party write-ups, memory, or a value that never occurred in the one sample. Nothing UNVERIFIED is emitted as an event.
 
-## VS Code Copilot Chat
-- UNVERIFIED: `<Code user dir>/User/workspaceStorage/<hash>/chatSessions/<id>.json|.jsonl` (Win `%APPDATA%\Code`, mac `~/Library/Application Support/Code`, Linux `~/.config/Code`); `.jsonl` is a mutation log, `.json` older snapshot (double-count risk); requests[] have `timestamp`, `elapsedMs`, `modelId`. Source: usekibble URL above; storage code at https://github.com/microsoft/vscode/blob/main/src/vs/workbench/contrib/chat/common/model/chatSessionStore.ts (not read in detail).
+## Copilot CLI events.jsonl (fixture: `cli-1.0.111/`)
 
-## Maintainer TODO to run the real spike
-1. On a machine with Copilot CLI installed and logged in, run one short session (a prompt, a tool call, an idle gap, a clean exit), and a second resumed session.
-2. Copy `~/.copilot/session-state/<id>/events.jsonl` (redact prompts/paths) to this directory; note CLI version.
-3. Record: event types present, timestamp format/timezone, whether per-turn start/end exist, whether crash (kill -9) leaves a usable log, resume behaviour (same id? appended?).
-4. Repeat for VS Code chatSessions (.json vs .jsonl) if VS Code support is wanted.
-5. Replace every UNVERIFIED above with OBSERVED, then write the parser against the real fixture.
+Sample: one real session, 233 records, 2 typed prompts, 5 + 1 assistant turns, 28 tool calls, clean shutdown. (A second session id has an operation lock but no directory/events: not usable.)
+
+- OBSERVED: path `%USERPROFILE%\.copilot\session-state\<session-uuid>\events.jsonl`; sibling `workspace.yaml` (session id, cwd, git_root, repository, branch, client_name, created_at, updated_at; unused), `checkpoints/index.md`, `files/`, `research/`. Root `~/.copilot` also has `session-store.db` (SQLite; NOT read, undocumented) and `logs/process-*.log` (text, no chat).
+- UNVERIFIED: macOS/Linux paths (same `~/.copilot`) and the `COPILOT_HOME` override come from GitHub docs (https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference), not seen here.
+- OBSERVED: append-only JSON Lines, one object per line, always exactly the keys `type`, `data`, `id` (uuid), `timestamp`, `parentId` (previous event's id, or `null`). 233 of 233 lines parse; `id`s are unique.
+- OBSERVED: `timestamp` is ISO-8601 UTC with `Z` and milliseconds (`2026-11-23T21:32:02.644Z`). Timestamps are the log's own clock; the first record is `session.start` and the file starts ~40 s before the first prompt (the CLI was launched with the first prompt as an argument; its `sessionStart` hook carries that text as `initialPrompt`, which the adapter ignores).
+- OBSERVED version/format: `session.start.data` has `version: 1`, `producer: "copilot-agent"`, `copilotVersion: "1.0.111-0"`, `sessionId`, `context.cwd`, `context.gitRoot`, `repository`, `branch`. The adapter labels the format `cli-events-v<version>`; a log with no `session.start` or `sessionId` is `unknown`.
+- OBSERVED event types (count): hook.start 40, hook.end 40, tool.execution_start 28, permission.requested 28, permission.completed 28, tool.execution_complete 28, assistant.turn_start 6, assistant.turn_end 6, assistant.message 6, session.usage_record 6, user.message 2, session.usage_checkpoint 2, and one each of session.start, session.auto_mode_resolved, instruction.update, system.message, model.turn_started, model.model_call_started, model.captured_assignment_context, model.model_call_success, model.message, model.response, model.turn_ended, model.messages_snapshot, session.shutdown. The `model.*` group (a side model call by a smaller model, `parentId` null) is ignored.
+- OBSERVED human prompt: `user.message` with `data.delivery == "idle"`, `data.content` (what was typed; its length equals the prompt length), `data.transformedContent` (the same text prefixed with injected context, ~2.3 KB for the first: never used), `messageId`, `turnId`, `interactionId`, `hasSubmittedTask: true`, `parentAgentTaskId` (a uuid on both prompts, so it does NOT mark agent-originated input). Prompt count in the log equals the two prompts typed.
+- UNVERIFIED: other `delivery` values (queued/steering messages typed while the agent runs), and `user.message`s from sub-agents or hooks. The adapter emits a prompt only for `delivery == "idle"` with non-empty `content`; everything else is skipped and counted (under-counting, never over-counting).
+- OBSERVED agent activity (not human): `assistant.message` (`content`, `phase` = `commentary` or `final_answer`, `toolRequests`, `messageId`; `content` is empty when the message only requests tools), `tool.execution_*`, `permission.*`, `hook.*`, `model.*`, `session.usage_*`. `agent_output` chars = chars of non-empty `assistant.message.content`.
+- OBSERVED turn start/end: per typed prompt the log has `assistant.turn_start`/`assistant.turn_end` pairs with `turnId` 0,1,2,... (one pair per model round trip; `turnId` restarts at 0 on the next prompt), then a `hook.start` with `hookType: "agentStop"` and `session.usage_checkpoint`. The adapter's `agent_busy` runs from the prompt's `user.message` timestamp to the last `assistant.turn_end` before the `agentStop` hook (or before the next prompt, or `session.shutdown`). A turn with no end yet is not emitted and holds the watermark.
+- OBSERVED tool decisions: every `permission.requested`/`permission.completed` pair (28) is `result.kind == "approved"` with `decisionSource == "host_policy"` and `permissionMode == "manual"`, `permissionRequest.kind == "read"` (all tools were `view`, `glob`, `rg`: reads). No user approval, no rejection, no write/shell permission appears. So a user decision has NEVER been observed: `tool_decision` is not emitted. UNVERIFIED: the shape of a user approval/denial (probably a different `decisionSource` and `result.kind` such as a denial).
+- NOT OBSERVED: abort/Stop (no event type for it; the only ending was `agentStop` + `session.shutdown` with `shutdownType: "routine"`). `interrupt` is not emitted. UNVERIFIED: the record of an abort, and what a killed session leaves (probably no `session.shutdown`; an open turn then never closes and stops holding the watermark after 6 h).
+- NOT OBSERVED: agent file writes. Tool names seen: `view`, `glob`, `rg` only. Edit/create tool names and their path argument are unknown, so `agent_write_hashes` stays empty (UNVERIFIED). `session.shutdown.data.codeChanges` has only line totals.
+- OBSERVED failed tool results: none (`success` was true for all 28), so the `last_error` input to the prompt features is implemented from `tool.execution_complete.data.success == false` + `result.content` (UNVERIFIED shape).
+- OBSERVED project attribution: `session.start.data.context.cwd` (Windows path with backslashes, equal to `gitRoot` here). Mapped with `project::project_for_dir`; no repository means `project: None`.
+- Per-file stat note: the file is rewritten by append only; the adapter re-parses the whole file when `(len, mtime)` changes and relies on stable ids `copilot:<sessionId>:<messageId>:<kind>`.
+
+## VS Code Copilot Chat storage (fixture: `1.147.0/`, NOT parsed)
+
+- OBSERVED: `%APPDATA%\Code\User\workspaceStorage\<hash>\chatSessions\<uuid>.jsonl` (57 files) and legacy `.json` (7 files). Every one has `"requests": []`; a prompt in VS Code chat never appeared (VS Code 1.147.0). `.jsonl` is a mutation log: line 1 `{"kind":0,"v":<snapshot, version 3>}`, then `{"kind":1,"k":[path],"v":...}` sets (only `responderUsername`, `inputState` seen). `kind` values 2+ UNVERIFIED.
+- OBSERVED (indirect): one session ran an agent edit (a `chatEditingSessions/<id>/state.json` with `requestId`s exists) while its chat file still has no requests, so VS Code may not persist requests there.
+- OBSERVED: `workspaceStorage/<hash>/workspace.json` is `{"folder": "file:///c%3A/..."}` (58), `{"workspace": "file:///..."}` (1), `{"folder": "vscode-vfs://github/..."}` (2), absent (1).
+- Not built on. The request shape, timestamps, accept/reject and Stop in VS Code chat are all UNVERIFIED. Fixtures `chat-session.jsonl`, `legacy-chat-session.json`, `workspace.json` are scrubbed real files kept as evidence of the container format.
+
+## Fixtures
+
+- `cli-1.0.111/events.jsonl`: scrubbed real session. Text replaced by `x` runs (lengths of `content` kept, everything else shortened to at most 12 x), paths `C:/tallyproj/f1.rs`, cwd `C:\tallyproj`, all ids, uuids (also as object keys) and timestamps replaced (relative spacing kept, base 2023-11-14T22:13:20Z), nested objects deeper than 3 levels dropped. `transformedContent` shortened to 10 x. Grep for the user's name, home dir, `@`, secrets, session ids: no hits.
+- `cli-1.0.111/drift/events.jsonl`: SYNTHETIC. The same log with the second `user.message` renamed `user.msg`, the first `assistant.message` line cut mid-JSON, and one `tool.execution_start` line without `timestamp` (2 errors, the rest skipped/identical).
+- `1.147.0/`: VS Code files described above (drift variant is synthetic: `requests` renamed `turns`, a truncated line, a line without `kind`).
+
+## Maintainer TODO (to cover the UNVERIFIED items)
+
+Run a Copilot CLI session that: edits a file (write tool name and path argument), runs a shell command and approves it, rejects one command, types a message while the agent is working, presses Esc/Stop mid-turn, and is killed once. Record the new event types and `decisionSource`/`result.kind` values, then extend the parser (interrupt, tool_decision, agent writes).

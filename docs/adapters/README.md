@@ -7,7 +7,7 @@
 | codex | unsupported: spike not run, needs a logged-in Codex CLI session to capture a real rollout log | none | `~/.codex/sessions/` (UNVERIFIED) |
 | aider | unsupported: spike not run, needs `aider-chat` installed, a model API key and a scratch session | none | project dir `.aider.chat.history.md` (UNVERIFIED) |
 | gemini-cli | unsupported: spike not run, needs a Gemini CLI install with a login and a real chat to inspect | none | `~/.gemini/tmp/<hash>/chats/` (UNVERIFIED) |
-| copilot | unsupported: spike not run, needs a real Copilot CLI or VS Code chat session to inspect | none | `~/.copilot/session-state/`, VS Code `workspaceStorage` (UNVERIFIED) |
+| copilot | supported for Copilot CLI (OBSERVED, v1 events); VS Code Chat unsupported (no requests ever seen); see [copilot.md](copilot.md) | prompt, agent_output, agent_busy | `~/.copilot/session-state/<id>/events.jsonl` (`%USERPROFILE%\.copilot` on Windows) |
 | cursor | unsupported: spike not run, needs a Cursor install and a read of its SQLite `state.vscdb` | none | Cursor `User/workspaceStorage` (UNVERIFIED) |
 
 No parser exists for an unsupported harness; each has a page here with what is believed, marked UNVERIFIED, and `NOTES.md` under `crates/tally-daemon/tests/fixtures/<harness>/` with the steps to run the spike.

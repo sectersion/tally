@@ -139,6 +139,11 @@ pub fn sources(cfg: &Config, home: &Path, store: &mut Store) -> Result<Vec<Box<d
             v.push(Box::new(crate::claude_code::ClaudeCode::new(dir)));
         }
     }
+    if cfg.copilot.enabled {
+        v.push(Box::new(crate::adapters::copilot::CopilotSource::new(
+            cfg.copilot.home.clone().or_else(crate::adapters::copilot::default_home),
+        )));
+    }
     if cfg.heartbeat.enabled {
         let seed = store.agent_writes_since(now_ms() - crate::heartbeat::SEED_WINDOW_MS).unwrap_or_default();
         let token_file = cfg.heartbeat.token_file.clone().unwrap_or_else(|| home.join("heartbeat.token"));
@@ -171,6 +176,9 @@ pub fn sources(cfg: &Config, home: &Path, store: &mut Store) -> Result<Vec<Box<d
     }
     if !cc.enabled {
         disabled.push("claude-code");
+    }
+    if !cfg.copilot.enabled {
+        disabled.push("copilot");
     }
     if !cfg.heartbeat.enabled {
         disabled.push("heartbeat");
@@ -365,6 +373,7 @@ mod tests {
         let mut s = Store::open(&d.path().join("tally.db")).unwrap();
         let mut cfg = Config::default();
         cfg.claude_code.enabled = false;
+        cfg.copilot.enabled = false;
         cfg.presence.enabled = true;
         s.set_watermark("presence", 5).unwrap();
         s.set_watermark("git", 100).unwrap();
@@ -382,6 +391,18 @@ mod tests {
         cfg.presence.enabled = false;
         assert_eq!(sources(&cfg, d.path(), &mut s).unwrap().len(), 0);
         assert_eq!(s.horizon().unwrap(), Some(100));
+    }
+    #[test]
+    fn sources_registers_copilot_by_default_and_not_when_disabled() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = Store::open(&d.path().join("tally.db")).unwrap();
+        let mut cfg = Config::default();
+        cfg.claude_code.enabled = false;
+        cfg.presence.enabled = false;
+        let mut ids = |c: &Config| sources(c, d.path(), &mut s).unwrap().iter().map(|x| x.id().to_string()).collect::<Vec<_>>();
+        assert_eq!(ids(&cfg), ["copilot", "git"]);
+        cfg.copilot.enabled = false;
+        assert_eq!(ids(&cfg), ["git"]);
     }
     #[test]
     fn a_zero_interval_ticks_every_second() {

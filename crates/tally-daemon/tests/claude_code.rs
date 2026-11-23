@@ -134,7 +134,7 @@ fn setup() -> Option<Env> {
     }
     let cwd = repo.to_string_lossy().replace('\\', "/");
     let cwd_json = serde_json::to_string(&cwd).unwrap().trim_matches('"').to_string();
-    std::fs::write(home.join("config.toml"), format!("[presence]\nenabled = false\n[claude_code]\nprojects_dir = '{}'\n", projects.display())).unwrap();
+    std::fs::write(home.join("config.toml"), format!("[presence]\nenabled = false\n[copilot]\nenabled = false\n[claude_code]\nprojects_dir = '{}'\n", projects.display())).unwrap();
     let now = tally_daemon::source::now_ms();
     let prefix = hour_prefix(now - 90 * 60_000);
     let hour = parse_rfc3339_ms(&format!("{prefix}00:00.000Z")).unwrap();

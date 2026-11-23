@@ -337,6 +337,9 @@ fn main() -> Result<()> {
         Cmd::Doctor { json } => {
             let cfg = config::load(&home)?;
             let mut configured: Vec<&str> = if cfg.claude_code.enabled { vec!["claude-code"] } else { vec![] };
+            if cfg.copilot.enabled {
+                configured.push("copilot");
+            }
             if cfg.heartbeat.enabled {
                 configured.push("heartbeat");
             }

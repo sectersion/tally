@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub run: RunConfig,
     pub claude_code: ClaudeCodeConfig,
+    pub copilot: CopilotConfig,
     pub presence: PresenceConfig,
     pub publish: crate::publish::PublishConfig,
     pub sync: SyncConfig,
@@ -99,6 +100,20 @@ impl Default for ClaudeCodeConfig {
             enabled: true,
             projects_dir: None,
         }
+    }
+}
+
+/// `home: None` means `$COPILOT_HOME`, else `~/.copilot` (the Copilot CLI state directory).
+#[derive(serde::Deserialize, Debug, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct CopilotConfig {
+    pub enabled: bool,
+    pub home: Option<PathBuf>,
+}
+
+impl Default for CopilotConfig {
+    fn default() -> Self {
+        Self { enabled: true, home: None }
     }
 }
 
@@ -210,6 +225,22 @@ mod tests {
         write(&d, "[sync]\ntoken = \"x\"\n");
         assert!(load(d.path()).unwrap_err().to_string().contains("unknown"));
         assert_eq!(Config::default().sync, SyncConfig { enabled: false, server: None });
+    }
+
+    #[test]
+    fn copilot_table_parses_and_defaults_on() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(load(d.path()).unwrap().copilot, CopilotConfig { enabled: true, home: None });
+        write(&d, "[copilot]
+enabled = false
+home = \"/x\"
+");
+        let c = load(d.path()).unwrap().copilot;
+        assert_eq!((c.enabled, c.home), (false, Some(PathBuf::from("/x"))));
+        write(&d, "[copilot]
+user_data_dirs = []
+");
+        assert!(load(d.path()).unwrap_err().to_string().contains("unknown"));
     }
 
     #[test]

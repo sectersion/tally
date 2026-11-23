@@ -1,5 +1,6 @@
 //! Shared types for harness adapters: a pure `parse` per harness plus the poll wrapper in `common`.
 pub mod common;
+pub mod copilot;
 
 use crate::claude_code::features::{self, ContextTail};
 use std::cell::RefCell;
