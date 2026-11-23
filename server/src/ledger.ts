@@ -7,6 +7,28 @@ export const GENESIS = "0".repeat(64);
 
 export type Head = { head_hash: string; count: number };
 
+/** The chain's head for a ruleset; a project with no chain row yet is at genesis. */
+export async function getHead(
+  sql: SQL,
+  projectId: string,
+  ruleset: string = rulesetVersion(),
+): Promise<Head> {
+  const [ch] =
+    await sql`select head_hash, count from chains where project_id = ${projectId} and ruleset = ${ruleset}`;
+  return ch
+    ? { head_hash: ch.head_hash, count: Number(ch.count) }
+    : { head_hash: GENESIS, count: 0 };
+}
+
+/** Records a daemon's committed head. The hash need not be stored yet: received_at is the evidence. */
+export async function recordCommit(
+  sql: SQL,
+  projectId: string,
+  c: { hash: string; ts: number },
+): Promise<void> {
+  await sql`insert into commits (project_id, hash, ts) values (${projectId}, ${c.hash}, ${c.ts})`;
+}
+
 /** Pure batch checks, first failure wins: foreign ruleset, foreign project, then the Rust chain check. */
 export function checkBatch(
   entries: LedgerEntry[],

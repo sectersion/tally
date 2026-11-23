@@ -2,9 +2,9 @@ import type { BunRequest, SQL } from "bun";
 import { requireToken } from "./auth.ts";
 import { MAX_BATCH, MAX_BODY_BYTES } from "./config";
 import { HttpError, json, parse, readJson } from "./errors.ts";
-import { appendEntries, checkBatch } from "./ledger.ts";
+import { appendEntries, checkBatch, getHead, recordCommit } from "./ledger.ts";
 import { log } from "./log.ts";
-import { UploadBody } from "./schema.ts";
+import { CommitBody, UploadBody } from "./schema.ts";
 import { rulesetVersion } from "./wasm.ts";
 
 type Deps = { sql: SQL; port: number; ruleset?: string };
@@ -50,6 +50,29 @@ export function createServer(deps: Deps) {
           );
           if (bad) throw new HttpError(422, { error: "broken_chain", ...bad });
           return json(200, await appendEntries(sql, projectId, body, ruleset));
+        }),
+      },
+      "/v1/ledger/:project/head": {
+        GET: handle(async (req) => {
+          const projectId = req.params.project;
+          // Task 9: rate limit call site goes here, before auth.
+          await requireToken(sql, req, projectId);
+          const r = new URL(req.url).searchParams.get("ruleset");
+          if (r !== null && (r.length < 1 || r.length > 32))
+            throw new HttpError(400, {
+              error: "invalid_body",
+              issues: [{ path: "ruleset", message: "must be 1-32 characters" }],
+            });
+          return json(200, await getHead(sql, projectId, r ?? ruleset));
+        }),
+      },
+      "/v1/ledger/:project/commit": {
+        POST: handle(async (req) => {
+          const projectId = req.params.project;
+          // Task 9: rate limit call site goes here, before auth.
+          await requireToken(sql, req, projectId);
+          await recordCommit(sql, projectId, parse(CommitBody, await readJson(req)));
+          return json(200, { ok: true });
         }),
       },
     },
