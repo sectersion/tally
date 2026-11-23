@@ -1,3 +1,4 @@
+pub mod config;
 pub mod finalize;
 pub mod ingest;
 pub mod project;
