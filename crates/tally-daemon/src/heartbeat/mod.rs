@@ -9,6 +9,7 @@ use server::{Received, Running, ServerConfig};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use tally_scoring::{Event, Kind};
 
@@ -48,6 +49,12 @@ impl Heartbeat {
     pub fn time_ms(&self) -> i64 {
         (self.time * 1000.0).round() as i64
     }
+
+    /// `None` for NaN, infinities and anything beyond year ~5000 (a saturated cast would pass for a real time).
+    pub fn time_ms_checked(&self) -> Option<i64> {
+        let ms = (self.time * 1000.0).round();
+        (ms.is_finite() && ms.abs() < 1e14).then_some(ms as i64)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -61,7 +68,7 @@ pub enum BodyError {
 /// A bulk array yields one result per element; an object yields one.
 pub fn parse_body(bytes: &[u8]) -> Result<Vec<Result<Heartbeat, String>>, BodyError> {
     let v: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| BodyError::Json)?;
-    let one = |v: serde_json::Value| serde_json::from_value::<Heartbeat>(v).map_err(|e| e.to_string());
+    let one = |v: serde_json::Value| serde_json::from_value::<Heartbeat>(v).map_err(|_| "invalid heartbeat".to_string());
     match v {
         serde_json::Value::Array(a) => Ok(a.into_iter().map(one).collect()),
         o @ serde_json::Value::Object(_) => Ok(vec![one(o)]),
@@ -116,6 +123,10 @@ pub struct Stats {
     pub not_a_file: usize,
 }
 
+/// Most heartbeats kept between polls, and most file line counts remembered.
+pub const SINK_CAP: usize = 10_000;
+pub const PREV_LINES_CAP: usize = 10_000;
+
 pub struct Mapped {
     pub events: Vec<Event>,
     pub stats: Stats,
@@ -131,6 +142,15 @@ pub(crate) fn rel_under(root: &str, entity: &str) -> Option<String> {
     (!rel.is_empty()).then(|| rel.to_string())
 }
 
+/// False for UNC paths (`//host/..`, `\\host\..`, `\\?\UNC\..`); the verbatim `\\?\C:\..` form is local.
+fn is_local(entity: &str) -> bool {
+    let e = entity.replace('\\', "/");
+    match e.strip_prefix("//?/") {
+        Some(rest) => !rest.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("unc/")),
+        None => !e.starts_with("//"),
+    }
+}
+
 /// Turns one batch of heartbeats into `user_edit` events. The path is hashed and dropped here.
 pub fn map_heartbeats(
     batch: &[Received],
@@ -139,12 +159,20 @@ pub fn map_heartbeats(
     floor: i64,
     prev_lines: &mut BTreeMap<String, u32>,
 ) -> Mapped {
+    if prev_lines.len() > PREV_LINES_CAP {
+        prev_lines.clear(); // ponytail: wholesale reset costs one missed delta per file; use an LRU if that matters
+    }
     let mut hbs: Vec<&Heartbeat> = batch.iter().map(|r| &r.hb).collect();
     hbs.sort_by(|a, b| a.time.total_cmp(&b.time));
     let (mut events, mut stats, mut seen) = (Vec::new(), Stats::default(), BTreeSet::new());
     for hb in hbs {
         if hb.kind.as_deref().is_some_and(|k| k != "file") {
             stats.not_a_file += 1;
+            continue;
+        }
+        // UNC and other non-local paths: never resolve them (that would touch the network).
+        if !is_local(&hb.entity) {
+            stats.outside_project += 1;
             continue;
         }
         let ent = crate::project::normalize_path(&hb.entity);
@@ -199,6 +227,7 @@ pub struct HeartbeatSource {
     prev_lines: BTreeMap<String, u32>,
     projects: HashMap<PathBuf, (PathBuf, String)>,
     totals: Stats,
+    counters: Arc<server::Counters>,
     last_event_ts: Option<i64>,
     health: Option<Health>,
 }
@@ -206,12 +235,13 @@ pub struct HeartbeatSource {
 impl HeartbeatSource {
     /// No server: heartbeats come from `sink`. `seed` is the recent agent writes from the store.
     pub fn new(sink: Arc<Mutex<Vec<Received>>>, seed: Vec<(String, i64)>) -> Self {
-        Self { sink, running: None, agent: seed, prev_lines: BTreeMap::new(), projects: HashMap::new(), totals: Stats::default(), last_event_ts: None, health: None }
+        Self { sink, running: None, agent: seed, prev_lines: BTreeMap::new(), projects: HashMap::new(), totals: Stats::default(), counters: Arc::default(), last_event_ts: None, health: None }
     }
 
     pub fn start_with(cfg: ServerConfig, seed: Vec<(String, i64)>) -> std::io::Result<Self> {
         let sink = Arc::new(Mutex::new(Vec::new()));
         let mut s = Self::new(sink.clone(), seed);
+        s.counters = cfg.counters.clone();
         s.running = Some(server::start(cfg, sink)?);
         Ok(s)
     }
@@ -234,7 +264,10 @@ impl Source for HeartbeatSource {
         let floor = now_ms - HEARTBEAT_HOLD_MS - HEARTBEAT_SLACK_MS;
         let batch: Vec<Received> = {
             let mut g = self.sink.lock().unwrap_or_else(|e| e.into_inner());
-            let (ready, wait) = g.drain(..).partition(|r: &Received| r.hb.time_ms() <= now_ms - HEARTBEAT_HOLD_MS);
+            let (ok, bad): (Vec<Received>, Vec<Received>) =
+                g.drain(..).partition(|r| r.hb.time_ms_checked().is_some_and(|t| t <= now_ms + HEARTBEAT_SLACK_MS));
+            self.totals.late_dropped += bad.len();
+            let (ready, wait) = ok.into_iter().partition(|r: &Received| r.hb.time_ms() <= now_ms - HEARTBEAT_HOLD_MS);
             *g = wait;
             ready
         };
@@ -257,15 +290,16 @@ impl Source for HeartbeatSource {
         t.late_dropped += m.stats.late_dropped;
         t.not_a_file += m.stats.not_a_file;
         self.last_event_ts = m.events.iter().map(|e| e.ts).max().or(self.last_event_ts);
+        let malformed = self.counters.malformed.load(Ordering::Relaxed);
         let c = |k: &str, v: usize| (k.to_string(), v as u64);
         self.health = Some(Health {
             files_found: 1, // the listener itself; 0 would read as NoLogs
             records: t.accepted,
             skipped: t.dropped_agent + t.outside_project + t.late_dropped + t.not_a_file,
-            errors: 0,
+            errors: malformed,
             format: "wakatime".into(),
             last_event_ts: self.last_event_ts,
-            counters: vec![c("accepted", t.accepted), c("dropped_agent", t.dropped_agent), c("outside_project", t.outside_project), c("late_dropped", t.late_dropped), c("not_a_file", t.not_a_file)],
+            counters: vec![c("accepted", t.accepted), c("dropped_agent", t.dropped_agent), c("outside_project", t.outside_project), c("late_dropped", t.late_dropped), c("not_a_file", t.not_a_file), c("malformed", malformed), c("sink_overflow", self.counters.overflow.load(Ordering::Relaxed))],
         });
         Ok(Poll { events: m.events, watermark: Some(floor) })
     }
@@ -499,6 +533,42 @@ mod tests {
         s.set_watermark("heartbeat", T + 1_000_000).unwrap();
         crate::finalize::finalize(&mut s).unwrap();
         assert!(crate::status::status(&s).unwrap().verified_s > 0);
+    }
+
+    #[test]
+    fn unc_entities_are_outside_the_project() {
+        for e in ["//host/share/repo/a.rs", r"\\host\share\repo\a.rs"] {
+            let m = run(&[hb(e, T, true, None)], &[], 0);
+            assert_eq!((m.events.len(), m.stats.outside_project), (0, 1), "{e}");
+        }
+    }
+
+    #[test]
+    fn invalid_item_error_text_is_a_fixed_category() {
+        let r = parse_body(br#"[{"entity":"a","time":"/home/secret/path"}]"#).unwrap();
+        assert_eq!(r[0].as_ref().unwrap_err(), "invalid heartbeat");
+    }
+
+    #[test]
+    fn future_and_absurd_times_are_dropped_at_poll() {
+        let mut far = hb("/repo/src/a.rs", T, true, None);
+        far.hb.time = 1e300;
+        let future = hb("/repo/src/b.rs", T + 10 * HEARTBEAT_SLACK_MS, true, None);
+        assert_eq!(far.hb.time_ms_checked(), None);
+        let sink = Arc::new(Mutex::new(vec![far, future]));
+        let mut src = HeartbeatSource::new(sink.clone(), vec![]);
+        let p = src.poll(T + HEARTBEAT_HOLD_MS, &mut BTreeMap::new()).unwrap();
+        assert!(p.events.is_empty());
+        assert!(sink.lock().unwrap().is_empty());
+        let h = src.take_health().unwrap();
+        assert_eq!(h.skipped, 2);
+    }
+
+    #[test]
+    fn prev_lines_is_pruned() {
+        let mut prev: BTreeMap<String, u32> = (0..=PREV_LINES_CAP).map(|i| (i.to_string(), 1)).collect();
+        map_heartbeats(&[], &stub, &|_, _, _| false, 0, &mut prev);
+        assert!(prev.is_empty());
     }
 
     #[test]

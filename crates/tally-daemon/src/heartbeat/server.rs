@@ -4,12 +4,19 @@ use super::{check_auth, parse_body, Heartbeat};
 use std::io::Read;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 const WORKERS: usize = 8;
+
+/// Shared between the server threads and the source.
+#[derive(Debug, Default)]
+pub struct Counters {
+    pub malformed: AtomicUsize,
+    pub overflow: AtomicUsize,
+}
 
 pub struct ServerConfig {
     /// 0 = ephemeral, for tests.
@@ -17,11 +24,13 @@ pub struct ServerConfig {
     pub token: String,
     pub max_body: usize,
     pub max_bulk: usize,
+    pub read_timeout: Duration,
+    pub counters: Arc<Counters>,
 }
 
 impl ServerConfig {
     pub fn new(port: u16, token: String) -> Self {
-        Self { port, token, max_body: 262_144, max_bulk: 25 }
+        Self { port, token, max_body: 262_144, max_bulk: 25, read_timeout: Duration::from_secs(10), counters: Arc::default() }
     }
 }
 
@@ -74,12 +83,11 @@ pub fn load_or_create_token(path: &Path) -> std::io::Result<String> {
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
-    std::fs::write(path, &t)?;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    std::io::Write::write_all(&mut o.open(path)?, t.as_bytes())?;
     Ok(t)
 }
 
@@ -124,7 +132,7 @@ fn header(req: &Request, name: &'static str) -> Option<String> {
     req.headers().iter().find(|h| h.field.equiv(name)).map(|h| h.value.as_str().to_string())
 }
 
-fn handle(mut req: Request, cfg: &ServerConfig, sink: &Mutex<Vec<Received>>) {
+fn handle(req: Request, cfg: &ServerConfig, sink: &Mutex<Vec<Received>>) {
     if !host_ok(header(&req, "Host").as_deref()) {
         return reply(req, 403, None);
     }
@@ -146,15 +154,31 @@ fn handle(mut req: Request, cfg: &ServerConfig, sink: &Mutex<Vec<Received>>) {
     if req.body_length().is_some_and(|n| n > cfg.max_body) {
         return reply(req, 413, None);
     }
-    let mut body = Vec::new();
-    if req.as_reader().take(cfg.max_body as u64 + 1).read_to_end(&mut body).is_err() {
-        return reply(req, 400, None);
-    }
+    // tiny_http has no socket timeout: read on a helper thread and give up on a stalled client.
+    // ponytail: a stalled reader thread lingers until the client disconnects; fine for localhost.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let max = cfg.max_body as u64 + 1;
+    let mut req = req;
+    std::thread::spawn(move || {
+        let mut body = Vec::new();
+        let r = req.as_reader().take(max).read_to_end(&mut body).map(|_| body);
+        let _ = tx.send((req, r));
+    });
+    let (req, body) = match rx.recv_timeout(cfg.read_timeout) {
+        Ok((req, Ok(body))) => (req, body),
+        Ok((req, Err(_))) => return reply(req, 400, None),
+        Err(_) => return, // timed out: the helper owns the request and drops it
+    };
     if body.len() > cfg.max_body {
         return reply(req, 413, None);
     }
-    let Ok(items) = parse_body(&body) else { return reply(req, 400, None) };
+    let bad = || cfg.counters.malformed.fetch_add(1, Ordering::Relaxed);
+    let Ok(items) = parse_body(&body) else {
+        bad();
+        return reply(req, 400, None);
+    };
     if items.len() > cfg.max_bulk || (!bulk && items.len() != 1) {
+        bad();
         return reply(req, 400, None);
     }
     let received_ms = now_ms();
@@ -163,9 +187,17 @@ fn handle(mut req: Request, cfg: &ServerConfig, sink: &Mutex<Vec<Received>>) {
         match it {
             Ok(hb) => {
                 pairs.push(serde_json::json!([ack(&hb, received_ms), 201]));
-                sink.lock().unwrap_or_else(|e| e.into_inner()).push(Received { hb, received_ms });
+                let mut g = sink.lock().unwrap_or_else(|e| e.into_inner());
+                if g.len() >= super::SINK_CAP {
+                    cfg.counters.overflow.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    g.push(Received { hb, received_ms });
+                }
             }
-            Err(e) => pairs.push(serde_json::json!([{"error": e}, 400])),
+            Err(e) => {
+                bad();
+                pairs.push(serde_json::json!([{"error": e}, 400]));
+            }
         }
     }
     if bulk {

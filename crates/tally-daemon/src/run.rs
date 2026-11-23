@@ -25,8 +25,15 @@ pub struct TickReport {
 pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut [TickHook], now_ms: i64) -> TickReport {
     let mut r = TickReport::default();
     let mut tick_writes: Vec<(String, i64)> = vec![];
-    for src in sources.iter_mut() {
+    // The heartbeat source polls last so it sees this tick's agent writes (stable sort keeps the rest in order).
+    sources.sort_by_key(|s| s.id() == "heartbeat");
+    let mut told = vec![0; sources.len()]; // how many of tick_writes each source has seen
+    for (i, src) in sources.iter_mut().enumerate() {
         let id = src.id().to_string();
+        if !tick_writes.is_empty() {
+            src.see_agent_writes(&tick_writes);
+            told[i] = tick_writes.len();
+        }
         let mut st = match store.get_state(&id) {
             Ok(st) => st,
             Err(e) => {
@@ -55,9 +62,9 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
         // ponytail: one retry per late event (O(late x batch)); filter by finalized_through + id lookup if batches of late events get big.
         let coverage = src.take_coverage();
         let writes = src.take_agent_writes();
+        // Best-effort: the events already drained must still be stored.
         if let Err(e) = store.put_agent_writes(&writes) {
             r.errors.push(format!("source {id}: {e}"));
-            continue;
         }
         tick_writes.extend(writes);
         let (mut events, mut dropped) = (p.events, 0);
@@ -98,9 +105,9 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
             r.errors.push(format!("source {id}: {e}"));
         }
     }
-    if !tick_writes.is_empty() {
-        for src in sources.iter_mut() {
-            src.see_agent_writes(&tick_writes);
+    for (src, n) in sources.iter_mut().zip(told) {
+        if n < tick_writes.len() {
+            src.see_agent_writes(&tick_writes[n..]);
         }
     }
     match finalize(store) {
@@ -469,5 +476,49 @@ mod tests {
         assert_eq!(s.agent_writes_since(0).unwrap(), vec![("h".to_string(), 5)]);
         assert_eq!(*seen.borrow(), vec![("h".to_string(), 5)]);
         assert!(s.agent_writes_since(6).unwrap().is_empty());
+    }
+
+    #[test]
+    fn agent_writes_reach_the_heartbeat_source_in_the_same_tick() {
+        struct Hb(std::rc::Rc<std::cell::RefCell<Vec<(String, i64)>>>, Vec<(String, i64)>);
+        impl Source for Hb {
+            fn id(&self) -> &str {
+                "heartbeat"
+            }
+            fn poll(&mut self, _: i64, _: &mut dyn SourceState) -> Result<Poll, SourceError> {
+                *self.0.borrow_mut() = self.1.clone(); // what it knew at poll time
+                Ok(Poll { events: vec![], watermark: None })
+            }
+            fn see_agent_writes(&mut self, w: &[(String, i64)]) {
+                self.1.extend_from_slice(w);
+            }
+        }
+        let mut s = Store::open_in_memory().unwrap();
+        let at_poll = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+        let mut srcs: Vec<Box<dyn Source>> = vec![Box::new(Hb(at_poll.clone(), vec![])), Box::new(WriterSrc(vec![("h".into(), 5)]))];
+        run_once(&mut s, &mut srcs, &mut [], 1_000);
+        assert_eq!(*at_poll.borrow(), vec![("h".to_string(), 5)]);
+    }
+
+    #[test]
+    fn a_failed_agent_write_store_still_appends_events() {
+        struct W;
+        impl Source for W {
+            fn id(&self) -> &str {
+                "w"
+            }
+            fn poll(&mut self, _: i64, _: &mut dyn SourceState) -> Result<Poll, SourceError> {
+                Ok(Poll { events: vec![prompt("a", 0, 600)], watermark: None })
+            }
+            fn take_agent_writes(&mut self) -> Vec<(String, i64)> {
+                vec![("h".into(), 5)]
+            }
+        }
+        let mut s = Store::open_in_memory().unwrap();
+        s.conn.execute("DROP TABLE agent_writes", []).unwrap();
+        let mut srcs: Vec<Box<dyn Source>> = vec![Box::new(W)];
+        let r = run_once(&mut s, &mut srcs, &mut [], 0);
+        assert_eq!(r.added, 1);
+        assert!(r.errors.iter().any(|e| e.starts_with("source w:")), "{:?}", r.errors);
     }
 }

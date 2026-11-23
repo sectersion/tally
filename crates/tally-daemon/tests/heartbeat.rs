@@ -167,3 +167,16 @@ fn end_to_end_post_then_poll_emits_one_user_edit() {
     let bytes: Vec<u8> = ["", "-wal"].iter().flat_map(|x| std::fs::read(format!("{}{x}", db.display())).unwrap_or_default()).collect();
     assert!(!bytes.windows(14).any(|w| w == b"uniquepathname"));
 }
+
+#[test]
+fn invalid_item_gets_a_fixed_error_text_and_is_counted() {
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let cfg = ServerConfig::new(0, KEY.into());
+    let counters = cfg.counters.clone();
+    let r = start(cfg, sink).unwrap();
+    let (code, body) = post(&r, ONE, r#"{"entity":"a","time":"/home/secret/path"}"#);
+    assert_eq!(code, 400);
+    assert!(body.contains("invalid heartbeat") && !body.contains("secret"), "{body}");
+    assert_eq!(post(&r, ONE, "{nope").0, 400);
+    assert_eq!(counters.malformed.load(std::sync::atomic::Ordering::Relaxed), 2);
+}
