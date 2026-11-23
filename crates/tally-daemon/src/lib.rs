@@ -4,6 +4,7 @@ pub mod api;
 pub mod claude_code;
 pub mod config;
 pub mod credentials;
+pub mod dash_api;
 pub mod doctor;
 pub mod finalize;
 pub mod git;

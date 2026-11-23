@@ -64,6 +64,33 @@ impl Snapshot<'_> {
         let rows = st.query_map([], |r| r.get(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
+    /// Distinct projects seen in the ledger (a public name or a local id).
+    pub fn ledger_projects(&self) -> Result<Vec<String>, StoreError> {
+        let mut st = self.store.conn.prepare("SELECT DISTINCT json_extract(entry_json, '$.project') FROM ledger WHERE json_extract(entry_json, '$.project') IS NOT NULL ORDER BY 1")?;
+        let rows = st.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+    /// Cheap counts for the dashboard: `(events, final_claims, verified_s, unverified_s, skipped_claims, provisional)`.
+    /// Never loads event rows. `provisional` counts human-action events after `finalized_through`
+    /// (ponytail: an estimate of what `status` reports by scoring everything; exact only if every action scores).
+    pub fn counts(&self) -> Result<(u64, u64, u64, u64, u64, u64), StoreError> {
+        let c = &self.store.conn;
+        let events: i64 = c.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
+        let (n, v, u): (i64, i64, i64) = c.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(json_extract(entry_json,'$.verified_s')),0), COALESCE(SUM(json_extract(entry_json,'$.unverified_s')),0) FROM ledger",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        let skipped: i64 = c.query_row("SELECT COUNT(*) FROM skipped_claims", [], |r| r.get(0))?;
+        let fin = self.finalized_through()?;
+        let prov: i64 = c.query_row(
+            "SELECT COUNT(*) FROM events WHERE ts > ?1 AND (kind IN ('prompt','interrupt','tool_decision','user_edit')
+               OR (kind = 'test_run' AND json_extract(json,'$.initiator') = 'user') OR (kind = 'commit' AND json_extract(json,'$.by') = 'user'))",
+            [fin],
+            |r| r.get(0),
+        )?;
+        Ok((events as u64, n as u64, v as u64, u as u64, skipped as u64, prov as u64))
+    }
     pub fn ledger_len(&self) -> Result<u64, StoreError> {
         Ok(self.store.conn.query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get::<_, i64>(0))? as u64)
     }
