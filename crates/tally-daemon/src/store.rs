@@ -25,6 +25,15 @@ pub struct AppendSummary {
     pub duplicates: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRow {
+    pub local_id: String,
+    pub root: String,
+    pub public_name: Option<String>,
+    pub common_dir: Option<String>,
+    pub remote: Option<String>,
+}
+
 /// `(start, end)` in ms.
 pub type Interval = (i64, i64);
 
@@ -74,6 +83,16 @@ impl Store {
 
     fn init(conn: Connection) -> Result<Store, StoreError> {
         conn.execute_batch(SCHEMA)?;
+        for col in ["common_dir", "remote"] {
+            let have: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('projects') WHERE name = ?1)",
+                [col],
+                |r| r.get(0),
+            )?;
+            if !have {
+                conn.execute_batch(&format!("ALTER TABLE projects ADD COLUMN {col} TEXT"))?;
+            }
+        }
         Ok(Store { conn })
     }
 
@@ -175,6 +194,58 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Keeps a stored value when the new one is `None`.
+    pub fn set_project_identity(&mut self, local_id: &str, id: &crate::project::RepoIdentity) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE projects SET common_dir = COALESCE(?2, common_dir), remote = COALESCE(?3, remote) WHERE local_id = ?1",
+            params![local_id, id.common_dir, id.remote],
+        )?;
+        Ok(())
+    }
+
+    /// All projects in insertion order.
+    pub fn projects(&self) -> Result<Vec<ProjectRow>, StoreError> {
+        let mut st = self
+            .conn
+            .prepare("SELECT local_id, root, public_name, common_dir, remote FROM projects ORDER BY rowid")?;
+        let rows = st.query_map([], |r| {
+            Ok(ProjectRow { local_id: r.get(0)?, root: r.get(1)?, public_name: r.get(2)?, common_dir: r.get(3)?, remote: r.get(4)? })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// One `(local_id, root)` per distinct `common_dir`; a project without one is its own group.
+    /// The pick is the earliest registered whose root still exists, else the earliest registered.
+    pub fn repos_to_poll(&self) -> Result<Vec<(String, String)>, StoreError> {
+        let mut groups: Vec<(Option<String>, Vec<ProjectRow>)> = Vec::new();
+        for p in self.projects()? {
+            match p.common_dir.as_ref().and_then(|c| groups.iter().position(|(k, _)| k.as_ref() == Some(c))) {
+                Some(i) => groups[i].1.push(p),
+                None => groups.push((p.common_dir.clone(), vec![p])),
+            }
+        }
+        Ok(groups
+            .into_iter()
+            .map(|(_, ps)| {
+                let pick = ps.iter().find(|p| Path::new(&p.root).exists()).unwrap_or(&ps[0]);
+                (pick.local_id.clone(), pick.root.clone())
+            })
+            .collect())
+    }
+
+    /// `project` plus every project sharing its `common_dir`.
+    pub fn project_group(&self, project: &str) -> Result<Vec<String>, StoreError> {
+        let mut st = self.conn.prepare(
+            "SELECT local_id FROM projects WHERE common_dir IS NOT NULL
+             AND common_dir = (SELECT common_dir FROM projects WHERE local_id = ?1)",
+        )?;
+        let mut v: Vec<String> = st.query_map([project], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        if !v.iter().any(|p| p == project) {
+            v.push(project.to_string());
+        }
+        Ok(v)
     }
 
     /// Local id to public name, only for projects that have a name.

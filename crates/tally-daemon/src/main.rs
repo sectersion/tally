@@ -9,7 +9,7 @@ use tally_daemon::finalize::finalize;
 use tally_daemon::status::{status, verify_ledger, VerifyError};
 use tally_daemon::store::Store;
 use tally_daemon::ingest::ingest_ndjson;
-use tally_daemon::project::register_git_project;
+use tally_daemon::project::register_git_project_matched;
 
 #[derive(Parser)]
 #[command(name = "tally")]
@@ -113,7 +113,10 @@ fn main() -> Result<()> {
             println!("added {}, duplicates {}", s.added, s.duplicates);
         }
         Cmd::Project { cmd: ProjectCmd::Add { path, name } } => {
-            let id = register_git_project(&mut store, &path, name.as_deref())?;
+            let (id, adopted) = register_git_project_matched(&mut store, &path, name.as_deref())?;
+            if let Some((name, via)) = adopted {
+                eprintln!("matched {name} via {via}");
+            }
             println!("{id}");
         }
         Cmd::Finalize => {

@@ -30,9 +30,14 @@ pub struct StoreLookup {
 
 impl AgentCommitLookup for StoreLookup {
     fn is_agent_commit(&self, project: &str, commit_ts: i64) -> Result<bool, SourceError> {
-        self.store
-            .has_agent_commit_marker(project, commit_ts - AGENT_COMMIT_WINDOW_MS, commit_ts + AGENT_COMMIT_AFTER_MS)
-            .map_err(|e| SourceError::Other(e.to_string()))
+        // Markers carry the id of the directory Claude ran in, which may be a linked worktree of this repo.
+        let err = |e: crate::store::StoreError| SourceError::Other(e.to_string());
+        for p in self.store.project_group(project).map_err(err)? {
+            if self.store.has_agent_commit_marker(&p, commit_ts - AGENT_COMMIT_WINDOW_MS, commit_ts + AGENT_COMMIT_AFTER_MS).map_err(err)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
     fn claude_watermark(&self) -> Result<Option<i64>, SourceError> {
         if !self.claude_enabled {
@@ -87,12 +92,12 @@ impl GitSource {
     }
 }
 
-enum GitFail {
+pub(crate) enum GitFail {
     Missing,
     Failed,
 }
 
-fn run_git(program: &str, root: &std::path::Path, args: &[&str]) -> Result<String, GitFail> {
+pub(crate) fn run_git(program: &str, root: &std::path::Path, args: &[&str]) -> Result<String, GitFail> {
     let out = Command::new(program)
         .arg("-C")
         .arg(root)
@@ -370,6 +375,43 @@ mod tests {
         assert_eq!(l2.claude_watermark().unwrap(), Some(42));
         let l3 = StoreLookup { store: Store::open_in_memory().unwrap(), claude_enabled: false };
         assert_eq!(l3.claude_watermark().unwrap(), None);
+    }
+
+    #[test]
+    fn agent_marker_stored_under_a_linked_worktree_marks_a_commit_polled_for_the_group_representative() {
+        if !git_available() { return; }
+        let t = tempfile::tempdir().unwrap();
+        let (main, wt) = (t.path().join("main"), t.path().join("wt"));
+        std::fs::create_dir_all(&main).unwrap();
+        init(&main);
+        git(&main, T / 1000, &[], &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feature"]);
+        let db = t.path().join("tally.db");
+        let mut store = Store::open(&db).unwrap();
+        let m = crate::project::register_git_project(&mut store, &main, None).unwrap();
+        let w = crate::project::register_git_project(&mut store, &wt, None).unwrap();
+        // plan 03 stamps the marker with the id of the directory Claude ran in: the worktree
+        let marker = Event {
+            v: 1,
+            id: "mk".into(),
+            ts: T - 10_000,
+            source: "claude-code".into(),
+            project: Some(w),
+            session: None,
+            kind: Kind::Commit { sha: "claude:toolu_1".into(), by: Actor::Agent, lines_changed: 0 },
+        };
+        store.append_events(&[marker]).unwrap();
+        let repos: Vec<RepoRef> =
+            store.repos_to_poll().unwrap().into_iter().map(|(local_id, root)| RepoRef { local_id, root: root.into() }).collect();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].local_id, m);
+        let mut src = GitSource::new(repos, Box::new(StoreLookup { store: Store::open(&db).unwrap(), claude_enabled: false }));
+        let mut st = BTreeMap::new();
+        src.poll(T - 100_000, &mut st).unwrap();
+        commit(&wt, T / 1000);
+        let p = src.poll(T + 61_000, &mut st).unwrap();
+        assert_eq!(p.events.len(), 1);
+        assert_eq!(p.events[0].project.as_deref(), Some(m.as_str()));
+        assert!(matches!(p.events[0].kind, Kind::Commit { by: Actor::Agent, .. }));
     }
 
     #[test]

@@ -97,7 +97,7 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
 }
 
 /// The sources for this config. Claude Code reads `projects_dir`, default `~/.claude/projects`.
-pub fn sources(cfg: &Config, _home: &Path, _store: &Store) -> Vec<Box<dyn Source>> {
+pub fn sources(cfg: &Config, home: &Path, store: &Store) -> Vec<Box<dyn Source>> {
     let mut v: Vec<Box<dyn Source>> = vec![];
     if cfg.presence.enabled {
         v.push(Box::new(crate::presence::PresenceSource::new(crate::presence::default_platform())));
@@ -107,6 +107,18 @@ pub fn sources(cfg: &Config, _home: &Path, _store: &Store) -> Vec<Box<dyn Source
         if cc.enabled {
             v.push(Box::new(crate::claude_code::ClaudeCode::new(dir)));
         }
+    }
+    // The git source is always on (no `[git]` config); with no registered repos it polls nothing.
+    // It reads agent markers through its own connection to the db file under `home`.
+    let repos = store
+        .repos_to_poll()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(local_id, root)| crate::git::RepoRef { local_id, root: root.into() })
+        .collect();
+    if let Ok(own) = Store::open(&home.join("tally.db")) {
+        let lookup = crate::git::StoreLookup { store: own, claude_enabled: cc.enabled };
+        v.push(Box::new(crate::git::GitSource::new(repos, Box::new(lookup))));
     }
     v
 }
@@ -248,15 +260,16 @@ mod tests {
         assert_eq!(s.coverage().unwrap(), [(1, 5)]);
     }
     #[test]
-    fn sources_registers_presence_only_when_enabled() {
-        let s = Store::open_in_memory().unwrap();
+    fn sources_registers_presence_only_when_enabled_and_git_always() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Store::open(&d.path().join("tally.db")).unwrap();
         let mut cfg = Config::default();
         cfg.claude_code.enabled = false;
         cfg.presence.enabled = true;
-        let ids = |c: &Config| sources(c, Path::new("."), &s).iter().map(|x| x.id().to_string()).collect::<Vec<_>>();
-        assert_eq!(ids(&cfg), ["presence"]);
+        let ids = |c: &Config| sources(c, d.path(), &s).iter().map(|x| x.id().to_string()).collect::<Vec<_>>();
+        assert_eq!(ids(&cfg), ["presence", "git"]);
         cfg.presence.enabled = false;
-        assert!(ids(&cfg).is_empty());
+        assert_eq!(ids(&cfg), ["git"]);
     }
     #[test]
     fn a_zero_interval_ticks_every_second() {

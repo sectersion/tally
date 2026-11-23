@@ -82,6 +82,31 @@ fn project_add_rejects_a_directory_outside_git_and_prints_the_id_inside_one() {
 }
 
 #[test]
+fn project_add_reports_an_adopted_name_on_stderr_only() {
+    if Command::new("git").arg("--version").output().is_err() {
+        return;
+    }
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let mk = |n: &str| {
+        let d = t.path().join(n);
+        std::fs::create_dir_all(&d).unwrap();
+        for args in [&["init", "-q"][..], &["remote", "add", "origin", "https://github.com/o/r.git"]] {
+            assert!(Command::new("git").arg("-C").arg(&d).args(args).output().unwrap().status.success());
+        }
+        d
+    };
+    let (a, b) = (mk("a"), mk("b"));
+    let o = tally(&home, &["project", "add", a.to_str().unwrap(), "--name", "o/r"]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(!err(&o).contains("matched"), "{}", err(&o));
+    let o = tally(&home, &["project", "add", b.to_str().unwrap()]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(err(&o).contains("matched o/r via remote"), "{}", err(&o));
+    assert_eq!(out(&o).len(), 64);
+}
+
+#[test]
 fn read_only_commands_need_an_existing_database_and_create_nothing() {
     let t = tempfile::tempdir().unwrap();
     let home = t.path().join("home");
