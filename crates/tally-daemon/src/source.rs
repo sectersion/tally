@@ -50,6 +50,11 @@ pub trait Source {
     /// then succeeds in `append_events` (late events are dropped alone: the rest and the state are still saved) and
     /// in `set_watermark`; on any other store failure nothing is persisted and the next tick retries.
     fn poll(&mut self, now_ms: i64, state: &mut dyn SourceState) -> Result<Poll, SourceError>;
+    /// Drains the coverage produced by the last `poll`. The runner stores it before the watermark
+    /// moves, so finalize never sees a horizon that outruns coverage.
+    fn take_coverage(&mut self) -> Vec<crate::store::Interval> {
+        Vec::new()
+    }
 }
 
 pub fn now_ms() -> i64 {

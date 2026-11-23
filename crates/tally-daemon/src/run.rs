@@ -45,6 +45,7 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
         // Each retry removes the one event the store named, so known ids at or before finalized_through
         // still count as duplicates, not as dropped.
         // ponytail: one retry per late event (O(late x batch)); filter by finalized_through + id lookup if batches of late events get big.
+        let coverage = src.take_coverage();
         let (mut events, mut dropped) = (p.events, 0);
         let appended = loop {
             match store.append_events(&events) {
@@ -67,6 +68,11 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
                 r.errors.push(format!("source {id}: {e}"));
                 continue;
             }
+        }
+        // Coverage goes in before the watermark: finalize must never see a horizon past stored coverage.
+        if let Err(e) = store.extend_coverage(&coverage) {
+            r.errors.push(format!("source {id}: {e}"));
+            continue;
         }
         if let Some(w) = p.watermark {
             if let Err(e) = store.set_watermark(&id, w) {
@@ -91,15 +97,50 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
 }
 
 /// The sources for this config. Claude Code reads `projects_dir`, default `~/.claude/projects`.
-pub fn sources(cfg: &Config, _home: &Path, _store: &Store) -> Vec<Box<dyn Source>> {
+/// Also records `presence_required` and the config-disabled ids (the finalize horizon skips them), in one transaction, and fills
+/// missing project identities; failures there are reported on stderr, not fatal.
+pub fn sources(cfg: &Config, home: &Path, store: &mut Store) -> Result<Vec<Box<dyn Source>>, StoreError> {
+    if let Err(e) = crate::project::backfill_identities(store) {
+        eprintln!("project identity backfill failed: {e}");
+    }
     let mut v: Vec<Box<dyn Source>> = vec![];
+    if cfg.presence.enabled {
+        v.push(Box::new(crate::presence::PresenceSource::new(crate::presence::default_platform())));
+    }
     let cc = &cfg.claude_code;
     if let Some(dir) = cc.projects_dir.clone().or_else(|| dirs::home_dir().map(|h| h.join(".claude").join("projects"))) {
         if cc.enabled {
             v.push(Box::new(crate::claude_code::ClaudeCode::new(dir)));
         }
     }
-    v
+    // The git source is always on (no `[git]` config); with no registered repos it polls nothing.
+    // It reads agent markers through its own connection to the db file under `home`.
+    match (store.repos_to_poll(), Store::open(&home.join("tally.db"))) {
+        (Ok(repos), Ok(own)) => {
+            let repos = repos.into_iter().map(|(local_id, root)| crate::git::RepoRef { local_id, root: root.into() }).collect();
+            let lookup = crate::git::StoreLookup { store: own, claude_enabled: cc.enabled };
+            v.push(Box::new(crate::git::GitSource::new(repos, Box::new(lookup))));
+        }
+        (repos, own) => {
+            if let Err(e) = repos {
+                eprintln!("git source disabled: listing repositories failed: {e}");
+            }
+            if let Err(e) = own {
+                eprintln!("git source disabled: opening the database failed: {e}");
+            }
+        }
+    }
+    // What config switched off, not what got built: a git setup error must not drop git's watermark.
+    let mut disabled = vec![];
+    if !cfg.presence.enabled {
+        disabled.push("presence");
+    }
+    if !cc.enabled {
+        disabled.push("claude-code");
+    }
+    // Fatal: a stale presence_required would over-credit all session.
+    store.set_run_config(cfg.presence.required(), &disabled)?;
+    Ok(v)
 }
 
 /// The per-tick hooks. Empty until daily publish and sync land.
@@ -113,8 +154,8 @@ pub fn effective_interval(secs: u64) -> u64 {
 }
 
 /// Tick every `cfg.run.interval_secs` until `stop` is set. The current tick always completes.
-pub fn run_loop(store: &mut Store, cfg: &Config, home: &Path, stop: &AtomicBool) {
-    let mut srcs = sources(cfg, home, store);
+pub fn run_loop(store: &mut Store, cfg: &Config, home: &Path, stop: &AtomicBool) -> Result<(), StoreError> {
+    let mut srcs = sources(cfg, home, store)?;
     let mut hks = hooks(cfg, home);
     while !stop.load(Ordering::Relaxed) {
         for e in run_once(store, &mut srcs, &mut hks, now_ms()).errors {
@@ -129,6 +170,7 @@ pub fn run_loop(store: &mut Store, cfg: &Config, home: &Path, stop: &AtomicBool)
             std::thread::sleep(left.min(Duration::from_millis(200)));
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -217,6 +259,52 @@ mod tests {
         assert_eq!(w, 3_000_000);
     }
     #[test]
+    fn coverage_is_stored_before_the_watermark_moves() {
+        struct Cov;
+        impl Source for Cov {
+            fn id(&self) -> &str {
+                "cov"
+            }
+            fn poll(&mut self, _: i64, _: &mut dyn SourceState) -> Result<Poll, SourceError> {
+                Ok(Poll { events: vec![], watermark: Some(9) })
+            }
+            fn take_coverage(&mut self) -> Vec<crate::store::Interval> {
+                vec![(1, 5)]
+            }
+        }
+        let mut s = Store::open_in_memory().unwrap();
+        // make the watermark write fail: coverage must already be stored by then
+        s.conn.execute("DROP TABLE watermarks", []).unwrap();
+        let mut srcs: Vec<Box<dyn Source>> = vec![Box::new(Cov)];
+        let r = run_once(&mut s, &mut srcs, &mut [], 0);
+        assert!(r.errors.iter().any(|e| e.starts_with("source cov:")), "{:?}", r.errors);
+        assert_eq!(s.coverage().unwrap(), [(1, 5)]);
+    }
+    #[test]
+    fn sources_registers_presence_only_when_enabled_and_git_always() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = Store::open(&d.path().join("tally.db")).unwrap();
+        let mut cfg = Config::default();
+        cfg.claude_code.enabled = false;
+        cfg.presence.enabled = true;
+        s.set_watermark("presence", 5).unwrap();
+        s.set_watermark("git", 100).unwrap();
+        let mut ids = |c: &Config| sources(c, d.path(), &mut s).unwrap().iter().map(|x| x.id().to_string()).collect::<Vec<_>>();
+        assert_eq!(ids(&cfg), ["presence", "git"]);
+        cfg.presence.enabled = false;
+        assert_eq!(ids(&cfg), ["git"]);
+        // the disabled presence watermark no longer holds the horizon
+        assert_eq!(s.horizon().unwrap(), Some(100));
+        cfg.presence.enabled = true;
+        sources(&cfg, d.path(), &mut s).unwrap(); // next run start: the stale watermark counts again
+        assert_eq!(s.horizon().unwrap(), Some(5));
+        // a git setup error leaves git out of the sources but its watermark still counts
+        s.conn.execute("DROP TABLE projects", []).unwrap();
+        cfg.presence.enabled = false;
+        assert_eq!(sources(&cfg, d.path(), &mut s).unwrap().len(), 0);
+        assert_eq!(s.horizon().unwrap(), Some(100));
+    }
+    #[test]
     fn a_zero_interval_ticks_every_second() {
         assert_eq!((effective_interval(0), effective_interval(15)), (1, 15));
         assert_eq!(effective_interval(u64::MAX), 86_400);
@@ -250,6 +338,14 @@ mod tests {
         let mut cfg = Config::default();
         cfg.run.interval_secs = 3600;
         cfg.claude_code.enabled = false;
-        run_loop(&mut s, &cfg, d.path(), &stop);
+        cfg.presence.enabled = false;
+        run_loop(&mut s, &cfg, d.path(), &stop).unwrap();
+    }
+    #[test]
+    fn a_run_config_write_failure_is_fatal_for_sources() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = Store::open(&d.path().join("tally.db")).unwrap();
+        s.conn.execute_batch("CREATE TRIGGER no_meta BEFORE INSERT ON meta BEGIN SELECT RAISE(ABORT, 'no'); END;").unwrap();
+        assert!(sources(&Config::default(), d.path(), &mut s).is_err());
     }
 }

@@ -16,10 +16,107 @@ pub enum ProjectError {
 /// stores the canonical, normalized root and returns its local project id.
 /// `public_name = None` keeps an existing name.
 pub fn register_git_project(store: &mut Store, path: &Path, public_name: Option<&str>) -> Result<String, ProjectError> {
+    Ok(register_git_project_matched(store, path, public_name)?.0)
+}
+
+/// `(adopted name, "common dir" or "remote")`.
+pub type Adopted = Option<(String, &'static str)>;
+
+/// Like `register_git_project`; also returns `(adopted name, "common dir" | "remote")` when an unnamed
+/// project took the public name of a sibling. Adoption happens only here, never for claims already ledgered.
+pub fn register_git_project_matched(
+    store: &mut Store,
+    path: &Path,
+    public_name: Option<&str>,
+) -> Result<(String, Adopted), ProjectError> {
     std::fs::canonicalize(path)?; // a missing path is an Io error, not NotGit
     let (root, id) = project_for_dir(path).ok_or(ProjectError::NotGit)?;
     store.register_project(&id, &normalize_path(&root.to_string_lossy()), public_name)?;
-    Ok(id)
+    store.set_project_identity(&id, &repo_identity(&root))?;
+    let rows = store.projects()?;
+    let Some(me) = rows.iter().find(|p| p.local_id == id) else { return Ok((id, None)) };
+    if me.public_name.is_some() {
+        return Ok((id, None));
+    }
+    let sibling = |field: fn(&crate::store::ProjectRow) -> &Option<String>| {
+        let key = field(me).as_ref()?;
+        rows.iter().find(|p| p.local_id != id && field(p).as_ref() == Some(key) && p.public_name.is_some()).and_then(|p| p.public_name.clone())
+    };
+    let adopted = sibling(|p| &p.common_dir)
+        .map(|n| (n, "common dir"))
+        .or_else(|| sibling(|p| &p.remote).map(|n| (n, "remote")));
+    if let Some((name, _)) = &adopted {
+        store.register_project(&id, &me.root, Some(name))?;
+    }
+    Ok((id, adopted))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoIdentity {
+    pub common_dir: Option<String>,
+    pub remote: Option<String>,
+}
+
+/// What ties linked worktrees and clones of one repository together. Any git failure (including git
+/// missing) gives `None` for that field. Both values stay in the local `projects` table.
+pub fn repo_identity(root: &Path) -> RepoIdentity {
+    let git = |args: &[&str]| {
+        let out = crate::git::run_git("git", root, args).ok()?;
+        Some(out.trim().to_string()).filter(|s| !s.is_empty())
+    };
+    RepoIdentity {
+        common_dir: git(&["rev-parse", "--path-format=absolute", "--git-common-dir"]).map(|d| normalize_path(&d)),
+        remote: git(&["config", "--get", "remote.origin.url"]).map(|u| normalize_remote(&u)),
+    }
+}
+
+/// Ids of every worktree of the repository at `root` (the main checkout included), computed
+/// like `project_for_dir`; registered or not. Empty if git fails.
+/// ponytail: one `git worktree list` per call, no caching.
+pub fn worktree_ids(root: &Path) -> Vec<String> {
+    let Ok(out) = crate::git::run_git("git", root, &["worktree", "list", "--porcelain"]) else { return vec![] };
+    out.lines()
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .map(|p| {
+            let c = std::fs::canonicalize(p).map_or_else(|_| p.to_string(), |c| c.to_string_lossy().into_owned());
+            project_id_from_normalized(&normalize_path(&c))
+        })
+        .collect()
+}
+
+/// Stores the identity of every project registered before identities existed (both fields
+/// NULL), so it groups without a new `tally project add`. Never touches public names.
+pub fn backfill_identities(store: &mut Store) -> Result<(), StoreError> {
+    for p in store.projects()?.into_iter().filter(|p| p.common_dir.is_none() && p.remote.is_none()) {
+        store.set_project_identity(&p.local_id, &repo_identity(Path::new(&p.root)))?;
+    }
+    Ok(())
+}
+
+/// `https://user:tok@GitHub.com/O/r.git` and `git@github.com:o/r` both give `github.com/o/r`.
+pub fn normalize_remote(url: &str) -> String {
+    let lower = url.trim().to_lowercase();
+    let (scheme, rest) = match lower.split_once("://") {
+        Some((_, r)) => (true, r),
+        None => (false, lower.as_str()),
+    };
+    let auth_end = rest.find('/').unwrap_or(rest.len());
+    let rest = rest[..auth_end].rfind('@').map_or(rest, |i| &rest[i + 1..]);
+    let mut out = rest.to_string();
+    if scheme {
+        // `host:22/o/r` -> `host/o/r`
+        let host_end = out.find('/').unwrap_or(out.len());
+        if let Some(i) = out[..host_end].rfind(':').filter(|&i| out[i + 1..host_end].bytes().all(|b| b.is_ascii_digit())) {
+            out.replace_range(i..host_end, "");
+        }
+    } else {
+        // scp-like `host:owner/repo`
+        if let Some(i) = out.find(':').filter(|&i| out.find('/').is_none_or(|sl| i < sl)) {
+            out.replace_range(i..=i, "/");
+        }
+    }
+    let t = out.trim_end_matches('/');
+    t.strip_suffix(".git").unwrap_or(t).trim_end_matches('/').to_string()
 }
 
 /// Local project id of the git repository containing `dir`, without registering it. `None` outside git
@@ -32,6 +129,15 @@ pub fn project_for_dir(dir: &Path) -> Option<(PathBuf, String)> {
 
 /// Pure string normalization, identical on every OS (no `std::path`).
 pub fn normalize_path(raw: &str) -> String {
+    // Verbatim UNC (`\\?\UNC\srv\share`, or with one leading backslash) is `//srv/share`.
+    let unc_form;
+    let raw = match raw.strip_prefix(r"\\?\UNC\").or_else(|| raw.strip_prefix(r"\?\UNC\")) {
+        Some(rest) => {
+            unc_form = format!(r"\\{rest}");
+            unc_form.as_str()
+        }
+        None => raw,
+    };
     // Windows verbatim prefix: `\\?\` (real) or `\?\`.
     let s = raw
         .strip_prefix(r"\\?\")
@@ -133,6 +239,197 @@ mod tests {
         let root = std::fs::canonicalize(t.path()).unwrap();
         assert_eq!(project_for_dir(&sub), Some((root, project_id(t.path()).unwrap())));
         assert_eq!(project_for_dir(&t.path().join("missing")), None);
+    }
+    #[test]
+    fn verbatim_unc_normalizes_like_plain_unc() {
+        assert_eq!(normalize_path(r"\\?\UNC\srv\share\d\"), "//srv/share/d");
+        assert_eq!(normalize_path(r"\?\UNC\srv\share\d\"), "//srv/share/d");
+        assert_eq!(normalize_path(r"\\srv\share\d"), "//srv/share/d");
+        assert_eq!(normalize_path(r"\\?\C:\x"), "C:/x");
+        assert_eq!(normalize_path(r"\?\C:\x"), "C:/x");
+    }
+    #[test]
+    fn remotes_normalize_to_host_owner_repo() {
+        assert_eq!(normalize_remote("https://github.com/Sectersion/tally.git"), "github.com/sectersion/tally");
+        assert_eq!(normalize_remote("git@github.com:sectersion/tally"), "github.com/sectersion/tally");
+        assert_eq!(normalize_remote("https://user:tok@github.com/o/r/"), "github.com/o/r");
+        assert_eq!(normalize_remote("ssh://git@github.com:22/o/r.git"), "github.com/o/r");
+        assert_eq!(normalize_remote("https://host:8443/o/r"), "host/o/r");
+    }
+
+    fn git_available() -> bool {
+        std::process::Command::new("git").arg("--version").output().is_ok()
+    }
+    /// Hermetic git: no system or global config, fixed identity.
+    fn git(dir: &Path, args: &[&str]) {
+        let o = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=Me", "-c", "user.email=me@x.org"])
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", dir.join("no-global-config"))
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+    }
+    fn init(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        git(dir, &["init", "-q", "-b", "main"]);
+        git(dir, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    }
+    fn worktree(main: &Path, wt: &Path, branch: &str) {
+        git(main, &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", branch]);
+    }
+
+    #[test]
+    fn worktree_and_main_checkout_share_a_common_dir() {
+        if !git_available() { return; }
+        let t = tempfile::tempdir().unwrap();
+        let (main, wt) = (t.path().join("main"), t.path().join("wt"));
+        init(&main);
+        worktree(&main, &wt, "f");
+        let (a, b) = (repo_identity(&main), repo_identity(&wt));
+        assert!(a.common_dir.is_some());
+        assert_eq!(a.common_dir, b.common_dir);
+        assert_ne!(project_id(&main).unwrap(), project_id(&wt).unwrap());
+    }
+    #[test]
+    fn backfill_fills_null_identities_and_keeps_names() {
+        if !git_available() { return; }
+        let t = tempfile::tempdir().unwrap();
+        let (main, wt) = (t.path().join("main"), t.path().join("wt"));
+        init(&main);
+        worktree(&main, &wt, "f");
+        let mut s = Store::open_in_memory().unwrap();
+        let (m, w) = (normalize_path(&main.to_string_lossy()), normalize_path(&wt.to_string_lossy()));
+        s.register_project("m", &m, Some("o/r")).unwrap();
+        s.register_project("w", &w, None).unwrap();
+        s.register_project("gone", &normalize_path(&t.path().join("missing").to_string_lossy()), None).unwrap();
+        backfill_identities(&mut s).unwrap();
+        let rows = s.projects().unwrap();
+        assert!(rows[0].common_dir.is_some());
+        assert_eq!(rows[0].common_dir, rows[1].common_dir);
+        assert_eq!((rows[0].public_name.as_deref(), rows[1].public_name.as_deref()), (Some("o/r"), None));
+        assert_eq!((rows[2].common_dir.as_deref(), rows[2].remote.as_deref()), (None, None));
+        assert_eq!(s.repos_to_poll().unwrap().len(), 2);
+    }
+    #[test]
+    fn two_clones_of_one_remote_share_the_remote() {
+        if !git_available() { return; }
+        let t = tempfile::tempdir().unwrap();
+        let (a, b) = (t.path().join("a"), t.path().join("b"));
+        init(&a);
+        init(&b);
+        git(&a, &["remote", "add", "origin", "https://github.com/Sectersion/tally.git"]);
+        git(&b, &["remote", "add", "origin", "git@github.com:sectersion/tally"]);
+        let (ia, ib) = (repo_identity(&a), repo_identity(&b));
+        assert_eq!(ia.remote.as_deref(), Some("github.com/sectersion/tally"));
+        assert_eq!(ia.remote, ib.remote);
+        assert_ne!(ia.common_dir, ib.common_dir);
+    }
+    #[test]
+    fn registering_a_worktree_adopts_the_name_of_its_main_checkout() {
+        if !git_available() { return; }
+        let t = tempfile::tempdir().unwrap();
+        let (main, wt) = (t.path().join("main"), t.path().join("wt"));
+        init(&main);
+        worktree(&main, &wt, "f");
+        let mut s = Store::open_in_memory().unwrap();
+        let (m, none) = register_git_project_matched(&mut s, &main, Some("o/r")).unwrap();
+        assert_eq!(none, None);
+        let (w, adopted) = register_git_project_matched(&mut s, &wt, None).unwrap();
+        assert_eq!(adopted, Some(("o/r".to_string(), "common dir")));
+        let names = s.project_names().unwrap();
+        assert_eq!((names[&m].as_str(), names[&w].as_str()), ("o/r", "o/r"));
+    }
+    #[test]
+    fn a_clone_adopts_the_name_via_the_remote() {
+        if !git_available() { return; }
+        let t = tempfile::tempdir().unwrap();
+        let (a, b) = (t.path().join("a"), t.path().join("b"));
+        for d in [&a, &b] {
+            init(d);
+            git(d, &["remote", "add", "origin", "https://github.com/o/r.git"]);
+        }
+        let mut s = Store::open_in_memory().unwrap();
+        register_git_project(&mut s, &a, Some("o/r")).unwrap();
+        let (_, adopted) = register_git_project_matched(&mut s, &b, None).unwrap();
+        assert_eq!(adopted, Some(("o/r".to_string(), "remote")));
+    }
+    #[test]
+    fn an_explicit_name_wins_and_unrelated_repos_stay_unnamed() {
+        if !git_available() { return; }
+        let t = tempfile::tempdir().unwrap();
+        let (main, wt, other) = (t.path().join("main"), t.path().join("wt"), t.path().join("other"));
+        init(&main);
+        init(&other);
+        worktree(&main, &wt, "f");
+        let mut s = Store::open_in_memory().unwrap();
+        register_git_project(&mut s, &main, Some("o/r")).unwrap();
+        let (w, adopted) = register_git_project_matched(&mut s, &wt, Some("o/other")).unwrap();
+        assert_eq!(adopted, None);
+        let (o, adopted) = register_git_project_matched(&mut s, &other, None).unwrap();
+        assert_eq!(adopted, None);
+        let names = s.project_names().unwrap();
+        assert_eq!(names[&w], "o/other");
+        assert!(!names.contains_key(&o));
+    }
+    #[test]
+    fn identity_without_git_is_none_not_an_error() {
+        let t = tempfile::tempdir().unwrap(); // a plain directory, no repository
+        let plain = repo_identity(&t.path().join("missing"));
+        assert_eq!(plain, RepoIdentity { common_dir: None, remote: None });
+    }
+    #[test]
+    fn repos_to_poll_returns_one_repo_per_common_dir() {
+        if !git_available() { return; }
+        let t = tempfile::tempdir().unwrap();
+        let (main, wt, other) = (t.path().join("main"), t.path().join("wt"), t.path().join("other"));
+        init(&main);
+        init(&other);
+        worktree(&main, &wt, "f");
+        let mut s = Store::open_in_memory().unwrap();
+        let m = register_git_project(&mut s, &main, None).unwrap();
+        register_git_project(&mut s, &wt, None).unwrap();
+        let o = register_git_project(&mut s, &other, None).unwrap();
+        let ids: Vec<String> = s.repos_to_poll().unwrap().into_iter().map(|r| r.0).collect();
+        assert_eq!(ids, vec![m, o]);
+    }
+    #[test]
+    fn a_removed_root_is_skipped_in_favour_of_a_live_one_in_its_group() {
+        if !git_available() { return; }
+        let t = tempfile::tempdir().unwrap();
+        let (main, wt) = (t.path().join("main"), t.path().join("wt"));
+        init(&main);
+        worktree(&main, &wt, "f");
+        let mut s = Store::open_in_memory().unwrap();
+        register_git_project(&mut s, &main, None).unwrap();
+        let w = register_git_project(&mut s, &wt, None).unwrap();
+        // the main checkout vanishes (its common dir is gone, the worktree row remains)
+        s.conn.execute("UPDATE projects SET root = ?1 WHERE local_id != ?2", [t.path().join("gone").to_str().unwrap(), &w]).unwrap();
+        let repos = s.repos_to_poll().unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].0, w);
+        // when none exist, the earliest registered is kept
+        s.conn.execute("UPDATE projects SET root = ?1", [t.path().join("gone").to_str().unwrap()]).unwrap();
+        let first = s.projects().unwrap()[0].local_id.clone();
+        assert_eq!(s.repos_to_poll().unwrap()[0].0, first);
+    }
+    #[test]
+    fn identity_columns_are_added_to_an_old_database() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("tally.db");
+        {
+            let c = rusqlite::Connection::open(&p).unwrap();
+            c.execute_batch("CREATE TABLE projects(local_id TEXT PRIMARY KEY, root TEXT NOT NULL, public_name TEXT); INSERT INTO projects VALUES('a','/r','o/r');").unwrap();
+        }
+        let mut s = Store::open(&p).unwrap();
+        let rows = s.projects().unwrap();
+        assert_eq!((rows[0].public_name.as_deref(), rows[0].common_dir.clone()), (Some("o/r"), None));
+        s.set_project_identity("a", &RepoIdentity { common_dir: Some("/r/.git".into()), remote: Some("h/o/r".into()) }).unwrap();
+        assert_eq!(s.projects().unwrap()[0].remote.as_deref(), Some("h/o/r"));
+        Store::open(&p).unwrap(); // reopening is a no-op
     }
     #[test]
     fn no_git_root_in_plain_directory() {

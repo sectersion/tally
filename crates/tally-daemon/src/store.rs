@@ -25,9 +25,25 @@ pub struct AppendSummary {
     pub duplicates: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRow {
+    pub local_id: String,
+    pub root: String,
+    pub public_name: Option<String>,
+    pub common_dir: Option<String>,
+    pub remote: Option<String>,
+}
+
+/// `(start, end)` in ms.
+pub type Interval = (i64, i64);
+
 pub struct Store {
     pub(crate) conn: Connection,
 }
+
+/// `source_state` owner of run-level facts (no source has this id).
+const RUN_STATE: &str = "_run";
+const DISABLED_KEY: &str = "disabled_sources";
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, ts INTEGER NOT NULL, json TEXT NOT NULL);
@@ -37,6 +53,12 @@ CREATE TABLE IF NOT EXISTS projects(local_id TEXT PRIMARY KEY, root TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS ledger(seq INTEGER PRIMARY KEY, hash TEXT NOT NULL, entry_json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS source_state(source TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(source, key));
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS coverage(start_ts INTEGER NOT NULL, end_ts INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS skipped_claims(action_id TEXT PRIMARY KEY, ts INTEGER NOT NULL, reason TEXT NOT NULL);
+CREATE TRIGGER IF NOT EXISTS skipped_no_update BEFORE UPDATE ON skipped_claims
+BEGIN SELECT RAISE(ABORT, 'skipped_claims is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS skipped_no_delete BEFORE DELETE ON skipped_claims
+BEGIN SELECT RAISE(ABORT, 'skipped_claims is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS ledger_no_update BEFORE UPDATE ON ledger
 BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS ledger_no_delete BEFORE DELETE ON ledger
@@ -65,6 +87,20 @@ impl Store {
 
     fn init(conn: Connection) -> Result<Store, StoreError> {
         conn.execute_batch(SCHEMA)?;
+        for col in ["common_dir", "remote"] {
+            let have: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('projects') WHERE name = ?1)",
+                [col],
+                |r| r.get(0),
+            )?;
+            if !have {
+                // another process may have migrated between the check and here
+                match conn.execute_batch(&format!("ALTER TABLE projects ADD COLUMN {col} TEXT")) {
+                    Err(e) if e.to_string().contains("duplicate column name") => {}
+                    r => r?,
+                }
+            }
+        }
         Ok(Store { conn })
     }
 
@@ -141,9 +177,52 @@ impl Store {
         Ok(())
     }
 
-    /// Minimum watermark over all sources; `None` if there are none.
+    /// One source's watermark; `None` if it never set one.
+    pub fn watermark(&self, source: &str) -> Result<Option<i64>, StoreError> {
+        Ok(self.conn.query_row("SELECT ts FROM watermarks WHERE source = ?1", [source], |r| r.get(0)).optional()?)
+    }
+
+    /// Records `presence_required` and the disabled list in one transaction, so a finalizer
+    /// never sees one new and the other stale. See `set_disabled_sources` for the list.
+    pub fn set_run_config(&mut self, presence_required: bool, disabled: &[&str]) -> Result<(), StoreError> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES ('presence_required', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [i64::from(presence_required)],
+        )?;
+        tx.execute(
+            "INSERT INTO source_state(source, key, value) VALUES (?1, ?2, ?3)
+             ON CONFLICT(source, key) DO UPDATE SET value = excluded.value",
+            params![RUN_STATE, DISABLED_KEY, disabled.join(",")],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Records the sources config.toml switches off; `horizon` skips only those rows. The list
+    /// is as of the last `tally run` start. Re-enabling a source makes its stale watermark
+    /// count again at the next start, and events between that watermark and `finalized_through`
+    /// are then late (dropped).
+    pub fn set_disabled_sources(&mut self, ids: &[&str]) -> Result<(), StoreError> {
+        self.set_state(RUN_STATE, &BTreeMap::from([(DISABLED_KEY.to_string(), ids.join(","))]))
+    }
+
+    /// Minimum watermark over every source except those in the recorded disabled list (none
+    /// skipped if `tally run` never recorded one, see `set_disabled_sources`); `None` if no
+    /// rows count. A disabled source's old watermark row stays but no longer holds the horizon.
     pub fn horizon(&self) -> Result<Option<i64>, StoreError> {
-        Ok(self.conn.query_row("SELECT MIN(ts) FROM watermarks", [], |r| r.get(0))?)
+        let disabled = self.get_state(RUN_STATE)?.remove(DISABLED_KEY).unwrap_or_default();
+        let mut st = self.conn.prepare("SELECT source, ts FROM watermarks")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut min: Option<i64> = None;
+        for row in rows {
+            let (source, ts) = row?;
+            if !disabled.split(',').any(|i| i == source) {
+                min = Some(min.map_or(ts, |m| m.min(ts)));
+            }
+        }
+        Ok(min)
     }
 
     /// `i64::MIN` until the first `append_ledger`.
@@ -163,6 +242,58 @@ impl Store {
         Ok(())
     }
 
+    /// Keeps a stored value when the new one is `None`.
+    pub fn set_project_identity(&mut self, local_id: &str, id: &crate::project::RepoIdentity) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE projects SET common_dir = COALESCE(?2, common_dir), remote = COALESCE(?3, remote) WHERE local_id = ?1",
+            params![local_id, id.common_dir, id.remote],
+        )?;
+        Ok(())
+    }
+
+    /// All projects in insertion order.
+    pub fn projects(&self) -> Result<Vec<ProjectRow>, StoreError> {
+        let mut st = self
+            .conn
+            .prepare("SELECT local_id, root, public_name, common_dir, remote FROM projects ORDER BY rowid")?;
+        let rows = st.query_map([], |r| {
+            Ok(ProjectRow { local_id: r.get(0)?, root: r.get(1)?, public_name: r.get(2)?, common_dir: r.get(3)?, remote: r.get(4)? })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// One `(local_id, root)` per distinct `common_dir`; a project without one is its own group.
+    /// The pick is the earliest registered whose root still exists, else the earliest registered.
+    pub fn repos_to_poll(&self) -> Result<Vec<(String, String)>, StoreError> {
+        let mut groups: Vec<(Option<String>, Vec<ProjectRow>)> = Vec::new();
+        for p in self.projects()? {
+            match p.common_dir.as_ref().and_then(|c| groups.iter().position(|(k, _)| k.as_ref() == Some(c))) {
+                Some(i) => groups[i].1.push(p),
+                None => groups.push((p.common_dir.clone(), vec![p])),
+            }
+        }
+        Ok(groups
+            .into_iter()
+            .map(|(_, ps)| {
+                let pick = ps.iter().find(|p| Path::new(&p.root).exists()).unwrap_or(&ps[0]);
+                (pick.local_id.clone(), pick.root.clone())
+            })
+            .collect())
+    }
+
+    /// `project` plus every project sharing its `common_dir`.
+    pub fn project_group(&self, project: &str) -> Result<Vec<String>, StoreError> {
+        let mut st = self.conn.prepare(
+            "SELECT local_id FROM projects WHERE common_dir IS NOT NULL
+             AND common_dir = (SELECT common_dir FROM projects WHERE local_id = ?1)",
+        )?;
+        let mut v: Vec<String> = st.query_map([project], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        if !v.iter().any(|p| p == project) {
+            v.push(project.to_string());
+        }
+        Ok(v)
+    }
+
     /// Local id to public name, only for projects that have a name.
     pub fn project_names(&self) -> Result<BTreeMap<String, String>, StoreError> {
         let mut st = self
@@ -177,16 +308,37 @@ impl Store {
     /// `entries` still moves it. `scored_events` is how many events with `ts <= finalized_through`
     /// the caller scored; if the stored count differs, another writer added one meanwhile and
     /// nothing is written (`Conflict`). Events are never deleted, so equal counts mean equal sets.
+    /// Does not check the skipped count; see `append_ledger_checked`.
     pub fn append_ledger(
         &mut self,
         entries: &[LedgerEntry],
         finalized_through: i64,
         scored_events: usize,
+        skips: &[(String, i64, String)],
+    ) -> Result<(), StoreError> {
+        self.append_ledger_checked(entries, finalized_through, scored_events, skips, None)
+    }
+
+    /// Like `append_ledger`; with `Some(n)`, also `Conflict` if the stored skipped_claims
+    /// count is not `n` (another finalizer recorded skips since the caller read them).
+    pub fn append_ledger_checked(
+        &mut self,
+        entries: &[LedgerEntry],
+        finalized_through: i64,
+        scored_events: usize,
+        skips: &[(String, i64, String)],
+        skipped_seen: Option<usize>,
     ) -> Result<(), StoreError> {
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let stored: i64 = tx.query_row("SELECT COUNT(*) FROM events WHERE ts <= ?1", [finalized_through], |r| r.get(0))?;
         if usize::try_from(stored).ok() != Some(scored_events) {
             return Err(StoreError::Conflict);
+        }
+        if let Some(n) = skipped_seen {
+            let have: i64 = tx.query_row("SELECT COUNT(*) FROM skipped_claims", [], |r| r.get(0))?;
+            if usize::try_from(have).ok() != Some(n) {
+                return Err(StoreError::Conflict);
+            }
         }
         let last: Option<String> = tx
             .query_row("SELECT hash FROM ledger ORDER BY seq DESC LIMIT 1", [], |r| r.get(0))
@@ -202,6 +354,12 @@ impl Store {
                 params![e.hash, serde_json::to_string(e)?],
             )?;
         }
+        for (id, ts, reason) in skips {
+            tx.execute(
+                "INSERT OR IGNORE INTO skipped_claims(action_id, ts, reason) VALUES (?1, ?2, ?3)",
+                params![id, ts, reason],
+            )?;
+        }
         tx.execute(
             "INSERT INTO meta(key, value) VALUES ('finalized_through', ?1)
              ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)",
@@ -209,6 +367,57 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Monotone fact table: each span extends the row with the greatest `end_ts` if it
+    /// overlaps or touches it, else becomes a new row. Rows never shrink.
+    pub fn extend_coverage(&mut self, spans: &[Interval]) -> Result<(), StoreError> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for &(s, e) in spans.iter().filter(|(s, e)| s <= e) {
+            let last: Option<(i64, i64)> = tx
+                .query_row("SELECT rowid, end_ts FROM coverage ORDER BY end_ts DESC LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?;
+            match last {
+                Some((rowid, end)) if s <= end => {
+                    tx.execute("UPDATE coverage SET end_ts = MAX(end_ts, ?1) WHERE rowid = ?2", params![e, rowid])?;
+                }
+                _ => {
+                    tx.execute("INSERT INTO coverage(start_ts, end_ts) VALUES (?1, ?2)", params![s, e])?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn coverage(&self) -> Result<Vec<Interval>, StoreError> {
+        let mut st = self.conn.prepare("SELECT start_ts, end_ts FROM coverage ORDER BY start_ts")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn set_presence_required(&mut self, on: bool) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO meta(key, value) VALUES ('presence_required', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [i64::from(on)],
+        )?;
+        Ok(())
+    }
+
+    pub fn presence_required(&self) -> Result<bool, StoreError> {
+        let v: Option<i64> = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = 'presence_required'", [], |r| r.get(0))
+            .optional()?;
+        Ok(v.unwrap_or(0) != 0)
+    }
+
+    /// Recorded skips `(action_id, ts, reason)` in ts order.
+    pub fn skipped(&self) -> Result<Vec<(String, i64, String)>, StoreError> {
+        let mut st = self.conn.prepare("SELECT action_id, ts, reason FROM skipped_claims ORDER BY ts, action_id")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Ledger entries in append order.
@@ -221,6 +430,18 @@ impl Store {
         }
         Ok(out)
     }
+
+    /// Whether a stored `commit` event by the agent exists for `project` with `ts` in `[from_ts, to_ts]`.
+    /// The `sha` is deliberately not consulted.
+    pub fn has_agent_commit_marker(&self, project: &str, from_ts: i64, to_ts: i64) -> Result<bool, StoreError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE ts BETWEEN ?2 AND ?3
+             AND json_extract(json, '$.kind') = 'commit' AND json_extract(json, '$.by') = 'agent'
+             AND json_extract(json, '$.project') = ?1)",
+            params![project, from_ts, to_ts],
+            |r| r.get(0),
+        )?)
+    }
 }
 
 #[cfg(test)]
@@ -228,6 +449,22 @@ mod tests {
     use super::*;
     use tally_scoring::event::Kind;
     use tally_scoring::{Event, LedgerEntry, GENESIS_HASH};
+
+    #[test]
+    fn agent_commit_marker_matches_by_agent_project_and_window_only() {
+        let mut s = Store::open_in_memory().unwrap();
+        let c = |id: &str, ts: i64, project: &str, by: tally_scoring::event::Actor| Event {
+            project: Some(project.into()),
+            kind: Kind::Commit { sha: id.into(), by, lines_changed: 0 },
+            ..ev(id, ts)
+        };
+        use tally_scoring::event::Actor;
+        s.append_events(&[c("claude:toolu_1", 1000, "p", Actor::Agent), c("u", 5000, "p", Actor::User)]).unwrap();
+        assert!(s.has_agent_commit_marker("p", 900, 1100).unwrap());
+        assert!(!s.has_agent_commit_marker("p", 1001, 1100).unwrap());
+        assert!(!s.has_agent_commit_marker("q", 900, 1100).unwrap());
+        assert!(!s.has_agent_commit_marker("p", 4900, 5100).unwrap());
+    }
 
     fn ev(id: &str, ts: i64) -> Event {
         Event { v: 1, id: id.into(), ts, source: "test".into(), project: None, session: None, kind: Kind::Interrupt }
@@ -252,7 +489,7 @@ mod tests {
     #[test] fn late_events_reject_the_whole_batch_but_duplicates_pass() {
         let mut s = Store::open_in_memory().unwrap();
         s.append_events(&[ev("old", 500)]).unwrap();
-        s.append_ledger(&[], 1000, 1).unwrap();
+        s.append_ledger(&[], 1000, 1, &[]).unwrap();
         assert!(matches!(s.append_events(&[ev("ok", 1001), ev("late", 1000)]),
             Err(StoreError::LateEvent { ts: 1000, finalized_through: 1000, .. })));
         assert_eq!(s.events().unwrap().len(), 1);
@@ -267,19 +504,51 @@ mod tests {
         s.set_watermark("b", 10).unwrap();
         assert_eq!(s.horizon().unwrap(), Some(50));
     }
+    #[test] fn only_config_disabled_sources_are_skipped_by_the_horizon() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_watermark("git", 100).unwrap(); s.set_watermark("presence", 5).unwrap();
+        s.set_watermark("claude-code", 7).unwrap(); s.set_watermark("ingest", 50).unwrap();
+        assert_eq!(s.horizon().unwrap(), Some(5));                 // key absent: every row counts
+        s.set_disabled_sources(&["presence", "claude-code"]).unwrap();
+        assert_eq!(s.horizon().unwrap(), Some(50));                // ingest still counts
+        s.set_disabled_sources(&["claude-code"]).unwrap();         // presence re-enabled at the next start
+        assert_eq!(s.horizon().unwrap(), Some(5));
+        s.set_disabled_sources(&[]).unwrap();
+        assert_eq!(s.horizon().unwrap(), Some(5));
+    }
+    #[test] fn run_config_sets_presence_required_and_the_disabled_list_together() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_watermark("presence", 5).unwrap(); s.set_watermark("git", 9).unwrap();
+        s.set_run_config(true, &["presence"]).unwrap();
+        assert!(s.presence_required().unwrap());
+        assert_eq!(s.horizon().unwrap(), Some(9));
+        s.set_run_config(false, &[]).unwrap();
+        assert!(!s.presence_required().unwrap());
+        assert_eq!(s.horizon().unwrap(), Some(5));
+    }
+    #[test] fn a_skipped_row_between_prepare_and_append_is_a_conflict() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.append_ledger(&[], 10, 0, &[("a".into(), 5, "r".into())]).unwrap();
+        let e = entry("a1", GENESIS_HASH);
+        assert!(matches!(s.append_ledger_checked(std::slice::from_ref(&e), 20, 0, &[], Some(0)), Err(StoreError::Conflict)));
+        assert!(s.ledger().unwrap().is_empty());
+        assert_eq!(s.finalized_through().unwrap(), 10);
+        s.append_ledger_checked(&[e], 20, 0, &[], Some(1)).unwrap();
+        assert_eq!(s.ledger().unwrap().len(), 1);
+    }
     #[test] fn ledger_appends_in_order_and_rejects_a_broken_link() {
         let mut s = Store::open_in_memory().unwrap();
         let e1 = entry("a1", GENESIS_HASH);
         let e2 = entry("a2", &e1.hash);
-        s.append_ledger(&[e1.clone(), e2.clone()], 10, 0).unwrap();
+        s.append_ledger(&[e1.clone(), e2.clone()], 10, 0, &[]).unwrap();
         assert_eq!(s.ledger().unwrap(), vec![e1, e2]);
-        assert!(matches!(s.append_ledger(&[entry("a3", GENESIS_HASH)], 20, 0), Err(StoreError::ChainBroken)));
+        assert!(matches!(s.append_ledger(&[entry("a3", GENESIS_HASH)], 20, 0, &[]), Err(StoreError::ChainBroken)));
         assert_eq!(s.ledger().unwrap().len(), 2);
         assert_eq!(s.finalized_through().unwrap(), 10);
     }
     #[test] fn ledger_rows_cannot_be_updated_or_deleted() {
         let mut s = Store::open_in_memory().unwrap();
-        s.append_ledger(&[entry("a1", GENESIS_HASH)], 10, 0).unwrap();
+        s.append_ledger(&[entry("a1", GENESIS_HASH)], 10, 0, &[]).unwrap();
         assert!(s.conn.execute("UPDATE ledger SET hash = 'x'", []).is_err());
         assert!(s.conn.execute("DELETE FROM ledger", []).is_err());
     }
@@ -287,7 +556,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap(); let p = dir.path().join("tally.db");
         let mut a = Store::open(&p).unwrap();
         let mut b = Store::open(&p).unwrap();
-        b.append_ledger(&[entry("a1", GENESIS_HASH)], 1000, 0).unwrap();
+        b.append_ledger(&[entry("a1", GENESIS_HASH)], 1000, 0, &[]).unwrap();
         assert!(matches!(a.append_events(&[ev("late", 1000)]),
             Err(StoreError::LateEvent { ts: 1000, finalized_through: 1000, .. })));
         assert_eq!(a.ledger().unwrap().len(), 1);
@@ -299,12 +568,32 @@ mod tests {
         a.append_events(&[ev("x", 10)]).unwrap();
         let scored = a.events().unwrap().iter().filter(|e| e.ts <= 1000).count();
         b.append_events(&[ev("new_source", 500), ev("newer", 2000)]).unwrap();
-        assert!(matches!(a.append_ledger(&[entry("a1", GENESIS_HASH)], 1000, scored), Err(StoreError::Conflict)));
+        assert!(matches!(a.append_ledger(&[entry("a1", GENESIS_HASH)], 1000, scored, &[]), Err(StoreError::Conflict)));
         assert!(a.ledger().unwrap().is_empty());
         assert_eq!(a.finalized_through().unwrap(), i64::MIN);
         // events newer than the horizon never conflict
-        a.append_ledger(&[], 1000, 2).unwrap();
+        a.append_ledger(&[], 1000, 2, &[]).unwrap();
         assert_eq!(a.finalized_through().unwrap(), 1000);
+    }
+    #[test] fn coverage_merges_touching_intervals_and_keeps_gaps() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.extend_coverage(&[(0, 10), (10, 20), (30, 40), (35, 50)]).unwrap();
+        assert_eq!(s.coverage().unwrap(), vec![(0, 20), (30, 50)]);
+        s.extend_coverage(&[(5, 8), (50, 60)]).unwrap();
+        assert_eq!(s.coverage().unwrap(), vec![(0, 20), (30, 60)]);
+    }
+    #[test] fn skips_are_recorded_with_the_ledger_append_and_cannot_change() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.append_ledger(&[], 10, 0, &[("a".into(), 5, "no_presence_coverage".into())]).unwrap();
+        assert_eq!(s.skipped().unwrap(), vec![("a".to_string(), 5, "no_presence_coverage".to_string())]);
+        assert!(s.conn.execute("UPDATE skipped_claims SET reason = 'x'", []).is_err());
+        assert!(s.conn.execute("DELETE FROM skipped_claims", []).is_err());
+    }
+    #[test] fn presence_required_defaults_off_and_persists() {
+        let mut s = Store::open_in_memory().unwrap();
+        assert!(!s.presence_required().unwrap());
+        s.set_presence_required(true).unwrap();
+        assert!(s.presence_required().unwrap());
     }
     #[test] fn source_state_roundtrips_per_source_and_upserts() {
         let mut s = Store::open_in_memory().unwrap();

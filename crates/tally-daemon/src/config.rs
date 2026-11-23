@@ -7,6 +7,38 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub run: RunConfig,
     pub claude_code: ClaudeCodeConfig,
+    pub presence: PresenceConfig,
+}
+
+/// `require: None` means "same as `enabled`".
+#[derive(serde::Deserialize, Debug, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct PresenceConfig {
+    pub enabled: bool,
+    pub require: Option<bool>,
+}
+
+#[allow(clippy::derivable_impls)] // default is true on windows, so not derivable there
+impl Default for PresenceConfig {
+    fn default() -> Self {
+        Self { enabled: cfg!(windows), require: None }
+    }
+}
+
+impl Config {
+    /// Rejects settings that contradict each other.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.presence.enabled && self.presence.require == Some(true) {
+            return Err("presence.require is true but presence.enabled is false; enable presence or set require = false".into());
+        }
+        Ok(())
+    }
+}
+
+impl PresenceConfig {
+    pub fn required(&self) -> bool {
+        self.require.unwrap_or(self.enabled)
+    }
 }
 
 #[derive(serde::Deserialize, Debug, PartialEq)]
@@ -90,6 +122,26 @@ mod tests {
             (15, true, None)
         );
         assert_eq!((c.run.dashboard, c.run.dashboard_port), (false, 7878));
+    }
+
+    #[test]
+    fn require_without_enabled_is_rejected() {
+        let d = tempfile::tempdir().unwrap();
+        write(&d, "[presence]\nenabled = false\nrequire = true\n");
+        let e = load(d.path()).unwrap().validate().unwrap_err();
+        assert!(e.contains("presence.require") && e.contains("presence.enabled"), "{e}");
+        write(&d, "[presence]\nenabled = false\n");
+        assert!(load(d.path()).unwrap().validate().is_ok());
+    }
+    #[test]
+    fn presence_require_defaults_to_enabled() {
+        let d = tempfile::tempdir().unwrap();
+        write(&d, "[presence]\nenabled = true\n");
+        assert!(load(d.path()).unwrap().presence.required());
+        write(&d, "[presence]\nenabled = true\nrequire = false\n");
+        assert!(!load(d.path()).unwrap().presence.required());
+        write(&d, "[presence]\nenabled = false\n");
+        assert!(!load(d.path()).unwrap().presence.required());
     }
 
     #[test]

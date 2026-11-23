@@ -3,7 +3,7 @@ use std::process::{Command, Output};
 use tally_scoring::{Event, Kind};
 
 fn tally(home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_tally")).arg("--home").arg(home).args(args).output().unwrap()
+    Command::new(env!("CARGO_BIN_EXE_tally")).arg("--home").arg(home).args(args).env_remove("CLAUDECODE").output().unwrap()
 }
 fn out(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).replace("\r\n", "\n").trim().to_string()
@@ -36,12 +36,13 @@ fn lunch_scenario_end_to_end() {
 
     let o = tally(&home, &["finalize"]);
     assert!(o.status.success(), "{}", err(&o));
-    assert_eq!(out(&o), "appended 2, final 2, provisional 0");
+    assert_eq!(out(&o), "appended 2, skipped 0, final 2, provisional 0");
 
     let o = tally(&home, &["status"]);
     let s = out(&o);
     assert!(s.lines().any(|l| l == "final_claims: 2"), "{s}");
     assert!(s.lines().any(|l| l == "verified_s: 660"), "{s}");
+    assert!(s.lines().any(|l| l == "skipped_claims: 0"), "{s}");
 
     let o = tally(&home, &["verify"]);
     assert!(o.status.success());
@@ -57,7 +58,7 @@ fn lunch_scenario_end_to_end() {
     let s = out(&tally(&home, &["status"]));
     assert!(s.lines().any(|l| l == "events: 3"), "{s}");
 
-    assert_eq!(out(&tally(&home, &["finalize"])), "appended 0, final 2, provisional 0");
+    assert_eq!(out(&tally(&home, &["finalize"])), "appended 0, skipped 0, final 2, provisional 0");
 }
 
 #[test]
@@ -78,6 +79,31 @@ fn project_add_rejects_a_directory_outside_git_and_prints_the_id_inside_one() {
         assert!(!o.status.success());
         assert!(err(&o).contains("not inside a git repository"), "{}", err(&o));
     }
+}
+
+#[test]
+fn project_add_reports_an_adopted_name_on_stderr_only() {
+    if Command::new("git").arg("--version").output().is_err() {
+        return;
+    }
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let mk = |n: &str| {
+        let d = t.path().join(n);
+        std::fs::create_dir_all(&d).unwrap();
+        for args in [&["init", "-q"][..], &["remote", "add", "origin", "https://github.com/o/r.git"]] {
+            assert!(Command::new("git").arg("-C").arg(&d).args(args).output().unwrap().status.success());
+        }
+        d
+    };
+    let (a, b) = (mk("a"), mk("b"));
+    let o = tally(&home, &["project", "add", a.to_str().unwrap(), "--name", "o/r"]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(!err(&o).contains("matched"), "{}", err(&o));
+    let o = tally(&home, &["project", "add", b.to_str().unwrap()]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(err(&o).contains("matched o/r via remote"), "{}", err(&o));
+    assert_eq!(out(&o).len(), 64);
 }
 
 #[test]
@@ -112,7 +138,7 @@ fn run_once_with_an_empty_projects_dir_finalizes_and_exits() {
     std::fs::write(home.join("config.toml"), format!("[claude_code]\nprojects_dir = '{}'\n", empty.path().display())).unwrap();
     let o = tally(&home, &["run", "--once"]);
     assert!(o.status.success(), "{}", err(&o));
-    assert_eq!(out(&o), "added 0, duplicates 0, final 0, provisional 0");
+    assert_eq!(out(&o), "added 0, duplicates 0, skipped 0, final 0, provisional 0");
     assert!(home.join("tally.db").exists());
 }
 
@@ -147,4 +173,50 @@ fn verify_reports_a_tampered_ledger_entry_by_index() {
     let o = tally(&home, &["verify"]);
     assert_eq!(o.status.code(), Some(1));
     assert_eq!(out(&o), "FAIL at entry 0: bad_hash");
+}
+
+fn status_events(home: &Path) -> String {
+    let s = out(&tally(home, &["status"]));
+    s.lines().find(|l| l.starts_with("events:")).unwrap().to_string()
+}
+
+#[test]
+fn hook_test_run_passes_the_exit_code_through_and_records_one_user_event() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let bin = env!("CARGO_BIN_EXE_tally");
+    let o = tally(&home, &["hook", "test-run", "--", bin, "--help"]);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert_eq!(status_events(&home), "events: 1");
+
+    let o = tally(&home, &["hook", "test-run", "--", bin, "no-such-subcommand"]);
+    let code = o.status.code().unwrap();
+    assert_ne!(code, 0);
+    assert_eq!(code, Command::new(bin).arg("no-such-subcommand").output().unwrap().status.code().unwrap());
+    assert_eq!(status_events(&home), "events: 2");
+}
+
+#[test]
+fn hook_test_run_inside_claude_code_runs_the_program_but_records_nothing() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let bin = env!("CARGO_BIN_EXE_tally");
+    let o = tally(&home, &["hook", "test-run", "--", bin, "--help"]);
+    assert_eq!(status_events(&home), "events: 1");
+    assert_eq!(o.status.code(), Some(0));
+    let o = Command::new(bin).arg("--home").arg(&home).args(["hook", "test-run", "--", bin, "no-such-subcommand"])
+        .env("CLAUDECODE", "1").output().unwrap();
+    assert_ne!(o.status.code(), Some(0));
+    assert!(err(&o).contains("not recorded as a user action"), "{}", err(&o));
+    assert_eq!(status_events(&home), "events: 1");
+}
+
+#[test]
+fn hook_test_run_of_a_missing_program_exits_127_and_records_nothing() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let o = tally(&home, &["hook", "test-run", "--", "tally-no-such-program-xyz"]);
+    assert_eq!(o.status.code(), Some(127));
+    assert!(err(&o).contains("tally-no-such-program-xyz"), "{}", err(&o));
+    assert!(!home.join("tally.db").exists());
 }
