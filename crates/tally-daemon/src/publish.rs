@@ -70,8 +70,10 @@ impl PublishReport {
         for p in &self.projects {
             s += &format!("project {}: {} new entries, {} total, {}\n", p.name, p.new_entries, p.total_entries,
                 published::hours_message(p.verified_s));
-            for f in &p.files {
-                s += &format!("  {verb} {f}\n");
+            if dry_run || self.pushed {
+                for f in &p.files {
+                    s += &format!("  {verb} {f}\n");
+                }
             }
             if dry_run {
                 s += &format!("  badge: {}\n", badge_json(p.verified_s).trim_end());

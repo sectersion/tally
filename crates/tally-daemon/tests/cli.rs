@@ -202,7 +202,7 @@ fn publish_dry_run_prints_the_plan_and_changes_nothing() {
     let o = tally(&home, &["publish", "--dry-run"]);
     assert!(o.status.success(), "{}", err(&o));
     let s = out(&o);
-    assert!(s.contains("project owner/repo: 2 new entries"), "{s}");
+    assert!(s.contains("project owner/repo: 2 new entries, 2 total, 0.1 h"), "{s}");
     assert!(s.contains("\"message\":\"0.1 h\""), "{s}");
     assert!(s.contains("would write owner/repo/badge.json") && s.contains("dry run"), "{s}");
     assert_eq!(out(&tally(&home, &["status"])), before);
@@ -243,7 +243,7 @@ fn publish_pushes_once_then_has_nothing_to_push() {
     assert!(out(&o).contains("wrote owner/repo/badge.json") && out(&o).ends_with("pushed"), "{}", out(&o));
     let o = tally(&home, &["publish"]);
     assert!(o.status.success(), "{}", err(&o));
-    assert!(out(&o).ends_with("nothing to push"), "{}", out(&o));
+    assert!(out(&o).ends_with("nothing to push") && !out(&o).contains("wrote"), "{}", out(&o));
 }
 
 fn status_events(home: &Path) -> String {
