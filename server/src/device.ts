@@ -15,6 +15,7 @@ export function newUserCode(): string {
 }
 
 export async function createDeviceCode(sql: SQL, deviceName: string) {
+  await sql`delete from device_codes where expires_at < now()`;
   for (;;) {
     const device_code = newToken();
     const user_code = newUserCode();

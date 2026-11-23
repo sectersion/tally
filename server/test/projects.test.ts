@@ -80,8 +80,55 @@ test("a name under someone else's handle is not allowed", async () => {
 });
 test("validName", () => {
   expect(validName("a/b.c_d-e")).toBe(true);
-  for (const bad of ["a", "/b", "a/", "-a/b", "a/b/c", "a b/c", `${"a".repeat(40)}/b`])
+  for (const bad of [
+    "a",
+    "/b",
+    "a/",
+    "-a/b",
+    "a/b/c",
+    "a b/c",
+    `${"a".repeat(40)}/b`,
+    "a/.",
+    "a/..",
+  ])
     expect(validName(bad)).toBe(false);
+  expect(validName("a/...")).toBe(true);
+  expect(validName("a/.x")).toBe(true);
+});
+test("a repo-named project stores GitHub's full_name casing", async () => {
+  const u = await user(sql, h());
+  const full = `Octo${chainNo++}/Some-Repo`;
+  const repo = {
+    id: Math.floor(Math.random() * 1e12),
+    full_name: full,
+    installation_id: 1,
+    account_login: "Octo",
+  };
+  const r = await createProject(sql, u.id, full.toLowerCase(), async () => [repo]);
+  if (!("id" in r)) throw new Error(`setup ${JSON.stringify(r)}`);
+  expect((await sql`select public_name from projects where id = ${r.id}`)[0].public_name).toBe(
+    full,
+  );
+});
+test("token.ts claim sets an owner, and replaces one only with --force", async () => {
+  const a = await user(sql, h());
+  const b = await user(sql, h());
+  const owned = await createProject(sql, a.id, `${a.handle}/claim`);
+  if (!("id" in owned)) throw new Error("setup");
+  const unowned = await seed(sql);
+  const owner = async (pid: string) =>
+    (await sql`select owner_id from projects where id = ${pid}`)[0].owner_id;
+  const claim = (pid: string, ...extra: string[]) =>
+    Bun.spawnSync(["bun", "scripts/token.ts", "claim", pid, b.handle, ...extra], {
+      cwd: `${import.meta.dir}/..`,
+      env: process.env,
+    }).exitCode;
+  expect(claim(unowned.projectId)).toBe(0);
+  expect(await owner(unowned.projectId)).toBe(b.id);
+  expect(claim(owned.id)).toBe(1);
+  expect(await owner(owned.id)).toBe(a.id);
+  expect(claim(owned.id, "--force")).toBe(0);
+  expect(await owner(owned.id)).toBe(b.id);
 });
 test("handles: reserved, malformed, set once", async () => {
   const u = await user(sql, null);

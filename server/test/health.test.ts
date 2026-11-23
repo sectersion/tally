@@ -46,6 +46,18 @@ test("config requires DATABASE_URL", () => {
     "GITHUB_WEBHOOK_SECRET is required",
   );
   expect(() => loadConfig({ DATABASE_URL: "x", LOG_LEVEL: "loud" })).toThrow();
+  for (const bad of [
+    "tally.example",
+    "https://tally.example/app",
+    "https://tally.example?x=1",
+    "not a url",
+  ])
+    expect(() => loadConfig({ ...all, PUBLIC_BASE_URL: bad })).toThrow(
+      "PUBLIC_BASE_URL must be an origin like https://tally.example",
+    );
+  expect(loadConfig({ ...all, PUBLIC_BASE_URL: "http://localhost:8080/" }).publicBaseUrl).toBe(
+    "http://localhost:8080",
+  );
 });
 
 test("log redacts secrets", () => {

@@ -42,6 +42,7 @@ export async function createSession(
 ): Promise<{ setCookie: string; csrf: string }> {
   const token = newToken();
   const csrf = newToken();
+  await sql`delete from sessions where expires_at < now()`;
   await sql`insert into sessions (token_hash, user_id, csrf, expires_at)
     values (${hashToken(token)}, ${userId}, ${csrf}, now() + ${`${MAX_AGE} seconds`}::interval)`;
   return { setCookie: `${COOKIE}=${token}; ${attrs(cfg, MAX_AGE)}`, csrf };

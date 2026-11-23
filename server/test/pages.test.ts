@@ -3,6 +3,7 @@ import { createServer } from "../src/app.ts";
 import { hashToken } from "../src/auth.ts";
 import { testConfig } from "../src/config.ts";
 import { connect } from "../src/db.ts";
+import { linkRepoTx } from "../src/github.ts";
 import { commitWindows, createProject } from "../src/projects.ts";
 import { createSession } from "../src/session.ts";
 import { resetUpdCache } from "../src/upd.ts";
@@ -114,6 +115,32 @@ test("unverified shown separately and never added", async () => {
   expect(t).toContain("1.0 h verified");
   expect(t).toContain("30 min unverified (not counted)");
   expect(t).not.toContain("1.5 h");
+});
+
+test("under a minute of unverified time is <1 min, never 0 min", async () => {
+  const { id, name } = await projectWithOwner();
+  await ledger(id, [{ ts: NOW - 3_600_000, v: 3600, u: 59 }]);
+  const t = await (await get(`/p/${name}`)).text();
+  expect(t).toContain("&lt;1 min unverified (not counted)");
+  expect(t).not.toContain("0 min");
+});
+
+test("form failures are html pages with their status; /v1 stays json", async () => {
+  const { u, name } = await projectWithOwner();
+  const a = await auth(u.id);
+  const r = await post("/device", a, { decision: "maybe" });
+  expect(r.status).toBe(400);
+  expect(r.headers.get("content-type")).toBe("text/html; charset=utf-8");
+  expect(await r.text()).toContain("Choose approve or deny.");
+  const l = await post(`/p/${name}/upd-link`, a, { record_id: "rec1" });
+  expect(l.status).toBe(400);
+  expect(await l.text()).toContain("link a GitHub repo first");
+  const c = await post("/settings/profile", { ...a, csrf: "wrong" }, {});
+  expect(c.status).toBe(403);
+  expect(c.headers.get("content-type")).toBe("text/html; charset=utf-8");
+  const v = await fetch(`${base}/v1/device/code`, { method: "POST", body: "{" });
+  expect(v.status).toBe(400);
+  expect(v.headers.get("content-type")).toContain("application/json");
 });
 
 test("numbers section carries the live hooks", async () => {
@@ -449,6 +476,43 @@ test("home page: signed out offers sign-in; signed in lists projects or asks for
   const noHandle = await (await get("/", await auth(id))).text();
   expect(noHandle).toContain("Set your handle first");
   expect(noHandle).toContain('action="/settings/handle"');
+});
+
+test("delete account unlinks the user's repos so someone else can link them", async () => {
+  const { u, id } = await projectWithOwner();
+  const repo = await linkRepo(id, `octo/del${rnd()}`);
+  await sql`update projects set upd_record_id = 'recDEL' where id = ${id}`;
+  expect((await post("/settings/delete", await auth(u.id), { confirm: u.handle })).status).toBe(
+    303,
+  );
+  expect(
+    (
+      await sql`select count(*)::int as n from project_repos where github_repo_id = ${repo} and unlinked_at is null`
+    )[0].n,
+  ).toBe(0);
+  expect(
+    (await sql`select kind from repo_events where github_repo_id = ${repo}`).map(
+      (r: { kind: string }) => r.kind,
+    ),
+  ).toEqual(["unlinked"]);
+  expect(
+    (await sql`select upd_record_id from projects where id = ${id}`)[0].upd_record_id,
+  ).toBeNull();
+  const other = await projectWithOwner();
+  const full = (await sql`select full_name from github_repos where id = ${repo}`)[0].full_name;
+  await sql.begin((tx) =>
+    linkRepoTx(tx, other.id, {
+      id: repo,
+      full_name: full,
+      installation_id: rnd(),
+      account_login: "octo",
+    }),
+  );
+  expect(
+    (
+      await sql`select project_id from project_repos where github_repo_id = ${repo} and unlinked_at is null`
+    )[0].project_id,
+  ).toBe(other.id);
 });
 
 test("delete account hides everything public", async () => {

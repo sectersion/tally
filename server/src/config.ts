@@ -69,6 +69,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     v[key] = val;
   }
   v.publicBaseUrl = v.publicBaseUrl.replace(/\/+$/, "");
+  if (URL.parse(v.publicBaseUrl)?.origin !== v.publicBaseUrl)
+    throw new Error("PUBLIC_BASE_URL must be an origin like https://tally.example");
   return {
     port,
     databaseUrl,

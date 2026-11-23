@@ -121,6 +121,27 @@ const tooMany = () => {
   return r;
 };
 
+/** Browser form POSTs: everything but /v1 and the webhook. */
+const isForm = (route: string) => !route.startsWith("/v1") && route !== "/github/webhook";
+const FORM_ERRORS: Record<string, string> = {
+  csrf: "This form expired or came from another site. Go back, reload the page and try again.",
+  unauthorized: "Sign in first.",
+  forbidden: "That repo is not in the list GitHub gave for your account.",
+  not_found: "Not found.",
+  bad_decision: "Choose approve or deny.",
+};
+/** A failed form POST as a small page; status kept. Messages are server constants, escaped anyway. */
+const formError = (e: HttpError) => {
+  const code = e.body.error;
+  const r = page(
+    "Something went wrong",
+    html`<h1>Something went wrong</h1><p role="alert">${Object.hasOwn(FORM_ERRORS, code) ? (FORM_ERRORS[code] as string) : code}</p><p><a href="/">Back to Tally</a></p>`,
+    { status: e.status },
+  );
+  r.headers.set("cache-control", "no-store");
+  return r;
+};
+
 /**
  * The router's one try/catch: HttpError becomes its response, anything else a logged 500.
  * Also writes the one request log line (route pattern only; never headers, body, query or token).
@@ -138,6 +159,7 @@ function handle<P extends string>(
       if (e instanceof HttpError && e.location) res = redirect(e.location);
       else if (e instanceof HttpError && e.status === 429 && !route.startsWith("/v1"))
         res = tooMany();
+      else if (e instanceof HttpError && req.method === "POST" && isForm(route)) res = formError(e);
       else if (e instanceof HttpError)
         res = json(e.status, e.body, e.status === 429 ? { "retry-after": "60" } : undefined);
       else {
@@ -336,7 +358,10 @@ export function createServer(deps: Deps) {
         }),
       },
       "/": {
-        GET: handle("/", async (req) => homePage(sql, req, await getSession(sql, req))),
+        GET: handle("/", async (req, server) => {
+          limitPage(req, server);
+          return homePage(sql, req, await getSession(sql, req));
+        }),
       },
       "/u/:handle": {
         GET: handle("/u/:handle", async (req, server) => {
@@ -478,7 +503,7 @@ export function createServer(deps: Deps) {
           const r = await createProject(sql, s.userId, name, () =>
             withGhToken(s.userId, "/settings", () => userRepos(sql, s.userId, fetchFn)),
           );
-          return redirect("error" in r ? `/settings?error=${r.error}` : `/p/${name}`);
+          return redirect("error" in r ? `/settings?error=${r.error}` : `/p/${r.public_name}`);
         }),
       },
       "/github/connect": {

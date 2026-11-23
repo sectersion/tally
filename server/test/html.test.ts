@@ -63,6 +63,8 @@ test("formatters", () => {
   expect(formatHours(12.3 * 3600 + 20)).toBe("12.3 h");
   expect(formatHours(359)).toBe("0.0 h");
   expect(formatMinutes(179)).toBe("2 min");
+  expect(formatMinutes(59)).toBe("<1 min");
+  expect(formatMinutes(1)).toBe("<1 min");
 });
 
 test("static serves only the allowlist", async () => {

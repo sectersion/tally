@@ -134,7 +134,7 @@ test("upd link needs a linked repo", async () => {
   const p = await project(u);
   const r = await post(`${p.path}/upd-link`, u, { record_id: "recX" });
   expect(r.status).toBe(400);
-  expect(await r.json()).toEqual({ error: "link a GitHub repo first" });
+  expect(await r.text()).toContain("link a GitHub repo first");
   expect(await rec(p.id)).toBeNull();
 });
 
@@ -255,7 +255,7 @@ test("fetchFn rejecting, non-JSON, non-2xx, oversize, wrong shape are all 502 fr
   }
 });
 
-test("a hung Ships request is aborted by the timeout (502); a failure is not cached", async () => {
+test("a hung Ships request is aborted by the timeout (502); the failure is cached until reset", async () => {
   updLimits.timeoutMs = 20;
   let signal: AbortSignal | undefined;
   const hung = ((_u: unknown, init?: RequestInit) => {
@@ -271,7 +271,20 @@ test("a hung Ships request is aborted by the timeout (502); a failure is not cac
     updLimits.timeoutMs = 10_000;
   }
   list = [entry("recA", "https://github.com/o/r")];
+  // Within 60 s a failure answers at once, without another request.
+  await expect(findUpdEntries("o/r", fetchFn)).rejects.toMatchObject({ status: 502 });
+  expect(shipsCalls).toBe(0);
+  resetUpdCache();
   expect(await findUpdEntries("o/r", fetchFn)).toHaveLength(1);
+});
+
+test("with Ships down, a public page renders without waiting on Ships again", async () => {
+  shipsDown = true;
+  const u = await user();
+  const p = await project(u, "octo/mine");
+  await sql`update projects set upd_record_id = 'recMINE' where id = ${p.id}`;
+  for (let i = 0; i < 3; i++) expect((await fetch(`${base}${p.path}`)).status).toBe(200);
+  expect(shipsCalls).toBe(1);
 });
 
 test("concurrent cold misses download once", async () => {

@@ -167,14 +167,14 @@ test("form:<user_id> is a burst of 60 over session POSTs, per user", async () =>
   });
 });
 
-test("page:<ip> covers /u, /p, fragments and events", async () => {
+test("page:<ip> covers /, /u, /p, fragments and events", async () => {
   await withServer({ limits: { page: { perMin: 1, burst: 3 } } }, async (url) => {
     const { statuses, last } = await hammer(4, () => fetch(`${url}/u/nobody`));
     expect(statuses).toEqual([404, 404, 404, 429]);
     await expectHtml429(last);
     for (const p of ["/p/a/b", "/p/a/b/fragment", "/p/a/b/events"])
       expect((await fetch(`${url}${p}`)).status).toBe(429);
-    expect((await fetch(`${url}/`)).status).toBe(200); // the home page is not in the table
+    expect((await fetch(`${url}/`)).status).toBe(429);
   });
 });
 

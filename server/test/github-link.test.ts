@@ -91,6 +91,8 @@ test("gh sets headers, follows Link next, 502 on non-2xx", async () => {
   expect(calls[0]?.h.get("user-agent")).toBe("tally-server");
   expect(calls[0]?.h.get("authorization")).toBe("Bearer t0k");
   await expect(gh("t0k", "/boom", f)).rejects.toMatchObject({ status: 502 });
+  const html = (async () => new Response("<html>maintenance</html>")) as unknown as typeof fetch;
+  await expect(gh("t0k", "/x", html)).rejects.toMatchObject({ status: 502 });
 });
 
 test("linking a repo the user can access works and bumps change_seq", async () => {
@@ -134,7 +136,7 @@ test("second project linking the same repo is 409", async () => {
   ).toBe(303);
   const r = await post(`${await settingsPath(pb.id)}/link-repo`, b, { repo_id: String(repo.id) });
   expect(r.status).toBe(409);
-  expect(await r.json()).toMatchObject({ error: "repo already linked to another project" });
+  expect(await r.text()).toContain("repo already linked to another project");
   expect((await live(repo.id)).map((x) => x.project_id)).toEqual([pa.id]);
 });
 
@@ -164,8 +166,10 @@ test("project named owner/repo needs access to that repo", async () => {
   const repo = { id: rnd(), full_name: name };
   access(u, [repo]);
   const ok = await post("/projects", u, { name: name.toUpperCase() });
-  expect(ok.headers.get("location")).toBe(`/p/${name.toUpperCase()}`);
-  const [p] = await sql`select id from projects where lower(public_name) = lower(${name})`;
+  expect(ok.headers.get("location")).toBe(`/p/${name}`); // GitHub's casing, not the typed one
+  const [p] =
+    await sql`select id, public_name from projects where lower(public_name) = lower(${name})`;
+  expect(p.public_name).toBe(name);
   expect((await live(repo.id))[0]?.project_id).toBe(p.id);
 });
 
@@ -225,7 +229,7 @@ test("linking a repo already live on this project says so", async () => {
   await post(path, u, { repo_id: String(repo.id) });
   const r = await post(path, u, { repo_id: String(repo.id) });
   expect(r.status).toBe(409);
-  expect(await r.json()).toMatchObject({ error: "repo already linked to this project" });
+  expect(await r.text()).toContain("repo already linked to this project");
 });
 
 test("a project keeps one live repo: linking a second is 409 until the first is unlinked", async () => {
@@ -238,9 +242,7 @@ test("a project keeps one live repo: linking a second is 409 until the first is 
   expect((await post(`${path}/link-repo`, u, { repo_id: String(r1.id) })).status).toBe(303);
   const r = await post(`${path}/link-repo`, u, { repo_id: String(r2.id) });
   expect(r.status).toBe(409);
-  expect(await r.json()).toMatchObject({
-    error: "project already has a linked repo; unlink it first",
-  });
+  expect(await r.text()).toContain("project already has a linked repo; unlink it first");
   expect(await live(r2.id)).toEqual([]);
   await post(`${path}/unlink-repo`, u, {});
   expect((await post(`${path}/link-repo`, u, { repo_id: String(r2.id) })).status).toBe(303);

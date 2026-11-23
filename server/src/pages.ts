@@ -278,7 +278,13 @@ export async function deleteAccount(sql: SQL, userId: string, confirm: string): 
     await tx`delete from device_tokens where user_id = ${userId}
       or project_id in (select id from projects where owner_id = ${userId})`;
     await tx`delete from github_user_tokens where user_id = ${userId}`;
-    const ps = await tx`update projects set public = false where owner_id = ${userId} returning id`;
+    // Free the user's repos for whoever links them next; a UPD record matched the old link.
+    const rs = await tx`update project_repos set unlinked_at = now() where unlinked_at is null
+      and project_id in (select id from projects where owner_id = ${userId}) returning github_repo_id`;
+    for (const r of rs)
+      await tx`insert into repo_events (github_repo_id, kind, detail) values (${r.github_repo_id}, 'unlinked', 'account deleted')`;
+    const ps =
+      await tx`update projects set public = false, upd_record_id = null where owner_id = ${userId} returning id`;
     for (const p of ps) await bumpChange(tx, p.id);
     await tx`update users set email = null, name = null, display_name = null,
       verification_status = null, profile_public = false where id = ${userId}`;

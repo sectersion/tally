@@ -230,3 +230,12 @@ test("/v1/device/code is limited to a burst of 10 per ip", async () => {
     s.stop();
   }
 });
+
+test("creating a device code deletes expired ones", async () => {
+  const { createDeviceCode } = await import("../src/device.ts");
+  const tag = crypto.randomUUID();
+  await sql`insert into device_codes (code_hash, user_code, device_name, expires_at)
+    values (${`old!${tag}`}, ${`OLD${tag}`.slice(0, 9)}, 'x', now() - interval '1 second')`;
+  await createDeviceCode(sql, "lap");
+  expect((await sql`select 1 from device_codes where code_hash = ${`old!${tag}`}`).length).toBe(0);
+});

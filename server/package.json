@@ -10,6 +10,7 @@
     "migrate": "bun scripts/migrate.ts",
     "token:create": "bun scripts/token.ts create",
     "token:revoke": "bun scripts/token.ts revoke",
+    "token:claim": "bun scripts/token.ts claim",
     "user:role": "bun scripts/user-role.ts",
     "db:reset": "psql \"$DATABASE_URL\" -c \"drop schema public cascade; create schema public\"",
     "test": "bun test",

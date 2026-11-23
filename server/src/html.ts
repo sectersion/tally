@@ -33,7 +33,9 @@ const part = (v: Part): string =>
 export const html = (s: TemplateStringsArray, ...v: Part[]): Safe =>
   new Safe(s.reduce((a, lit, i) => a + lit + (i < v.length ? part(v[i] as Part) : ""), ""));
 
-export const formatMinutes = (s: number) => `${Math.floor(s / 60)} min`;
+/** Whole minutes; 1-59 s is "<1 min", never "0 min". */
+export const formatMinutes = (s: number) =>
+  s > 0 && s < 60 ? "<1 min" : `${Math.floor(s / 60)} min`;
 
 export const CSP =
   "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";

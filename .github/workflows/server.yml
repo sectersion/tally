@@ -17,7 +17,6 @@ jobs:
           --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
-      NODE_ENV: test # tests build their config with testConfig(); loadConfig never fills in missing values
     defaults:
       run:
         working-directory: server

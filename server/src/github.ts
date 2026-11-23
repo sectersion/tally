@@ -41,7 +41,11 @@ export async function gh(
     });
     if (res.status === 401) throw new HttpError(401, { error: "github_token_invalid" });
     if (!res.ok) throw new HttpError(502, { error: "github_failed" });
-    pages.push(await res.json());
+    try {
+      pages.push(await res.json());
+    } catch {
+      throw new HttpError(502, { error: "github_failed" }); // a 2xx that is not JSON
+    }
     const n = /<([^>]+)>;\s*rel="next"/.exec(res.headers.get("link") ?? "")?.[1] ?? null;
     next = n?.startsWith(`${API}/`) ? n : null; // never send the token to another origin
   }

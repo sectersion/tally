@@ -7,7 +7,8 @@ const RESERVED = new Set(
   "auth api v1 badge static settings device github admin u p healthz".split(" "),
 );
 
-export const validName = (name: string): boolean => NAME.test(name);
+/** A repo segment of exactly "." or ".." is a path, not a name. */
+export const validName = (name: string): boolean => NAME.test(name) && !/\/\.\.?$/.test(name);
 
 export const unique = (e: unknown): boolean => {
   if (typeof e !== "object" || e === null) return false;
@@ -56,12 +57,16 @@ export async function createProject(
   name: string,
   /** Live GitHub lookup for owner/repo names; only called when the handle rule does not apply. */
   listRepos?: () => Promise<AccessibleRepo[]>,
-): Promise<{ id: string } | { error: "bad_name" | "not_allowed" | "taken" | "repo_linked" }> {
+): Promise<
+  | { id: string; public_name: string }
+  | { error: "bad_name" | "not_allowed" | "taken" | "repo_linked" }
+> {
   if (!validName(name)) return { error: "bad_name" };
   let repo: AccessibleRepo | undefined;
   if (!(await nameAllowed(sql, userId, name))) {
     repo = listRepos ? repoNamed(await listRepos(), name) : undefined;
     if (!repo) return { error: "not_allowed" };
+    name = repo.full_name; // GitHub's casing, not what was typed
   }
   const id = crypto.randomUUID();
   try {
@@ -72,7 +77,7 @@ export async function createProject(
         await bumpChange(tx, id);
       }
     });
-    return { id };
+    return { id, public_name: name };
   } catch (e) {
     if (unique(e))
       return { error: constraint(e) === "project_repos_one_live" ? "repo_linked" : "taken" };

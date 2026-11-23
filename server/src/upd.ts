@@ -29,9 +29,12 @@ export function normalizeRepoUrl(url: string): string | null {
 // ponytail: one process-wide cache of the ~13 MB list's slim form; a nightly table if the list outgrows 20 MB.
 type Slim = UpdEntry & { repo: string };
 let cache: { at: number; list: Slim[] } | null = null;
+const FAIL_TTL_MS = 60_000;
+let failedAt: number | null = null;
 export const resetUpdCache = () => {
   cache = null;
   inflight = null;
+  failedAt = null;
 };
 
 const MAX_BYTES = 25 * 1024 * 1024;
@@ -69,14 +72,25 @@ async function fetchList(fetchFn: typeof fetch): Promise<Slim[]> {
   return list;
 }
 
-/** Concurrent cold misses share one download; a failure is never cached. */
+/**
+ * Concurrent cold misses share one download. A failure is remembered for FAIL_TTL_MS, so a Ships
+ * outage costs one timeout per minute, not one per page view.
+ */
 async function load(fetchFn: typeof fetch): Promise<Slim[]> {
   if (cache && Date.now() - cache.at < TTL_MS) return cache.list;
+  if (failedAt !== null && Date.now() - failedAt < FAIL_TTL_MS) throw unavailable();
   inflight ??= fetchList(fetchFn)
-    .then((list) => {
-      cache = { at: Date.now(), list };
-      return list;
-    })
+    .then(
+      (list) => {
+        cache = { at: Date.now(), list };
+        failedAt = null;
+        return list;
+      },
+      (e) => {
+        failedAt = Date.now();
+        throw e;
+      },
+    )
     .finally(() => {
       inflight = null;
     });

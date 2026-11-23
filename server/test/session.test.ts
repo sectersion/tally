@@ -11,7 +11,7 @@ const sql = connect(process.env.DATABASE_URL ?? "");
 const wide = { perMin: 6000, burst: 1000 };
 // these tests make many auth calls from one ip
 const srv = start(sql, createLimiter(6000, 1000), { auth: wide, form: wide });
-const ORIGIN = "http://localhost:8080"; // PUBLIC_BASE_URL under NODE_ENV=test
+const ORIGIN = "http://localhost:8080"; // testConfig()'s PUBLIC_BASE_URL
 const sub = `ident!${crypto.randomUUID()}`;
 
 beforeAll(() => {
@@ -215,4 +215,18 @@ test("requireRole rejects user and admits admin", () => {
   expect(status("reviewer", "reviewer")).toBe(200);
   expect(status("admin", "reviewer")).toBe(200);
   expect(status("admin", "admin")).toBe(200);
+});
+
+test("creating a session deletes expired ones", async () => {
+  const { createSession } = await import("../src/session.ts");
+  const { testConfig } = await import("../src/config.ts");
+  const id = crypto.randomUUID();
+  await sql`insert into users (id, hca_sub) values (${id}, ${`sub!${id}`})`;
+  await sql`insert into sessions (token_hash, user_id, csrf, expires_at)
+    values (${`old!${id}`}, ${id}, 'c', now() - interval '1 second'),
+      (${`live!${id}`}, ${id}, 'c', now() + interval '1 hour')`;
+  await createSession(sql, testConfig(), id);
+  const left =
+    await sql`select token_hash from sessions where user_id = ${id} and token_hash like '%!%'`;
+  expect(left.map((r: { token_hash: string }) => r.token_hash)).toEqual([`live!${id}`]);
 });
