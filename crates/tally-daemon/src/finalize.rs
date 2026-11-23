@@ -67,17 +67,8 @@ pub fn finalize(store: &mut Store) -> Result<FinalizeSummary, FinalizeError> {
 mod tests {
     use super::*;
     use crate::store::Store;
+    use crate::test_support::{edit, prompt};
     use tally_scoring::{Event, Kind, GENESIS_HASH};
-
-    fn ev(id: &str, ts: i64, kind: Kind) -> Event {
-        Event { v: 1, id: id.into(), ts, source: "test".into(), project: Some("p1".into()), session: None, kind }
-    }
-    fn prompt(id: &str, ts: i64, rel: u16) -> Event {
-        ev(id, ts, Kind::Prompt { chars: 200, relevance_pm: rel, novelty_bytes: 100 })
-    }
-    fn edit(id: &str, ts: i64) -> Event {
-        ev(id, ts, Kind::UserEdit { file_hash: "f".into(), lines_changed: 1 })
-    }
 
     #[test] fn final_prefix_boundary_is_exact() {
         let mut s = Store::open_in_memory().unwrap();
