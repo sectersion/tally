@@ -66,6 +66,12 @@ enum Cmd {
         #[arg(long)]
         server_id: String,
     },
+    /// Commit heads and upload every linked project's published chains to `[sync] server` now (ignores backoff).
+    Sync {
+        /// Print what each chain would upload (one GET per chain); upload nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     Status,
     Verify,
     /// Check downloaded published chain files; needs no home or database. Exits 1 if any fail.
@@ -231,6 +237,43 @@ fn main() -> Result<()> {
             let r = tally_daemon::publish::publish_once(&mut store, &cfg.publish, &home, dry_run)?;
             print!("{}", r.render_text(dry_run));
         }
+        Cmd::Sync { dry_run } => {
+            let server = config::load(&home)?.sync.server.ok_or_else(|| anyhow!("no [sync] server in config.toml"))?;
+            let tokens = tally_daemon::credentials::load_tokens(&home).context("reading device tokens")?;
+            let (commits, chains) = if dry_run {
+                (vec![], tally_daemon::sync::dry_run(&mut store, &server, &tokens))
+            } else {
+                tally_daemon::sync::sync_once(&mut store, &server, &tokens, &mut Default::default(), Some(now_ms()))
+            };
+            let ids = store.server_ids()?;
+            let mut failed = false;
+            let mut fail = |p: &str, e: &tally_daemon::sync::SyncError| {
+                failed = true;
+                let id = ids.get(p).and_then(|v| v.first()).map_or("<id>", String::as_str);
+                match e {
+                    tally_daemon::sync::SyncError::NotLoggedIn { .. } => eprintln!("{p}: no device token; run tally login --server-id {id}"),
+                    tally_daemon::sync::SyncError::Api(tally_daemon::api::ApiError::Unauthorized) => {
+                        eprintln!("{p}: device token rejected; run tally login --server-id {id}")
+                    }
+                    e => eprintln!("{p}: {e}"),
+                }
+            };
+            for (p, r) in &commits {
+                if let Err(e) = r {
+                    fail(p, e);
+                }
+            }
+            for (p, r) in &chains {
+                match r {
+                    Ok(c) if dry_run => println!("{} {}: {} to upload", c.project, c.ruleset, c.uploaded),
+                    Ok(c) => println!("{} {}: uploaded {}, server has {}", c.project, c.ruleset, c.uploaded, c.server_count),
+                    Err(e) => fail(p, e),
+                }
+            }
+            if failed {
+                std::process::exit(1);
+            }
+        }
         Cmd::Status => {
             let s = status(&store)?;
             println!("events: {}", s.events);
@@ -258,7 +301,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Stores the token from stdin. No network call here (the server is checked by the sync loop).
+/// Stores the token from stdin, then checks it against `[sync] server` if one is configured.
 fn login(home: &std::path::Path, server_id: &str, server: Option<&str>) -> Result<()> {
     if !tally_daemon::project::valid_server_id(server_id) {
         bail!("invalid server id; use 1 to 64 letters, digits, '_' or '-'");
@@ -282,6 +325,15 @@ fn login(home: &std::path::Path, server_id: &str, server: Option<&str>) -> Resul
                 std::fs::write(&p, &existing)?; // restore: the url was not acceptable
                 bail!("{e}");
             }
+        }
+    }
+    // One GET /head when a server is configured. The token stays stored either way.
+    if let Some(url) = config::load(home)?.sync.server {
+        let token = tally_daemon::credentials::load_tokens(home).context("reading device tokens")?.remove(server_id).unwrap_or_default();
+        match tally_daemon::api::Api::new(&url, &token).head(server_id, tally_scoring::RULESET_VERSION) {
+            Ok(_) => {}
+            Err(tally_daemon::api::ApiError::Unauthorized) => bail!("device token rejected by {url}; the token is stored, run tally login again with a valid one"),
+            Err(e) => eprintln!("warning: could not check the token with {url}: {e}"),
         }
     }
     println!("logged in");

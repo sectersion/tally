@@ -242,7 +242,7 @@ fn a_revoked_token_stops_only_its_project() {
     f.add_project("srv_2", "owner/other", "tok2");
     f.revoke("srv_1");
     let mut s = two_project_store(None);
-    let out = sync_all(&mut s, &f.url, &tokens());
+    let out: Vec<_> = sync_all(&mut s, &f.url, &tokens()).into_iter().map(|r| r.1).collect();
     assert_eq!(out.len(), 2);
     assert!(out.iter().any(|r| matches!(r, Err(SyncError::Api(ApiError::Unauthorized)))));
     let ok = out.iter().find_map(|r| r.as_ref().ok()).unwrap();
@@ -258,11 +258,11 @@ fn a_linked_project_without_a_token_is_reported_and_others_continue() {
     let mut s = two_project_store(None);
     let mut t = tokens();
     t.remove("srv_2");
-    let out = sync_all(&mut s, &f.url, &t);
+    let out: Vec<_> = sync_all(&mut s, &f.url, &t).into_iter().map(|r| r.1).collect();
     assert!(out.iter().any(|r| matches!(r, Err(SyncError::NotLoggedIn { project }) if project == "owner/other")));
     assert!(out.iter().any(|r| matches!(r, Ok(c) if c.project == "owner/repo" && c.uploaded == 1)));
     let again = sync_all(&mut s, &f.url, &t);
-    assert!(again.iter().any(|r| matches!(r, Ok(c) if c.uploaded == 0)));
+    assert!(again.iter().any(|r| matches!(&r.1, Ok(c) if c.uploaded == 0)));
 }
 
 #[test]
@@ -294,7 +294,7 @@ fn sync_all_uploads_nothing_when_the_ledger_diverges() {
     .unwrap();
     drop(c);
     let out = sync_all(&mut s, &f.url, &tokens());
-    assert!(matches!(&out[..], [Err(SyncError::Derivation(FinalizeError::Divergence { .. }))]), "{out:?}");
+    assert!(matches!(&out[..], [(l, Err(SyncError::Derivation(FinalizeError::Divergence { .. })))] if l == "ledger"), "{out:?}");
     assert!(f.requests().is_empty());
 }
 
@@ -310,7 +310,7 @@ fn two_server_ids_for_one_public_name_is_refused() {
     s.set_watermark("src", 1_000_000).unwrap();
     finalize(&mut s).unwrap();
     let out = sync_all(&mut s, &f.url, &tokens());
-    assert!(matches!(&out[..], [Err(SyncError::ConflictingLink { project })] if project == "owner/repo"), "{out:?}");
+    assert!(matches!(&out[..], [(_, Err(SyncError::ConflictingLink { project }))] if project == "owner/repo"), "{out:?}");
     assert!(f.requests().is_empty());
 }
 
@@ -322,4 +322,149 @@ fn sync_errors_never_contain_the_token() {
     let t = BTreeMap::from([("srv_1".into(), "tok_SECRET".into()), ("srv_2".into(), "tok2".into())]);
     let out = sync_all(&mut s, &f.url, &t);
     assert!(out.iter().all(|r| !format!("{r:?}").contains("tok_SECRET")));
+}
+
+// ---- ticker (Task 7) ----
+use tally_daemon::sync::{commit_heads, SyncTicker, BACKOFF_MAX_MS};
+use tally_scoring::ruleset::COMMIT_INTERVAL_MS;
+
+/// Adds `n` finalized, published prompts to owner/repo (p1, linked to srv_1), ids from `from`.
+fn add_published(s: &mut Store, from: usize, n: usize) {
+    // later batches start well past the previous watermark, so they are not late
+    let ts = |i: usize| (from * 10_000_000 + i * 100_000) as i64;
+    let evs: Vec<Event> = (from..from + n).map(|i| prompt(&format!("e{i}"), ts(i), "p1")).collect();
+    s.append_events(&evs).unwrap();
+    s.set_watermark("src", ts(from + n) + 1_000_000).unwrap();
+    finalize(s).unwrap();
+    tally_daemon::published::sync(s, true).unwrap();
+}
+
+fn linked_store(n: usize) -> Store {
+    let mut s = Store::open_in_memory().unwrap();
+    s.register_project("p1", "C:/r", Some("owner/repo")).unwrap();
+    s.set_server_id("p1", "srv_1").unwrap();
+    add_published(&mut s, 0, n);
+    s
+}
+
+fn local(s: &Store) -> Vec<tally_scoring::LedgerEntry> {
+    s.published_rows("owner/repo").unwrap().into_iter().map(|r| r.entry).collect()
+}
+
+fn logged_in_home() -> tempfile::TempDir {
+    let d = tempfile::tempdir().unwrap();
+    tally_daemon::credentials::save_token(d.path(), "srv_1", "tok").unwrap();
+    d
+}
+
+#[test]
+fn offline_for_days_then_back_uploads_everything_in_one_tick() {
+    let f = FakeServer::start("tok");
+    let home = logged_in_home();
+    let mut s = linked_store(1200);
+    assert_eq!(local(&s).len(), 1200);
+    f.down(true);
+    let mut t = SyncTicker::new();
+    let mut attempts = vec![];
+    let mut now = 0;
+    while now <= 3 * 86_400_000 {
+        if t.tick(&mut s, &f.url, home.path(), now) {
+            attempts.push(now);
+        }
+        now += COMMIT_INTERVAL_MS;
+    }
+    assert!(f.requests().is_empty());
+    let gaps: Vec<i64> = attempts.windows(2).map(|w| w[1] - w[0]).collect();
+    assert!(gaps.iter().all(|g| *g <= BACKOFF_MAX_MS), "{gaps:?}");
+    assert_eq!(*gaps.last().unwrap(), BACKOFF_MAX_MS); // it did back off
+    assert!(attempts.len() < 100, "{}", attempts.len());
+    f.down(false);
+    while !t.tick(&mut s, &f.url, home.path(), now) {
+        now += COMMIT_INTERVAL_MS;
+    }
+    assert_eq!(f.chain("srv_1", R), local(&s));
+    assert_eq!(upload_sizes(&f), [500, 500, 200]);
+    assert_eq!(f.commits("srv_1").len(), 1);
+}
+
+#[test]
+fn the_commit_carries_the_local_clock_unchanged_and_only_new_heads() {
+    let f = FakeServer::start("tok");
+    let home = logged_in_home();
+    let mut s = linked_store(3);
+    let mut t = SyncTicker::new();
+    assert!(t.tick(&mut s, &f.url, home.path(), 42)); // a clock far behind the server's
+    let l = local(&s);
+    assert_eq!(f.commits("srv_1"), [(l[2].hash.clone(), 42)]);
+    assert!(t.tick(&mut s, &f.url, home.path(), 42 + COMMIT_INTERVAL_MS));
+    assert_eq!(f.commits("srv_1").len(), 1);
+    add_published(&mut s, 3, 2);
+    assert!(t.tick(&mut s, &f.url, home.path(), 42 + 2 * COMMIT_INTERVAL_MS));
+    let l = local(&s);
+    assert_eq!(l.len(), 5);
+    let c = f.commits("srv_1");
+    assert_eq!(c.len(), 2);
+    assert_eq!(c[1], (l[4].hash.clone(), 42 + 2 * COMMIT_INTERVAL_MS));
+    assert_eq!(f.chain("srv_1", R), l);
+}
+
+#[test]
+fn a_tick_before_the_interval_does_no_io() {
+    let f = FakeServer::start("tok");
+    let home = logged_in_home();
+    let mut s = linked_store(1);
+    let mut t = SyncTicker::new();
+    assert!(t.tick(&mut s, &f.url, home.path(), 0));
+    let n = f.requests().len();
+    assert!(n > 0);
+    assert!(!t.tick(&mut s, &f.url, home.path(), COMMIT_INTERVAL_MS - 1));
+    assert_eq!(f.requests().len(), n);
+}
+
+#[test]
+fn a_rejected_token_backs_off_for_an_hour() {
+    let f = FakeServer::start("tok");
+    let home = logged_in_home();
+    let mut s = linked_store(1);
+    f.revoke("srv_1");
+    let mut t = SyncTicker::new();
+    assert!(t.tick(&mut s, &f.url, home.path(), 0));
+    assert!(!t.tick(&mut s, &f.url, home.path(), BACKOFF_MAX_MS - 1));
+    assert!(t.tick(&mut s, &f.url, home.path(), BACKOFF_MAX_MS));
+}
+
+#[test]
+fn the_run_loop_syncs_only_when_enabled() {
+    use tally_daemon::run::{hooks, run_once, sync_hook};
+    let f = FakeServer::start("tok");
+    let home = logged_in_home();
+    let mut cfg = tally_daemon::config::Config::default();
+    cfg.publish.enabled = false;
+    cfg.sync.server = Some(f.url.clone());
+    assert!(sync_hook(&cfg, home.path()).is_none()); // server set, not enabled
+    assert_eq!(hooks(&cfg, home.path()).len(), 1);
+    cfg.sync.enabled = true;
+    cfg.sync.server = None;
+    assert!(sync_hook(&cfg, home.path()).is_none());
+    cfg.sync.server = Some(f.url.clone());
+    let mut hks = hooks(&cfg, home.path());
+    assert_eq!(hks.len(), 2);
+    let mut s = linked_store(3);
+    let r = run_once(&mut s, &mut [], &mut hks, 1_000);
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert_eq!(f.chain("srv_1", R), local(&s));
+    assert_eq!(f.commits("srv_1"), [(local(&s)[2].hash.clone(), 1_000)]);
+}
+
+#[test]
+fn commit_heads_skips_projects_without_a_token() {
+    let f = FakeServer::start("tok");
+    let s = linked_store(1);
+    let mut last = BTreeMap::new();
+    assert!(commit_heads(&s, &f.url, &BTreeMap::new(), &mut last, 1).is_empty());
+    assert!(f.requests().is_empty());
+    let t = BTreeMap::from([("srv_1".to_string(), "tok".to_string())]);
+    let out = commit_heads(&s, &f.url, &t, &mut last, 1);
+    assert!(matches!(&out[..], [(p, Ok(()))] if p == "owner/repo"), "{out:?}");
+    assert_eq!(last["srv_1"], local(&s)[0].hash);
 }

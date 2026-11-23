@@ -365,3 +365,85 @@ fn login_stores_the_token_and_never_prints_it() {
     assert_eq!(out(&o), "logged out");
     assert_eq!(out(&tally(t.path(), &["logout", "--server-id", "srv_1"])), "not logged in");
 }
+
+#[path = "support/fake_server.rs"]
+mod fake_server;
+use fake_server::FakeServer;
+
+fn login(home: &Path, token: &str, extra: &[&str]) -> Output {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut c = Command::new(env!("CARGO_BIN_EXE_tally"))
+        .arg("--home").arg(home).args(["login", "--server-id", "srv_1"]).args(extra)
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    c.stdin.take().unwrap().write_all(format!("{token}\n").as_bytes()).unwrap();
+    c.wait_with_output().unwrap()
+}
+
+/// `named_home` with owner/repo linked to srv_1 and `[sync]` pointing at `url`.
+fn synced_home(t: &Path, url: &str) -> std::path::PathBuf {
+    let home = named_home(t);
+    let o = tally(&home, &["project", "link", t.join("repo").to_str().unwrap(), "--server-id", "srv_1"]);
+    assert!(o.status.success(), "{}", err(&o));
+    std::fs::write(home.join("config.toml"), format!("[sync]\nenabled = true\nserver = '{url}'\n")).unwrap();
+    home
+}
+
+#[test]
+fn sync_dry_run_reports_and_uploads_nothing() {
+    let f = FakeServer::start("tok");
+    let t = tempfile::tempdir().unwrap();
+    let home = synced_home(t.path(), &f.url);
+    let o = login(&home, "tok", &[]);
+    assert!(o.status.success(), "{}", err(&o));
+    let o = tally(&home, &["sync", "--dry-run"]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(out(&o), format!("owner/repo {}: 2 to upload", tally_scoring::RULESET_VERSION));
+    assert!(f.requests().iter().all(|r| r.method != "POST"));
+    assert!(f.chain("srv_1", fake_server::R).is_empty());
+
+    let o = tally(&home, &["sync"]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(out(&o), format!("owner/repo {}: uploaded 2, server has 2", tally_scoring::RULESET_VERSION));
+    assert_eq!(f.chain("srv_1", fake_server::R).len(), 2);
+    assert_eq!(f.commits("srv_1").len(), 1);
+    assert!(!out(&o).contains("tok") && !err(&o).contains("tok"));
+}
+
+#[test]
+fn sync_without_login_says_so() {
+    let f = FakeServer::start("tok");
+    let t = tempfile::tempdir().unwrap();
+    let home = synced_home(t.path(), &f.url);
+    let o = tally(&home, &["sync"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(err(&o).contains("tally login --server-id srv_1"), "{}", err(&o));
+}
+
+#[test]
+fn sync_without_a_server_names_the_setting() {
+    let t = tempfile::tempdir().unwrap();
+    let home = named_home(t.path());
+    let o = tally(&home, &["sync"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(err(&o).contains("[sync] server"), "{}", err(&o));
+}
+
+#[test]
+fn login_checks_the_token_against_a_configured_server() {
+    let f = FakeServer::start("tok");
+    let t = tempfile::tempdir().unwrap();
+    let o = login(t.path(), "tok_wrong", &["--server", &f.url]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(err(&o).contains("device token rejected"), "{}", err(&o));
+    assert!(!out(&o).contains("tok_wrong") && !err(&o).contains("tok_wrong"));
+    // the token stays stored even when rejected
+    assert_eq!(std::fs::read_to_string(t.path().join("device_tokens")).unwrap(), "srv_1 tok_wrong\n");
+    let o = login(t.path(), "tok", &[]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(out(&o), "logged in");
+    f.down(true);
+    let o = login(t.path(), "tok", &[]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(err(&o).contains("warning"), "{}", err(&o));
+}
