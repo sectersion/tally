@@ -18,7 +18,7 @@ pub struct RepoRef {
 }
 
 pub trait AgentCommitLookup {
-    fn is_agent_commit(&self, project: &str, commit_ts: i64) -> Result<bool, SourceError>;
+    fn is_agent_commit(&self, repo: &RepoRef, commit_ts: i64) -> Result<bool, SourceError>;
     fn claude_watermark(&self) -> Result<Option<i64>, SourceError>;
 }
 
@@ -29,10 +29,13 @@ pub struct StoreLookup {
 }
 
 impl AgentCommitLookup for StoreLookup {
-    fn is_agent_commit(&self, project: &str, commit_ts: i64) -> Result<bool, SourceError> {
-        // Markers carry the id of the directory Claude ran in, which may be a linked worktree of this repo.
+    fn is_agent_commit(&self, repo: &RepoRef, commit_ts: i64) -> Result<bool, SourceError> {
+        // Markers carry the id of the directory Claude ran in: a linked worktree of this repo,
+        // registered or not.
         let err = |e: crate::store::StoreError| SourceError::Other(e.to_string());
-        for p in self.store.project_group(project).map_err(err)? {
+        let mut ids = self.store.project_group(&repo.local_id).map_err(err)?;
+        ids.extend(crate::project::worktree_ids(&repo.root));
+        for p in ids {
             if self.store.has_agent_commit_marker(&p, commit_ts - AGENT_COMMIT_WINDOW_MS, commit_ts + AGENT_COMMIT_AFTER_MS).map_err(err)? {
                 return Ok(true);
             }
@@ -84,11 +87,13 @@ pub struct GitSource {
     repos: Vec<RepoRef>,
     lookup: Box<dyn AgentCommitLookup>,
     pub(crate) program: String,
+    /// Repos whose missing root was already logged.
+    warned: std::collections::HashSet<String>,
 }
 
 impl GitSource {
     pub fn new(repos: Vec<RepoRef>, lookup: Box<dyn AgentCommitLookup>) -> GitSource {
-        GitSource { repos, lookup, program: "git".into() }
+        GitSource { repos, lookup, program: "git".into(), warned: Default::default() }
     }
 }
 
@@ -157,7 +162,7 @@ impl Source for GitSource {
                 Some(wm) => match fetch(&self.program, repo, wm) {
                     Ok(commits) => {
                         for c in commits.unwrap_or_default().into_iter().filter(|c| c.ts_ms > wm && c.ts_ms <= cutoff) {
-                            let by = if self.lookup.is_agent_commit(&repo.local_id, c.ts_ms)? { Actor::Agent } else { Actor::User };
+                            let by = if self.lookup.is_agent_commit(repo, c.ts_ms)? { Actor::Agent } else { Actor::User };
                             events.push(Event {
                                 v: 1,
                                 id: format!("git:{}:commit", c.sha),
@@ -171,6 +176,13 @@ impl Source for GitSource {
                         wm.max(cutoff)
                     }
                     Err(GitFail::Missing) => return Err(SourceError::Other("git not found on PATH".into())),
+                    // A deleted root has no new commits: do not let it freeze every source's finalization.
+                    Err(GitFail::Failed) if !repo.root.exists() => {
+                        if self.warned.insert(repo.local_id.clone()) {
+                            eprintln!("git: repository root {} no longer exists; not polling it", repo.root.display());
+                        }
+                        wm.max(cutoff)
+                    }
                     Err(GitFail::Failed) => wm, // retried next poll; holds the source watermark back
                 },
             };
@@ -239,7 +251,8 @@ mod tests {
     #[derive(Clone, Default)]
     struct FakeLookup(Arc<Mutex<Fake>>);
     impl AgentCommitLookup for FakeLookup {
-        fn is_agent_commit(&self, project: &str, ts: i64) -> Result<bool, SourceError> {
+        fn is_agent_commit(&self, repo: &RepoRef, ts: i64) -> Result<bool, SourceError> {
+            let project = repo.local_id.as_str();
             let f = self.0.lock().unwrap();
             if f.fail {
                 return Err(SourceError::Other("lookup down".into()));
@@ -349,6 +362,10 @@ mod tests {
         assert_eq!(by, vec![Actor::Agent, Actor::User]);
     }
 
+    fn rr(id: &str) -> RepoRef {
+        RepoRef { local_id: id.into(), root: "/no/such/dir".into() }
+    }
+
     #[test]
     fn store_lookup_matches_markers_by_agent_and_ignores_the_sha() {
         let mut store = Store::open_in_memory().unwrap();
@@ -363,15 +380,15 @@ mod tests {
         };
         store.append_events(&[mk("a", "claude:toolu_1", Actor::Agent)]).unwrap();
         let on = StoreLookup { store, claude_enabled: true };
-        assert!(on.is_agent_commit("r1", T + 100_000).unwrap());
-        assert!(!on.is_agent_commit("r1", T + 130_000).unwrap());
-        assert!(!on.is_agent_commit("r2", T).unwrap());
+        assert!(on.is_agent_commit(&rr("r1"), T + 100_000).unwrap());
+        assert!(!on.is_agent_commit(&rr("r1"), T + 130_000).unwrap());
+        assert!(!on.is_agent_commit(&rr("r2"), T).unwrap());
         assert_eq!(on.claude_watermark().unwrap(), None);
         let mut s2 = Store::open_in_memory().unwrap();
         s2.append_events(&[mk("b", "deadbeef", Actor::User)]).unwrap();
         s2.set_watermark("claude-code", 42).unwrap();
         let l2 = StoreLookup { store: s2, claude_enabled: true };
-        assert!(!l2.is_agent_commit("r1", T).unwrap());
+        assert!(!l2.is_agent_commit(&rr("r1"), T).unwrap());
         assert_eq!(l2.claude_watermark().unwrap(), Some(42));
         let l3 = StoreLookup { store: Store::open_in_memory().unwrap(), claude_enabled: false };
         assert_eq!(l3.claude_watermark().unwrap(), None);
@@ -411,6 +428,34 @@ mod tests {
         let p = src.poll(T + 61_000, &mut st).unwrap();
         assert_eq!(p.events.len(), 1);
         assert_eq!(p.events[0].project.as_deref(), Some(m.as_str()));
+        assert!(matches!(p.events[0].kind, Kind::Commit { by: Actor::Agent, .. }));
+    }
+
+    #[test]
+    fn agent_marker_from_an_unregistered_worktree_still_marks_the_commit() {
+        if !git_available() { return; }
+        let t = tempfile::tempdir().unwrap();
+        let (main, wt) = (t.path().join("main"), t.path().join("wt"));
+        std::fs::create_dir_all(&main).unwrap();
+        init(&main);
+        git(&main, T / 1000, &[], &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feature"]);
+        let db = t.path().join("tally.db");
+        let mut store = Store::open(&db).unwrap();
+        let m = crate::project::register_git_project(&mut store, &main, None).unwrap(); // wt is NOT registered
+        let w = crate::project::project_for_dir(&wt).unwrap().1;
+        assert_ne!(m, w);
+        let marker = Event {
+            v: 1, id: "mk".into(), ts: T - 10_000, source: "claude-code".into(), project: Some(w), session: None,
+            kind: Kind::Commit { sha: "claude:toolu_1".into(), by: Actor::Agent, lines_changed: 0 },
+        };
+        store.append_events(&[marker]).unwrap();
+        let repos = vec![RepoRef { local_id: m, root: main }];
+        let mut src = GitSource::new(repos, Box::new(StoreLookup { store: Store::open(&db).unwrap(), claude_enabled: false }));
+        let mut st = BTreeMap::new();
+        src.poll(T - 100_000, &mut st).unwrap();
+        commit(&wt, T / 1000);
+        let p = src.poll(T + 61_000, &mut st).unwrap();
+        assert_eq!(p.events.len(), 1);
         assert!(matches!(p.events[0].kind, Kind::Commit { by: Actor::Agent, .. }));
     }
 
@@ -506,16 +551,30 @@ mod tests {
     }
 
     #[test]
-    fn failed_repo_keeps_its_watermark_so_the_source_does_not_advance() {
+    fn a_failing_repo_whose_root_exists_holds_the_watermark() {
         if !git_available() { return; }
         let (dir, mut src, _lk, mut st) = setup();
         let p = src.poll(T, &mut st).unwrap();
         assert_eq!(p.watermark, Some(T - GIT_LAG_MS));
+        std::fs::write(dir.path().join(".git").join("HEAD"), "garbage\n").unwrap();
+        let p = src.poll(T + 500_000, &mut st).unwrap();
+        assert!(p.events.is_empty());
+        assert_eq!(p.watermark, Some(T - GIT_LAG_MS));
+    }
+
+    #[test]
+    fn a_deleted_repo_root_does_not_hold_the_watermark_and_is_logged_once() {
+        if !git_available() { return; }
+        let (dir, mut src, _lk, mut st) = setup();
+        src.poll(T, &mut st).unwrap();
         let path = dir.path().to_path_buf();
         drop(dir);
         assert!(!path.exists());
         let p = src.poll(T + 500_000, &mut st).unwrap();
         assert!(p.events.is_empty());
-        assert_eq!(p.watermark, Some(T - GIT_LAG_MS));
+        assert_eq!(p.watermark, Some(T + 500_000 - GIT_LAG_MS));
+        assert_eq!(src.warned.len(), 1);
+        src.poll(T + 600_000, &mut st).unwrap();
+        assert_eq!(src.warned.len(), 1);
     }
 }

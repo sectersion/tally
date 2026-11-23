@@ -3,7 +3,7 @@ use std::process::{Command, Output};
 use tally_scoring::{Event, Kind};
 
 fn tally(home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_tally")).arg("--home").arg(home).args(args).output().unwrap()
+    Command::new(env!("CARGO_BIN_EXE_tally")).arg("--home").arg(home).args(args).env_remove("CLAUDECODE").output().unwrap()
 }
 fn out(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).replace("\r\n", "\n").trim().to_string()
@@ -138,7 +138,7 @@ fn run_once_with_an_empty_projects_dir_finalizes_and_exits() {
     std::fs::write(home.join("config.toml"), format!("[claude_code]\nprojects_dir = '{}'\n", empty.path().display())).unwrap();
     let o = tally(&home, &["run", "--once"]);
     assert!(o.status.success(), "{}", err(&o));
-    assert_eq!(out(&o), "added 0, duplicates 0, final 0, provisional 0");
+    assert_eq!(out(&o), "added 0, duplicates 0, skipped 0, final 0, provisional 0");
     assert!(home.join("tally.db").exists());
 }
 
@@ -194,6 +194,21 @@ fn hook_test_run_passes_the_exit_code_through_and_records_one_user_event() {
     assert_ne!(code, 0);
     assert_eq!(code, Command::new(bin).arg("no-such-subcommand").output().unwrap().status.code().unwrap());
     assert_eq!(status_events(&home), "events: 2");
+}
+
+#[test]
+fn hook_test_run_inside_claude_code_runs_the_program_but_records_nothing() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let bin = env!("CARGO_BIN_EXE_tally");
+    let o = tally(&home, &["hook", "test-run", "--", bin, "--help"]);
+    assert_eq!(status_events(&home), "events: 1");
+    assert_eq!(o.status.code(), Some(0));
+    let o = Command::new(bin).arg("--home").arg(&home).args(["hook", "test-run", "--", bin, "no-such-subcommand"])
+        .env("CLAUDECODE", "1").output().unwrap();
+    assert_ne!(o.status.code(), Some(0));
+    assert!(err(&o).contains("not recorded as a user action"), "{}", err(&o));
+    assert_eq!(status_events(&home), "events: 1");
 }
 
 #[test]

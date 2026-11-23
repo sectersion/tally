@@ -81,6 +81,11 @@ enum HookCmd {
     /// bash/zsh:   alias tt='tally hook test-run --'
     ///
     /// then use it as `tt cargo test`.
+    ///
+    /// When the environment variable CLAUDECODE is set (Claude Code sets it in its shells), the
+    /// program still runs and its exit code is passed through, but nothing is recorded: the
+    /// agent's test runs are not the user's. A human using this inside a Claude Code terminal is
+    /// not credited either.
     TestRun {
         #[arg(last = true, required = true)]
         args: Vec<String>,
@@ -125,15 +130,14 @@ fn main() -> Result<()> {
             if cfg.presence.required() && !tally_daemon::presence::supported() {
                 bail!("presence.require is true but presence is not supported on this platform; set [presence] require = false in config.toml");
             }
-            store.set_presence_required(cfg.presence.required())?;
             if once {
                 let mut srcs = sources(&cfg, &home, &mut store);
                 let r = run_once(&mut store, &mut srcs, &mut hooks(&cfg, &home), now_ms());
                 for e in &r.errors {
                     eprintln!("{e}");
                 }
-                let (total, prov) = r.finalized.map_or((0, 0), |f| (f.final_total, f.provisional));
-                println!("added {}, duplicates {}, final {total}, provisional {prov}", r.added, r.duplicates);
+                let (skipped, total, prov) = r.finalized.map_or((0, 0, 0), |f| (f.skipped, f.final_total, f.provisional));
+                println!("added {}, duplicates {}, skipped {skipped}, final {total}, provisional {prov}", r.added, r.duplicates);
             } else {
                 ctrlc::set_handler(|| STOP.store(true, Ordering::Relaxed)).context("installing the Ctrl-C handler")?;
                 run_loop(&mut store, &cfg, &home, &STOP);
@@ -168,6 +172,9 @@ fn main() -> Result<()> {
             println!("horizon: {}", s.horizon.map_or("none".to_string(), |h| h.to_string()));
             println!("finalized_through: {}", s.finalized_through.map_or("none".to_string(), |t| t.to_string()));
             println!("last_hash: {}", s.last_hash);
+            if s.blocked_on_presence {
+                println!("blocked: presence required but no presence watermark");
+            }
         }
         Cmd::Verify => match verify_ledger(&store) {
             Ok(n) => println!("ok: {n} entries"),
@@ -191,6 +198,10 @@ fn test_run(home: &std::path::Path, db: &std::path::Path, args: &[String]) -> i3
         }
     };
     let code = status.code().unwrap_or(1);
+    if std::env::var_os("CLAUDECODE").is_some() {
+        eprintln!("tally: running inside Claude Code; test run not recorded as a user action");
+        return code;
+    }
     let project = std::env::current_dir().ok().and_then(|d| project_for_dir(&d)).map(|(_, id)| id);
     let ev = test_run_event(args, code, now_ms(), project, std::process::id());
     let recorded = std::fs::create_dir_all(home)

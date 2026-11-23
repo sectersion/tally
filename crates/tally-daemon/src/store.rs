@@ -182,6 +182,24 @@ impl Store {
         Ok(self.conn.query_row("SELECT ts FROM watermarks WHERE source = ?1", [source], |r| r.get(0)).optional()?)
     }
 
+    /// Records `presence_required` and the disabled list in one transaction, so a finalizer
+    /// never sees one new and the other stale. See `set_disabled_sources` for the list.
+    pub fn set_run_config(&mut self, presence_required: bool, disabled: &[&str]) -> Result<(), StoreError> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES ('presence_required', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [i64::from(presence_required)],
+        )?;
+        tx.execute(
+            "INSERT INTO source_state(source, key, value) VALUES (?1, ?2, ?3)
+             ON CONFLICT(source, key) DO UPDATE SET value = excluded.value",
+            params![RUN_STATE, DISABLED_KEY, disabled.join(",")],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Records the sources config.toml switches off; `horizon` skips only those rows. The list
     /// is as of the last `tally run` start. Re-enabling a source makes its stale watermark
     /// count again at the next start, and events between that watermark and `finalized_through`
@@ -496,6 +514,16 @@ mod tests {
         s.set_disabled_sources(&["claude-code"]).unwrap();         // presence re-enabled at the next start
         assert_eq!(s.horizon().unwrap(), Some(5));
         s.set_disabled_sources(&[]).unwrap();
+        assert_eq!(s.horizon().unwrap(), Some(5));
+    }
+    #[test] fn run_config_sets_presence_required_and_the_disabled_list_together() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_watermark("presence", 5).unwrap(); s.set_watermark("git", 9).unwrap();
+        s.set_run_config(true, &["presence"]).unwrap();
+        assert!(s.presence_required().unwrap());
+        assert_eq!(s.horizon().unwrap(), Some(9));
+        s.set_run_config(false, &[]).unwrap();
+        assert!(!s.presence_required().unwrap());
         assert_eq!(s.horizon().unwrap(), Some(5));
     }
     #[test] fn a_skipped_row_between_prepare_and_append_is_a_conflict() {

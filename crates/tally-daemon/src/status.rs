@@ -14,6 +14,8 @@ pub struct Status {
     /// `None` until the first finalization.
     pub finalized_through: Option<i64>,
     pub last_hash: String,
+    /// Presence is required but has no watermark, so nothing can be final.
+    pub blocked_on_presence: bool,
 }
 
 pub fn status(store: &Store) -> Result<Status, StoreError> {
@@ -32,6 +34,7 @@ pub fn status(store: &Store) -> Result<Status, StoreError> {
         skipped_claims: skipped,
         horizon,
         finalized_through,
+        blocked_on_presence: store.presence_required()? && store.watermark(crate::presence::PRESENCE_SOURCE)?.is_none(),
         last_hash: ledger.last().map_or(GENESIS_HASH, |e| e.hash.as_str()).to_string(),
     })
 }
@@ -80,6 +83,14 @@ mod tests {
         s.append_ledger(&[], 1_000_000, 2, &[("c".into(), 2_000_000, "no_presence_coverage".into())]).unwrap();
         let st = status(&s).unwrap();
         assert_eq!((st.provisional_claims, st.skipped_claims), (0, 1));
+    }
+    #[test] fn status_flags_a_required_presence_without_a_watermark() {
+        let mut s = Store::open_in_memory().unwrap();
+        assert!(!status(&s).unwrap().blocked_on_presence);
+        s.set_presence_required(true).unwrap();
+        assert!(status(&s).unwrap().blocked_on_presence);
+        s.set_watermark(crate::presence::PRESENCE_SOURCE, 1).unwrap();
+        assert!(!status(&s).unwrap().blocked_on_presence);
     }
     #[test] fn empty_store_status() {
         let st = status(&Store::open_in_memory().unwrap()).unwrap();

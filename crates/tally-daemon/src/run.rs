@@ -97,7 +97,7 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
 }
 
 /// The sources for this config. Claude Code reads `projects_dir`, default `~/.claude/projects`.
-/// Also records the config-disabled ids (the finalize horizon skips them) and fills
+/// Also records `presence_required` and the config-disabled ids (the finalize horizon skips them), in one transaction, and fills
 /// missing project identities; failures there are reported on stderr, not fatal.
 pub fn sources(cfg: &Config, home: &Path, store: &mut Store) -> Vec<Box<dyn Source>> {
     if let Err(e) = crate::project::backfill_identities(store) {
@@ -138,8 +138,8 @@ pub fn sources(cfg: &Config, home: &Path, store: &mut Store) -> Vec<Box<dyn Sour
     if !cc.enabled {
         disabled.push("claude-code");
     }
-    if let Err(e) = store.set_disabled_sources(&disabled) {
-        eprintln!("recording disabled sources failed: {e}");
+    if let Err(e) = store.set_run_config(cfg.presence.required(), &disabled) {
+        eprintln!("recording run config failed: {e}");
     }
     v
 }

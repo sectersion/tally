@@ -70,6 +70,20 @@ pub fn repo_identity(root: &Path) -> RepoIdentity {
     }
 }
 
+/// Ids of every worktree of the repository at `root` (the main checkout included), computed
+/// like `project_for_dir`; registered or not. Empty if git fails.
+/// ponytail: one `git worktree list` per call, no caching.
+pub fn worktree_ids(root: &Path) -> Vec<String> {
+    let Ok(out) = crate::git::run_git("git", root, &["worktree", "list", "--porcelain"]) else { return vec![] };
+    out.lines()
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .map(|p| {
+            let c = std::fs::canonicalize(p).map_or_else(|_| p.to_string(), |c| c.to_string_lossy().into_owned());
+            project_id_from_normalized(&normalize_path(&c))
+        })
+        .collect()
+}
+
 /// Stores the identity of every project registered before identities existed (both fields
 /// NULL), so it groups without a new `tally project add`. Never touches public names.
 pub fn backfill_identities(store: &mut Store) -> Result<(), StoreError> {
