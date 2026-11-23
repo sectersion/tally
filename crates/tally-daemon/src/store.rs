@@ -24,7 +24,7 @@ pub struct AppendSummary {
 }
 
 pub struct Store {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 const SCHEMA: &str = "
