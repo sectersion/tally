@@ -3,6 +3,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::time::Duration;
 use std::collections::BTreeMap;
 use std::path::Path;
+pub use crate::snapshot::Snapshot;
 use tally_scoring::{Event, LedgerEntry, GENESIS_HASH};
 
 #[derive(thiserror::Error, Debug)]
@@ -66,6 +67,7 @@ CREATE TABLE IF NOT EXISTS coverage(start_ts INTEGER NOT NULL, end_ts INTEGER NO
 CREATE TABLE IF NOT EXISTS adapter_health(source TEXT PRIMARY KEY, found_files INTEGER NOT NULL, records INTEGER NOT NULL, skipped INTEGER NOT NULL, errors INTEGER NOT NULL, format TEXT NOT NULL, last_event_ts INTEGER, counters TEXT NOT NULL, checked_ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS agent_writes(file_hash TEXT NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY(file_hash, ts));
 CREATE TABLE IF NOT EXISTS skipped_claims(action_id TEXT PRIMARY KEY, ts INTEGER NOT NULL, reason TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS skipped_ts ON skipped_claims(ts);
 CREATE TRIGGER IF NOT EXISTS skipped_no_update BEFORE UPDATE ON skipped_claims
 BEGIN SELECT RAISE(ABORT, 'skipped_claims is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS skipped_no_delete BEFORE DELETE ON skipped_claims
@@ -100,6 +102,14 @@ impl Store {
         Self::init(conn)
     }
 
+    /// Read-only handle for the dashboard: no schema, no migration, a missing file is an error.
+    pub fn open_read_only(path: &Path) -> Result<Store, StoreError> {
+        use rusqlite::OpenFlags;
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        Ok(Store { conn })
+    }
+
     pub fn open_in_memory() -> Result<Store, StoreError> {
         Self::init(Connection::open_in_memory()?)
     }
@@ -120,6 +130,26 @@ impl Store {
                 }
             }
         }
+        // Virtual generated columns over the event JSON, so window queries by kind or project use an index.
+        for (col, path) in [("kind", "$.kind"), ("project", "$.project")] {
+            let have: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('events') WHERE name = ?1)",
+                [col],
+                |r| r.get(0),
+            )?;
+            if !have {
+                match conn.execute_batch(&format!(
+                    "ALTER TABLE events ADD COLUMN {col} TEXT GENERATED ALWAYS AS (json_extract(json, '{path}')) VIRTUAL"
+                )) {
+                    Err(e) if e.to_string().contains("duplicate column name") => {}
+                    r => r?,
+                }
+            }
+        }
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS events_kind_ts ON events(kind, ts);
+             CREATE INDEX IF NOT EXISTS events_project_ts ON events(project, ts);",
+        )?;
         Ok(Store { conn })
     }
 

@@ -18,9 +18,17 @@ pub struct Status {
     pub blocked_on_presence: bool,
 }
 
+/// All reads happen in one read transaction, so counts and ledger sums always agree.
 pub fn status(store: &Store) -> Result<Status, StoreError> {
+    status_with(store, &mut || {})
+}
+
+/// `after_first_read` runs once the snapshot is pinned (tests commit a concurrent write there).
+fn status_with(store: &Store, after_first_read: &mut dyn FnMut()) -> Result<Status, StoreError> {
+    let _tx = crate::snapshot::ReadTx::begin(&store.conn)?;
     // Same read order as finalize: horizon before events.
     let horizon = store.horizon()?;
+    after_first_read();
     let events = store.events()?;
     let ledger = store.ledger()?;
     let skipped = store.skipped()?.len();
@@ -76,6 +84,23 @@ mod tests {
         assert_eq!(st.verified_s, 220);                            // 120 (first action) + 100 (b)
         assert_eq!((st.horizon, st.finalized_through), (Some(1_000_000), Some(1_000_000)));
         assert_eq!(st.last_hash, s.ledger().unwrap()[1].hash);
+    }
+    #[test] fn status_is_one_snapshot() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("t.db");
+        let mut a = Store::open(&path).unwrap();
+        a.append_events(&[prompt("a", 0, 600), edit("b", 100_000)]).unwrap();
+        a.set_watermark("src", 1_000_000).unwrap();
+        let b = Store::open_read_only(&path).unwrap();
+        let mut finalized = false;
+        let st = status_with(&b, &mut || {
+            // a concurrent writer finalizes between the reader's first and later reads
+            finalize(&mut a).unwrap();
+            finalized = true;
+        }).unwrap();
+        assert!(finalized);
+        assert_eq!((st.final_claims, st.verified_s, st.finalized_through), (0, 0, None));
+        assert_eq!(status(&b).unwrap().final_claims, 2);
     }
     #[test] fn provisional_claims_exclude_skipped_ones() {
         let mut s = store_with_two_final_claims();

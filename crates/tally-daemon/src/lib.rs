@@ -17,6 +17,7 @@ pub mod project;
 pub mod published;
 pub mod repair;
 pub mod run;
+pub mod snapshot;
 pub mod source;
 pub mod status;
 pub mod store;
