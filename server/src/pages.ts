@@ -33,7 +33,8 @@ const ERRORS: Record<string, string> = {
   confirm: "Account not deleted: the confirmation did not match.",
 };
 const errorLine = (req: Request) => {
-  const msg = ERRORS[new URL(req.url).searchParams.get("error") ?? ""];
+  const code = new URL(req.url).searchParams.get("error") ?? "";
+  const msg = Object.hasOwn(ERRORS, code) ? ERRORS[code] : undefined; // not "constructor" etc.
   return msg ? html`<p role="alert">${msg}</p>` : none;
 };
 
@@ -202,8 +203,8 @@ export async function settingsPage(sql: SQL, req: Request, s: Session): Promise<
 /** Returns an ERRORS code, or null when saved. */
 export async function saveProfile(sql: SQL, userId: string, form: FormData) {
   const dn = String(form.get("display_name") ?? "").trim();
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting control characters is the point
-  if ([...dn].length > 64 || /[\u0000-\u001f\u007f]/.test(dn)) return "display_name";
+  // Cc: control characters; Cf: format characters (bidi overrides, zero-width).
+  if ([...dn].length > 64 || /[\p{Cc}\p{Cf}]/u.test(dn)) return "display_name";
   await sql`update users set display_name = ${dn || null},
     profile_public = ${form.get("profile_public") === "on"} where id = ${userId}`;
   return null;
@@ -215,6 +216,8 @@ export async function deleteAccount(sql: SQL, userId: string, confirm: string): 
   if (!u || confirm.trim().toLowerCase() !== (u.handle ?? DELETE_PHRASE)) return false;
   await sql.begin(async (tx) => {
     await tx`delete from sessions where user_id = ${userId}`;
+    // An approved but unpolled code would otherwise still mint a token.
+    await tx`delete from device_codes where user_id = ${userId}`;
     await tx`delete from device_tokens where user_id = ${userId}
       or project_id in (select id from projects where owner_id = ${userId})`;
     await tx`delete from github_user_tokens where user_id = ${userId}`;

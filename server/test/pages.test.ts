@@ -361,6 +361,44 @@ test("settings profile saves display name and visibility behind csrf", async () 
   expect(await (await get(`/u/${u.handle}`)).text()).toContain("Ada");
 });
 
+test("display names with format characters are rejected", async () => {
+  const u = await owner();
+  const a = await auth(u.id);
+  for (const bad of ["evil‮gnp", "zero​width", "ctl\u0007x"]) {
+    const r = await post("/settings/profile", a, { display_name: bad, profile_public: "on" });
+    expect(r.headers.get("location")).toBe("/settings?error=display_name");
+  }
+  expect((await sql`select display_name from users where id = ${u.id}`)[0].display_name).toBeNull();
+});
+
+test("an unknown or prototype ?error= renders no message", async () => {
+  const a = await auth((await owner()).id);
+  const t = await (await get("/settings?error=constructor", a)).text();
+  expect(t).not.toContain('role="alert"');
+  expect(await (await get("/settings?error=taken", a)).text()).toContain('role="alert"');
+});
+
+test("deleting the account voids an approved but unpolled device code", async () => {
+  const u = await owner();
+  const a = await auth(u.id);
+  const c = (await (
+    await fetch(`${base}/v1/device/code`, { method: "POST", body: '{"device_name":"lap"}' })
+  ).json()) as { device_code: string; user_code: string };
+  expect((await post("/device", a, { user_code: c.user_code, decision: "approve" })).status).toBe(
+    200,
+  );
+  expect((await post("/settings/delete", a, { confirm: u.handle })).status).toBe(303);
+  const r = await fetch(`${base}/v1/device/token`, {
+    method: "POST",
+    body: JSON.stringify({ device_code: c.device_code }),
+  });
+  expect(r.status).toBe(400);
+  expect(await r.json()).toEqual({ error: "expired_token" });
+  expect(
+    (await sql`select count(*)::int as n from device_tokens where user_id = ${u.id}`)[0].n,
+  ).toBe(0);
+});
+
 test("home page: signed out offers sign-in; signed in lists projects or asks for a handle", async () => {
   const out = await (await get("/")).text();
   expect(out).toContain("Sign in with Hack Club");
