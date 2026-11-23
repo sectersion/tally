@@ -48,9 +48,9 @@ jobs:
       - name: Create token and run test
         run: |
           out=$(cd server && bun run token:create e2e/run-$GITHUB_RUN_ID)
-          echo "$out"
           export TALLY_E2E_SERVER=http://localhost:8080
           export TALLY_E2E_PUBLIC_NAME=e2e/run-$GITHUB_RUN_ID
           export TALLY_E2E_PROJECT_ID=$(echo "$out" | sed -n 's/^project_id: //p')
           export TALLY_E2E_TOKEN=$(echo "$out" | sed -n 's/^token: //p')
+          echo "::add-mask::$TALLY_E2E_TOKEN"
           cargo test -p tally-daemon --test e2e_server
