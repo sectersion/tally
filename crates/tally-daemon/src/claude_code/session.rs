@@ -87,7 +87,8 @@ impl Session {
                 self.last_output.clone_from(text);
             }
             Entry::ToolUse { meta, id, name, command, file_path } => match (name.as_str(), command, file_path) {
-                ("Bash", Some(c), _) => {
+                // Same `command` key; on Windows Claude Code runs commands through PowerShell (FORMAT.md).
+                ("Bash" | "PowerShell", Some(c), _) => {
                     if let Some(k) = bash_kind(c) {
                         self.pending.insert(id.clone(), (meta.clone(), cmd_hash(c), k));
                     }
@@ -185,6 +186,16 @@ fn is_git_commit(seg: &str) -> bool {
         match t {
             [w, f, rest @ ..] if matches!(*w, "bash" | "sh" | "zsh") && f.starts_with('-') && f.contains('c') => t = rest,
             [w, rest @ ..] if matches!(*w, "env" | "sudo" | "time" | "command") || is_env_assign(w) => t = rest,
+            // `pwsh -NoProfile -Command "..."`: the wrapper and all its leading flags
+            [w, rest @ ..] if matches!(w.to_ascii_lowercase().as_str(), "pwsh" | "pwsh.exe" | "powershell" | "powershell.exe") => {
+                t = rest;
+                while let [f, r @ ..] = t {
+                    if !f.starts_with('-') {
+                        break;
+                    }
+                    t = r;
+                }
+            }
             _ => break,
         }
     }
@@ -357,6 +368,44 @@ mod tests {
         for c in ["cargo test -p x", "  pytest -q", "python -m pytest", "npm run test", "go test ./..."] {
             assert_eq!(bash_kind(c), Some(BashKind::Test), "{c}");
         }
+    }
+
+    #[test]
+    fn powershell_commands_classify_like_bash() {
+        for c in [
+            "git commit -m x",
+            "git add . ; git commit -m x",
+            "git add . && git commit -m x",
+            "pwsh -Command \"git commit -m x\"",
+            "powershell -Command \"git add .; git commit -m x\"",
+            "powershell.exe -NoProfile -Command 'git commit -m x'",
+            "pwsh -c \"git commit\"",
+        ] {
+            assert_eq!(bash_kind(c), Some(BashKind::Commit), "{c}");
+        }
+        for c in ["pwsh -Command \"git status\"", "powershell -NoProfile", "pwsh"] {
+            assert_eq!(bash_kind(c), None, "{c}");
+        }
+    }
+
+    #[test]
+    fn powershell_tool_uses_give_agent_test_runs_and_commits() {
+        let (mut s, v) = (Session::default(), Vocab::default());
+        let mut out = vec![];
+        let ctx = Ctx { project: None, vocab: &v };
+        s.feed(tool("a1", 2_000, "t1", "PowerShell", Some("cargo test -p x"), None), &ctx, &mut out);
+        assert_eq!(s.limit(), 1_999);
+        s.feed(result("r1", 2_500, "t1", true, "failed"), &ctx, &mut out);
+        let t = out.last().unwrap();
+        assert_eq!(t.id, "claude:s:a1:test_run");
+        assert_eq!(t.kind, Kind::TestRun { cmd_hash: cmd_hash("cargo test -p x"), exit_code: 1, initiator: Actor::Agent });
+        s.feed(tool("a2", 3_000, "t2", "PowerShell", Some("git commit -m x"), None), &ctx, &mut out);
+        assert_eq!(s.limit(), 2_999);
+        s.feed(result("r2", 3_100, "t2", false, "ok"), &ctx, &mut out);
+        assert_eq!(s.limit(), i64::MAX);
+        let c = out.last().unwrap();
+        assert_eq!(c.id, "claude:s:a2:commit");
+        assert_eq!(c.kind, Kind::Commit { sha: "claude:t2".into(), by: Actor::Agent, lines_changed: 0 });
     }
 
     #[test]

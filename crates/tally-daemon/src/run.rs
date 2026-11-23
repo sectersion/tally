@@ -107,9 +107,9 @@ pub fn hooks(_cfg: &Config, _home: &Path) -> Vec<TickHook> {
     vec![]
 }
 
-/// Seconds between ticks; 0 would busy-loop, so at least 1.
+/// Seconds between ticks: 0 would busy-loop and a huge value overflows `Instant`, so 1 s to 24 h.
 pub fn effective_interval(secs: u64) -> u64 {
-    secs.max(1)
+    secs.clamp(1, 86_400)
 }
 
 /// Tick every `cfg.run.interval_secs` until `stop` is set. The current tick always completes.
@@ -219,6 +219,8 @@ mod tests {
     #[test]
     fn a_zero_interval_ticks_every_second() {
         assert_eq!((effective_interval(0), effective_interval(15)), (1, 15));
+        assert_eq!(effective_interval(u64::MAX), 86_400);
+        let _ = Instant::now() + Duration::from_secs(effective_interval(u64::MAX)); // no overflow panic
     }
     #[test]
     fn a_failing_hook_does_not_stop_the_next() {

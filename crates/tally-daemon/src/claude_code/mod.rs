@@ -31,12 +31,15 @@ struct File {
     project: Option<String>,
     /// After a rotation: events at or before this ts were already sent and are dropped.
     floor: Option<i64>,
+    /// Byte offset the in-memory session has consumed up to. If the saved `off:` differs (the last tick's
+    /// state was not persisted, or another process moved it), the session is rebuilt from the saved cursor.
+    fed_to: u64,
 }
 
 impl File {
     fn new(path: &Path) -> Self {
         let sid = path.file_stem().map_or(String::new(), |s| s.to_string_lossy().into_owned());
-        File { session: Session::default(), sid, project: None, floor: None }
+        File { session: Session::default(), sid, project: None, floor: None, fed_to: 0 }
     }
 }
 
@@ -191,8 +194,9 @@ impl Source for ClaudeCode {
             };
             if chunk.rotated {
                 self.files.insert(rel.clone(), File { floor: last_ts, ..File::new(path) });
-            } else if !self.files.contains_key(rel) {
-                self.files.insert(rel.clone(), File::new(path));
+            } else if self.files.get(rel).is_none_or(|f| f.fed_to != off) {
+                let floor = self.files.get(rel).and_then(|f| f.floor);
+                self.files.insert(rel.clone(), File { floor, ..File::new(path) });
                 if off > 0 {
                     self.warm_up(rel, path, off, state.get(&open_key));
                 }
@@ -200,6 +204,7 @@ impl Source for ClaudeCode {
             let mut out = Vec::new();
             skipped += self.feed(rel, chunk.lines.iter().map(Vec::as_slice), &mut out);
             let f = self.files.get_mut(rel).expect("registered");
+            f.fed_to = chunk.end;
             if chunk.budget_hit {
                 // The session's own limit() covers its open turn. No expiry: the rest of the turn may be unread.
                 hold(Some(f), last_ts, None);
@@ -236,6 +241,39 @@ mod tests {
 
     fn ts(i: usize) -> String {
         format!("2026-11-22T10:{:02}:{:02}.000Z", i / 60, i % 60)
+    }
+
+    #[test]
+    fn a_tick_whose_state_was_not_saved_is_replayed_from_the_saved_cursor() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("p")).unwrap();
+        let f = d.path().join("p/s.jsonl");
+        let head = |ty: &str, u: &str, i: usize| {
+            let t = ts(i);
+            format!(r#"{{"type":"{ty}","uuid":"{u}","sessionId":"s","timestamp":"{t}""#)
+        };
+        let a = [
+            head("user", "p1", 0) + r#","origin":{"kind":"human"},"message":{"content":"go"}}"#,
+            head("assistant", "a1", 1)
+                + r#","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+        ];
+        let b = [
+            head("user", "r1", 2) + r#","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"x"}]}}"#,
+            head("system", "d1", 3) + r#","subtype":"turn_duration"}"#,
+        ];
+        std::fs::write(&f, a.join("\n") + "\n").unwrap();
+        let now = parse_rfc3339_ms(&ts(0)).unwrap() + 3_600_000;
+        let mut src = ClaudeCode::new(d.path().to_path_buf());
+        let mut st = BTreeMap::from([("started".to_owned(), "1".to_owned())]);
+        src.poll(now, &mut st).unwrap();
+        std::fs::OpenOptions::new().append(true).open(&f).unwrap().write_all((b.join("\n") + "\n").as_bytes()).unwrap();
+        // This tick's store write fails: its events and state are discarded.
+        let lost = src.poll(now, &mut st.clone()).unwrap();
+        assert_eq!(lost.events.len(), 2);
+        let p = src.poll(now, &mut st).unwrap();
+        let ids: Vec<_> = p.events.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["claude:s:a1:test_run", "claude:s:p1:agent_busy"]);
+        assert!(matches!(p.events[1].kind, tally_scoring::Kind::AgentBusy { end_ts } if end_ts == parse_rfc3339_ms(&ts(3)).unwrap()));
     }
 
     #[test]

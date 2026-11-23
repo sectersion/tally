@@ -19,7 +19,7 @@ All events share:
 | Field | Type | Notes |
 |---|---|---|
 | `v` | int | Schema version, starts at 1 |
-| `id` | string | Unique string. Adapters derive it from the source log (for example claude:<session>:<entry>:prompt) so re-reading a log yields the same ids. |
+| `id` | string | Unique string. Adapters derive it from the source log (for example `claude:<session>:<entry>:prompt`) so re-reading a log yields the same ids. |
 | `ts` | int | Unix milliseconds, UTC |
 | `source` | string | Adapter id: `claude-code`, `codex`, `heartbeat`, `git`, `shell`, `presence` |
 | `project` | string \| null | Local project id |
