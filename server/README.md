@@ -48,6 +48,39 @@ Regenerate fixtures with `bun run fixture` whenever `crates/tally-scoring` hashi
 
 One container or VM running `bun run start` behind a TLS-terminating proxy (C7 requires HTTPS), a managed Postgres, and `DATABASE_URL` from the platform's secret store. Migrations run at start. A Dockerfile is not part of this plan (add with the deploy target, plan 09).
 
+## Production settings
+
+Environment (read once at start by `loadConfig` in `src/config.ts`; a missing required value stops the server):
+
+| Variable                                           | Required           | Meaning                                                                                                                                                                                  |
+| -------------------------------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                                     | yes                | Postgres 16 connection string                                                                                                                                                            |
+| `PUBLIC_BASE_URL`                                  | yes                | Public origin, no trailing slash, for example `https://tally.example`. Used for cookies (`Secure` unless it starts with `http://localhost`), the CSRF `Origin` check and OAuth redirects |
+| `HCA_CLIENT_ID`, `HCA_CLIENT_SECRET`               | yes                | Hack Club Auth app credentials                                                                                                                                                           |
+| `GITHUB_APP_SLUG`                                  | yes                | The App's URL slug (install link)                                                                                                                                                        |
+| `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET` | yes                | The App's user-to-server OAuth credentials                                                                                                                                               |
+| `GITHUB_WEBHOOK_SECRET`                            | yes                | Webhook secret, checked on every `POST /github/webhook`                                                                                                                                  |
+| `PORT`                                             | no, default `8080` | Listen port                                                                                                                                                                              |
+| `LOG_LEVEL`                                        | no, default `info` | `debug`, `info`, `warn` or `error`                                                                                                                                                       |
+| `TRUST_PROXY`                                      | no, default `0`    | `1` when exactly one proxy appends the client address to `x-forwarded-for` (see Limits)                                                                                                  |
+
+**Hack Club Auth app** (https://auth.hackclub.com/developer/apps): redirect URI `PUBLIC_BASE_URL + /auth/callback`; scopes `openid profile email verification_status`. Identity is read once at sign-in and no tokens are stored.
+
+**GitHub App** (settings from `docs/spikes/github-app.md`; webhook URL `PUBLIC_BASE_URL + /github/webhook`):
+
+- Setup URL `PUBLIC_BASE_URL/github/setup`, Callback URL `PUBLIC_BASE_URL/github/callback`.
+- Leave "Request user authorization (OAuth) during installation" **unchecked**; leave "Expire user authorization tokens" on.
+- Permissions: Contents read-only, Metadata read-only. Events: Push, Repository (installation events are always delivered).
+- The server holds no App private key and makes no installation-token calls.
+
+**Reverse proxy:**
+
+- Terminate TLS and forward to `PORT`.
+- `text/event-stream` must not be buffered. The server sends `x-accel-buffering: no`; for nginx also set `proxy_buffering off;` (and a `proxy_read_timeout` above the 25 s ping, for example `3600s`) in the `location ~ ^/p/[^/]+/[^/]+/events$` block.
+- With `TRUST_PROXY=1` the proxy must append the client address to `x-forwarded-for` (nginx: `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`). Without it, every client shares the proxy's rate-limit buckets; with it but no proxy, clients choose their own ip.
+
+**Load check:** `bun scripts/loadserver.ts` (scratch server with unlimited rate limits; needs `DATABASE_URL`, never deploy it) and `bun scripts/load.ts <url>` measure requests per second. Numbers are in [`docs/cost.md`](../docs/cost.md).
+
 ## Limits
 
 - Every `/v1` response is JSON; pages outside `/v1` are server-rendered HTML.
