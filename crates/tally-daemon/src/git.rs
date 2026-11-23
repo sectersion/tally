@@ -18,8 +18,8 @@ pub struct RepoRef {
 }
 
 pub trait AgentCommitLookup {
-    fn is_agent_commit(&self, project: &str, commit_ts: i64) -> bool;
-    fn claude_watermark(&self) -> Option<i64>;
+    fn is_agent_commit(&self, project: &str, commit_ts: i64) -> Result<bool, SourceError>;
+    fn claude_watermark(&self) -> Result<Option<i64>, SourceError>;
 }
 
 /// Reads the store through its own connection; never writes.
@@ -29,16 +29,16 @@ pub struct StoreLookup {
 }
 
 impl AgentCommitLookup for StoreLookup {
-    fn is_agent_commit(&self, project: &str, commit_ts: i64) -> bool {
+    fn is_agent_commit(&self, project: &str, commit_ts: i64) -> Result<bool, SourceError> {
         self.store
             .has_agent_commit_marker(project, commit_ts - AGENT_COMMIT_WINDOW_MS, commit_ts + AGENT_COMMIT_AFTER_MS)
-            .unwrap_or(false)
+            .map_err(|e| SourceError::Other(e.to_string()))
     }
-    fn claude_watermark(&self) -> Option<i64> {
+    fn claude_watermark(&self) -> Result<Option<i64>, SourceError> {
         if !self.claude_enabled {
-            return None;
+            return Ok(None);
         }
-        self.store.watermark("claude-code").ok().flatten()
+        self.store.watermark("claude-code").map_err(|e| SourceError::Other(e.to_string()))
     }
 }
 
@@ -139,7 +139,7 @@ impl Source for GitSource {
     fn poll(&mut self, now_ms: i64, state: &mut dyn SourceState) -> Result<Poll, SourceError> {
         // A commit at T is emitted only once claude-code's watermark is >= T + 5 s, so every agent
         // marker that could match it is already stored.
-        let cutoff = match self.lookup.claude_watermark() {
+        let cutoff = match self.lookup.claude_watermark()? {
             Some(cw) => now_ms.min(cw - AGENT_COMMIT_AFTER_MS),
             None => now_ms - GIT_LAG_MS,
         };
@@ -152,7 +152,7 @@ impl Source for GitSource {
                 Some(wm) => match fetch(&self.program, repo, wm) {
                     Ok(commits) => {
                         for c in commits.unwrap_or_default().into_iter().filter(|c| c.ts_ms > wm && c.ts_ms <= cutoff) {
-                            let by = if self.lookup.is_agent_commit(&repo.local_id, c.ts_ms) { Actor::Agent } else { Actor::User };
+                            let by = if self.lookup.is_agent_commit(&repo.local_id, c.ts_ms)? { Actor::Agent } else { Actor::User };
                             events.push(Event {
                                 v: 1,
                                 id: format!("git:{}:commit", c.sha),
@@ -229,16 +229,24 @@ mod tests {
     struct Fake {
         agent: Vec<(String, i64)>,
         claude_wm: Option<i64>,
+        fail: bool,
     }
     #[derive(Clone, Default)]
     struct FakeLookup(Arc<Mutex<Fake>>);
     impl AgentCommitLookup for FakeLookup {
-        fn is_agent_commit(&self, project: &str, ts: i64) -> bool {
+        fn is_agent_commit(&self, project: &str, ts: i64) -> Result<bool, SourceError> {
             let f = self.0.lock().unwrap();
-            f.agent.iter().any(|(p, t)| p == project && *t >= ts - AGENT_COMMIT_WINDOW_MS && *t <= ts + AGENT_COMMIT_AFTER_MS)
+            if f.fail {
+                return Err(SourceError::Other("lookup down".into()));
+            }
+            Ok(f.agent.iter().any(|(p, t)| p == project && *t >= ts - AGENT_COMMIT_WINDOW_MS && *t <= ts + AGENT_COMMIT_AFTER_MS))
         }
-        fn claude_watermark(&self) -> Option<i64> {
-            self.0.lock().unwrap().claude_wm
+        fn claude_watermark(&self) -> Result<Option<i64>, SourceError> {
+            let f = self.0.lock().unwrap();
+            if f.fail {
+                return Err(SourceError::Other("lookup down".into()));
+            }
+            Ok(f.claude_wm)
         }
     }
 
@@ -350,18 +358,18 @@ mod tests {
         };
         store.append_events(&[mk("a", "claude:toolu_1", Actor::Agent)]).unwrap();
         let on = StoreLookup { store, claude_enabled: true };
-        assert!(on.is_agent_commit("r1", T + 100_000));
-        assert!(!on.is_agent_commit("r1", T + 130_000));
-        assert!(!on.is_agent_commit("r2", T));
-        assert_eq!(on.claude_watermark(), None);
+        assert!(on.is_agent_commit("r1", T + 100_000).unwrap());
+        assert!(!on.is_agent_commit("r1", T + 130_000).unwrap());
+        assert!(!on.is_agent_commit("r2", T).unwrap());
+        assert_eq!(on.claude_watermark().unwrap(), None);
         let mut s2 = Store::open_in_memory().unwrap();
         s2.append_events(&[mk("b", "deadbeef", Actor::User)]).unwrap();
         s2.set_watermark("claude-code", 42).unwrap();
         let l2 = StoreLookup { store: s2, claude_enabled: true };
-        assert!(!l2.is_agent_commit("r1", T));
-        assert_eq!(l2.claude_watermark(), Some(42));
+        assert!(!l2.is_agent_commit("r1", T).unwrap());
+        assert_eq!(l2.claude_watermark().unwrap(), Some(42));
         let l3 = StoreLookup { store: Store::open_in_memory().unwrap(), claude_enabled: false };
-        assert_eq!(l3.claude_watermark(), None);
+        assert_eq!(l3.claude_watermark().unwrap(), None);
     }
 
     #[test]
@@ -401,6 +409,44 @@ mod tests {
         let mut want = vec![format!("git:{side}:commit"), format!("git:{main}:commit")];
         want.sort();
         assert_eq!(ids, want);
+    }
+
+    #[test]
+    fn lookup_errors_drop_the_tick_and_a_later_poll_still_emits_by_the_right_actor() {
+        if !git_available() { return; }
+        let (dir, mut src, lk, mut st) = setup();
+        lk.0.lock().unwrap().claude_wm = Some(T - 200_000);
+        src.poll(T - 190_000, &mut st).unwrap();
+        commit(dir.path(), T / 1000);
+        {
+            let mut f = lk.0.lock().unwrap();
+            f.claude_wm = Some(T + 5_000);
+            f.agent.push(("r1".into(), T - 1_000));
+        }
+        // the runner discards state on Err; model that by restoring it
+        let saved = st.clone();
+        lk.0.lock().unwrap().fail = true;
+        assert!(src.poll(T + 10_000, &mut st).is_err());
+        st = saved;
+        lk.0.lock().unwrap().fail = false;
+        let p = src.poll(T + 10_000, &mut st).unwrap();
+        assert_eq!(p.events.len(), 1);
+        assert!(matches!(p.events[0].kind, Kind::Commit { by: Actor::Agent, .. }));
+    }
+
+    #[test]
+    fn a_commit_only_on_a_remote_tracking_ref_is_not_emitted() {
+        if !git_available() { return; }
+        let (dir, mut src, _lk, mut st) = setup();
+        let d = dir.path();
+        src.poll(T - 100_000, &mut st).unwrap();
+        git(d, T / 1000, &[], &["checkout", "-q", "-b", "side"]);
+        commit(d, T / 1000);
+        let sha = head(d);
+        git(d, T / 1000, &[], &["checkout", "-q", "main"]);
+        git(d, T / 1000, &[], &["update-ref", "refs/remotes/origin/side", &sha]);
+        git(d, T / 1000, &[], &["branch", "-q", "-D", "side"]);
+        assert!(src.poll(T + 100_000, &mut st).unwrap().events.is_empty());
     }
 
     #[test]
