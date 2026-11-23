@@ -28,7 +28,7 @@
 3. **Idle span open when the daemon stops.** Expected: the watermark was held below the span start, so on restart the span is closed at the last persisted sample time (gap) or continued (no gap); the event is accepted (not late) and ids are stable so replays are duplicates. Test in Task 2.
 4. **Commit in a worktree.** Expected: commits made in any worktree of a repository are seen once (deduplicated by sha) and attributed to the project of the worktree the daemon was told about; two worktrees of one repository registered under one public name roll up. Tests in Tasks 5 and 6.
 5. **`finalize` change.** Expected: skips are decided once, only for claims that are final, only when coverage is complete up to the horizon; the ledger prefix check ignores skipped claims; a claim skipped yesterday is not resurrected by coverage appearing later; with presence required and no presence watermark nothing becomes final (so a user who never started the presence source is not silently skipped, they are blocked and told). Tests in Task 3.
-6. **Agent commits are not credited to the user.** A `git commit` run by the agent is `by: agent` (no human action). Test in Task 5.
+6. **Agent commits are not credited to the user.** A `git commit` run by the agent is `by: agent` (no human action), matched to plan 03's agent `commit` event by `by = agent`, project and time window (`sha` ignored). Ordering is guaranteed, not hoped for: a git commit at T is emitted only once the `claude-code` watermark is at least T + 5 s, so a late-arriving marker still matches; the 60 s `GIT_LAG_MS` is only the fallback when claude-code is disabled or has no watermark. Tests in Task 5 (including a marker that arrives late).
 
 ## File Structure
 
@@ -44,7 +44,7 @@ crates/tally-daemon/
   src/presence_win.rs        #[cfg(windows)] WindowsPlatform; stub elsewhere                (Task 4)
   src/git.rs                 GitSource: commits via the git CLI                              (Task 5)
   src/project.rs             UNC fix, repo_identity, register_git_project matching          (Task 6)
-  src/main.rs                `tally hook test-run -- <cmd>`                                  (Task 7)
+  src/main.rs                `tally hook` subcommand group with `test-run -- <cmd>`           (Task 7)
   tests/cli.rs               hook test
 ```
 
@@ -61,7 +61,7 @@ crates/tally-daemon/
 - `coverage(&self) -> Result<Vec<Interval>, StoreError>` sorted by `start_ts`.
 - `set_presence_required(&mut self, on: bool)`, `presence_required(&self) -> Result<bool, StoreError>`.
 - `skipped(&self) -> Result<Vec<(String, i64, String)>, StoreError>` (action id, ts, reason) in ts order.
-- `append_ledger(&mut self, entries, finalized_through, scored_events, skips: &[(String, i64, String)])`: same transaction inserts the skips (`INSERT OR IGNORE`). All existing callers and tests pass `&[]`.
+- `append_ledger(&mut self, entries: &[LedgerEntry], finalized_through: i64, scored_events: usize, skips: &[(String, i64, String)]) -> Result<(), StoreError>` (final form; see "Assumes"): same transaction inserts the skips (`INSERT OR IGNORE`). All existing callers and tests pass `&[]`.
 - `Status.skipped_claims: usize` and a `skipped_claims: <n>` line in `tally status` (after `unverified_s`; update `tests/cli.rs` expectations that list the lines).
 
 - [ ] **Step 1: Write failing tests** in `store.rs`:
@@ -105,7 +105,7 @@ crates/tally-daemon/
 **Interfaces:**
 - Consumes: `ruleset::IDLE_SAMPLE_MIN_MS`; `store::Interval`; plan 03's `SourceState` (`get`/`set`).
 - Produces:
-  - `pub const COVERAGE_MAX_GAP_MS: i64 = 60_000;` (two samples further apart than this are a gap: sleep, daemon stopped, stalled poll. Poll interval from plan 03 must be well below it; the default there is 5 s.)
+  - `pub const COVERAGE_MAX_GAP_MS: i64 = 60_000;` (two samples further apart than this are a gap: sleep, daemon stopped, stalled poll. Poll interval from plan 03 must be well below it; the default there is 15 s (`[run] interval_secs`), so one or two missed polls (30 s, 45 s) still keep coverage and a third breaks it. Test sample times below are arbitrary inputs, not the cadence.)
   - `pub struct IdleSpan { pub start: i64, pub end: i64 }`
   - `pub struct Step { pub closed: Vec<IdleSpan>, pub coverage: Vec<Interval>, pub watermark: i64 }`
   - `#[derive(Default)] pub struct Tracker { last_sample: Option<i64>, open: Option<i64>, wm: i64 }` with `Tracker::load(state: &dyn SourceState) -> Tracker`, `save(&self, state: &mut dyn SourceState)` (keys `last_sample`, `open_start`, `wm`, decimal strings), and `step(&mut self, now: i64, idle_ms: u64) -> Step`.
@@ -136,8 +136,8 @@ crates/tally-daemon/
     // the first sample after the gap emits no coverage
 }
 #[test] fn resume_after_sleep_does_not_emit_a_span_reaching_into_the_sleep() {
-    // open span at 40 s (idle since 0); next sample at 5000 s with idle 5_000_000 ms
-    // closed == [IdleSpan{start:0, end:35_000}] (closed at the last sample before the gap) and
+    // samples (0, 0), (40_000, 40_000) open a span at 0; next sample (5_000_000, 5_000_000)
+    // closed == [IdleSpan{start:0, end:40_000}] (rule 1: closed at the last sample, 40 s, before the gap) and
     // no span starts before 5_000_000
 }
 #[test] fn backward_clock_jump_resets_coverage_and_never_goes_below_the_watermark() {
@@ -228,7 +228,8 @@ crates/tally-daemon/
 
 ```rust
 #[test] fn source_emits_a_closed_idle_event_with_a_stable_id_and_coverage() {
-    // idle 0@0s, 40_000@40s, 40... then 100@101s (resumed): poll each; events == [Idle{ts:0,end_ts:100_900?}] per Tracker rules
+    // samples (now, idle_ms): (0, 0), (40_000, 40_000), (55_000, 55_000), (101_000, 100) (resumed; input = 100_900):
+    // events == [Idle{ts:0, end_ts:100_900}] (Tracker rule 3 closes at input = now - idle_ms)
     // id == "presence:idle:0", source == "presence", project None; take_coverage() drains: second call is empty
 }
 #[test] fn open_span_returns_a_watermark_below_its_start() { /* watermark Some(-1) while idle span from 0 is open */ }
@@ -238,7 +239,7 @@ crates/tally-daemon/
 ```
 
 - [ ] **Step 2:** `cargo test -p tally-daemon presence`. Expected: FAIL.
-- [ ] **Step 3:** Implement. Poll cadence is plan 03's (default 5 s); do not add a second timer.
+- [ ] **Step 3:** Implement. Poll cadence is plan 03's (default 15 s); do not add a second timer.
 - [ ] **Step 4:** `cargo test -p tally-daemon` and `cargo clippy -p tally-daemon --all-targets`. Expected: PASS, no warnings. On Windows also run `tally run` for one minute by hand and check `tally status` shows `horizon` moving and `sqlite3 tally.db "select * from coverage"` shows one growing interval.
 - [ ] **Step 5:** Commit: `feat(daemon): windows presence source`.
 
@@ -246,23 +247,25 @@ crates/tally-daemon/
 
 ### Task 5: Git source (commits, user vs agent)
 
-**Files:** Create `crates/tally-daemon/src/git.rs`; modify `lib.rs`, `store.rs` (add `projects()` and `has_agent_commit_marker`), `run.rs` (register the source), `Cargo.toml` (no new dependency).
+**Files:** Create `crates/tally-daemon/src/git.rs`; modify `lib.rs`, `store.rs` (add `has_agent_commit_marker`; `projects()` and `repos_to_poll()` are defined once, in Task 6), `run.rs` (register the source), `Cargo.toml` (no new dependency).
 
-**Step 0 (check, no code):** confirm plan 03's Claude adapter emits an *agent commit marker* for every agent Bash call whose command starts with `git commit`: `Event { id: "claude:<tool_use_id>:commit", ts: <tool call time>, project: Some(..), kind: Commit { sha: "", by: Agent, lines_changed: 0 } }`. If it does not, add it to the adapter in this task (it is a one-line match in plan 03's tool-call handling) with a fixture test there. Without the marker every agent commit would be credited to the user, so do not skip this.
+**Input from plan 03 (README ruling 1, no change requested):** the Claude adapter emits, for every agent Bash call whose command starts with `git commit`, `Event { id: "claude:<session>:<uuid>:commit", ts: <tool_use time>, source: "claude-code", project: Some(..), kind: Commit { sha: "claude:<tool_use id>", by: Agent, lines_changed: 0 } }`. This plan matches it only by `by = agent`, project and time window; the `sha` value is never read. Ordering is guaranteed by the `claude-code` watermark, not by a lag (rule 2 below).
 
 **Interfaces:**
 - Consumes: `Source`, `SourceState`, `SourceError` (plan 03); `repo_identity` from Task 6 is not required here (the runner passes one repository per common dir, see Task 6).
 - Produces (`git.rs`):
   - `pub struct RepoRef { pub local_id: String, pub root: PathBuf }`
-  - `pub trait AgentCommitLookup { fn is_agent_commit(&self, project: &str, commit_ts: i64) -> bool; }`; implemented by `StoreLookup(Store)` (its own connection to the same database file) as: a stored `commit` event with `by = agent` for that project and `ts` in `[commit_ts - AGENT_COMMIT_WINDOW_MS, commit_ts + 5_000]`, `AGENT_COMMIT_WINDOW_MS = 120_000` (SQL with `json_extract` on `events.json`).
-  - `pub const GIT_LAG_MS: i64 = 60_000;`
+  - `pub trait AgentCommitLookup { fn is_agent_commit(&self, project: &str, commit_ts: i64) -> bool; fn claude_watermark(&self) -> Option<i64>; }`; implemented by `StoreLookup { store: Store, claude_enabled: bool }` (its own connection to the same database file). `is_agent_commit`: a stored `commit` event with `by = agent` for that project and `ts` in `[commit_ts - AGENT_COMMIT_WINDOW_MS, commit_ts + AGENT_COMMIT_AFTER_MS]` (SQL with `json_extract` on `events.json`; `sha` is ignored). `claude_watermark`: `None` if `!claude_enabled`, else `store.watermark("claude-code")` (the `watermarks` row for source id `claude-code`, Task 3's accessor; `None` when there is no row). Reading the store is the runner-provided lookup, not the source touching the store itself (C1 / ruling 5 are about writes).
+  - `pub const AGENT_COMMIT_WINDOW_MS: i64 = 120_000; pub const AGENT_COMMIT_AFTER_MS: i64 = 5_000;`
+  - `pub const GIT_LAG_MS: i64 = 60_000;` (fallback only, rule 2)
   - `pub struct RawCommit { pub sha: String, pub ts_ms: i64, pub lines: u32 }`; `pub fn parse_log(out: &str) -> Vec<RawCommit>` for the output of `git log --branches --no-merges --since=<secs> --format=@%H %ct %ce --numstat` filtered by committer email (the email is passed in: `parse_log(out, email)`); lines = sum of added and deleted over numstat rows, `-` (binary) counts 0.
   - `pub struct GitSource { .. }` with `new(repos: Vec<RepoRef>, lookup: Box<dyn AgentCommitLookup>) -> GitSource`, `impl Source`, `id() == "git"`.
 - Behaviour of `poll` per repo (state keys prefixed by `local_id`):
-  1. First sight of a repo (no `wm` key): set `wm = now_ms - GIT_LAG_MS`, emit nothing (live capture only).
-  2. Else run `git -C <root> log ...` with `--since=<wm/1000 - 1>`; keep commits with `wm < ts_ms <= now_ms - GIT_LAG_MS` whose committer email equals `git config user.email` (case-insensitive; no email configured: skip the repo). Lagging by `GIT_LAG_MS` lets the agent commit marker from the Claude adapter arrive first. Commits with `ts <= wm` (backdated, imported) are dropped by design.
+  0. Once per poll compute `cutoff`: if `lookup.claude_watermark()` is `Some(cw)`, `cutoff = min(now_ms, cw - AGENT_COMMIT_AFTER_MS)` (a commit at T is emitted only once the `claude-code` watermark is at least T + 5 s, so by C1 every agent marker that could match it is already stored); if `None` (claude-code disabled or no watermark row), `cutoff = now_ms - GIT_LAG_MS`.
+  1. First sight of a repo (no `wm` key): set `wm = cutoff`, emit nothing (live capture only).
+  2. Else run `git -C <root> log ...` with `--since=<wm/1000 - 1>`; keep commits with `wm < ts_ms <= cutoff` whose committer email equals `git config user.email` (case-insensitive; no email configured: skip the repo). Commits with `ts <= wm` (backdated, imported) are dropped by design. A commit above `cutoff` waits for a later poll.
   3. Event: `id "git:<sha>:commit"`, `ts = ts_ms`, `source "git"`, `project Some(local_id)`, `Commit { sha, by, lines_changed }` with `by = Agent` iff `lookup.is_agent_commit(local_id, ts_ms)`, else `User`. Merge commits are excluded (`--no-merges`) and other people's commits are excluded by the committer filter, so a pull never earns time. Remote-tracking branches are excluded (`--branches`, not `--all`).
-  4. Watermark is the minimum over repos of the new `wm = now_ms - GIT_LAG_MS`; saved to state. A repo whose `git` call fails keeps its old `wm`, which holds the source watermark back (retry next poll).
+  4. A repo's new `wm` is `max(old wm, cutoff)` (never decreases); the source watermark is the minimum over repos; saved to state. A repo whose `git` call fails keeps its old `wm`, which holds the source watermark back (retry next poll).
   5. `git` not on `PATH` (`io::ErrorKind::NotFound`): `Err(SourceError)` with text `git not found on PATH`, no events, no watermark.
 
 - [ ] **Step 1: Write failing tests.**
@@ -274,10 +277,19 @@ crates/tally-daemon/
 }
 // real-git tests use a tempdir repo; each starts with `if !git_available() { return; }`
 // helper commit(dir, msg, unix_secs) runs `git commit --allow-empty`-style commits with GIT_COMMITTER_DATE/GIT_AUTHOR_DATE set
-#[test] fn first_poll_emits_nothing_then_a_new_commit_is_emitted_once_it_is_older_than_the_lag() { }
-#[test] fn a_commit_inside_the_lag_window_waits_and_the_watermark_is_now_minus_lag() { }
+// FakeLookup { agent: Vec<(String, i64)>, claude_wm: Option<i64> } (claude_wm None = claude-code disabled)
+#[test] fn first_poll_emits_nothing_then_a_new_commit_is_emitted_once_it_is_older_than_the_lag() { /* claude_wm None */ }
+#[test] fn a_commit_inside_the_lag_window_waits_and_the_watermark_is_now_minus_lag() { /* claude_wm None */ }
+#[test] fn commit_is_held_until_the_claude_watermark_passes_it_by_five_seconds() {
+    // claude_wm Some: commit at T; poll with claude_wm = T + 4_999: no event, source watermark <= T + 4_999 - 5_000;
+    // poll with claude_wm = T + 5_000: one event; now_ms - T is far below GIT_LAG_MS (the lag is not used)
+}
+#[test] fn late_marker_within_the_window_still_makes_the_commit_by_agent() {
+    // commit at T, claude_wm = T - 1_000 (adapter behind): no event; then marker (T + 3_000) added and claude_wm = T + 5_000: event by == Agent
+}
 #[test] fn agent_marker_makes_the_commit_by_agent_and_no_marker_means_user() {
-    // FakeLookup returning true for (project, ts): by == Agent; otherwise User
+    // FakeLookup agent marker for (project, ts in window): by == Agent; otherwise User. StoreLookup test: marker with
+    // sha "claude:toolu_1" matches, any sha value matches, a by=user commit event does not
 }
 #[test] fn commit_in_a_linked_worktree_is_seen_from_the_main_checkout_exactly_once() {
     // git worktree add ../wt -b feature; commit there; poll the main checkout: one event, id "git:<sha>:commit"
@@ -347,6 +359,7 @@ Decision: capture user test runs with an explicit wrapper, not by watching shell
 **Interfaces:**
 - `pub fn cmd_hash(args: &[String]) -> String`: lowercase hex SHA-256 of the arguments joined with `\u{1f}`. (The command text itself is never stored, C3.)
 - `pub fn test_run_event(args: &[String], exit_code: i32, now_ms: i64, project: Option<String>, pid: u32) -> Event`: `id "shell:<now_ms>:<pid>"`, `source "shell"`, `ts = now_ms` (completion time), `Kind::TestRun { cmd_hash, exit_code, initiator: Actor::User }`.
+- Clap shape (README ruling 12): `tally hook` is a subcommand group, `Cmd::Hook { #[command(subcommand)] cmd: HookCmd }` with `enum HookCmd { TestRun { #[arg(last = true, required = true)] args: Vec<String> } }`. This plan adds only `TestRun`; plan 08 adds `HookCmd::Cursor { event }` (`hook cursor <event>`) and `HookCmd::Install { .. }` (`hook install cursor`) to the same enum.
 - CLI: `tally hook test-run -- <program> [args...]` runs the program with inherited stdin, stdout and stderr, waits, appends the event (project = `project_id` of the git root of the current directory, `None` outside a repository), and exits with the program's exit code (`1` if it was killed by a signal; a program that cannot be started exits `127` with the OS error on stderr and records nothing). If the database cannot be written the command's result is still returned; a warning goes to stderr.
 - No watermark for source `shell`: the event is stamped at completion with the current time, and every other source holds its watermark at or below the present, so the event is never at or below a finalized point. State this in the doc comment on `Cmd::Hook`.
 - The long help of `tally hook test-run` documents the aliases: PowerShell `function tt { tally hook test-run -- @args }` and bash/zsh `alias tt='tally hook test-run --'`, used as `tt cargo test`.
@@ -391,16 +404,25 @@ Decision: capture user test runs with an explicit wrapper, not by watching shell
 2. **`finalize` skips, it does not trim, uncovered claims.** A claim whose whole interval is not inside coverage is skipped permanently with reason `no_presence_coverage`. Cost: the first action within 2 minutes of a daemon start, and the first action after any sleep or restart gap shorter than an hour, earn nothing. Trimming would be a scorer change; a later ruleset could do it.
 3. **The guard is on by default on Windows (`[presence] require`)**, and when on, nothing is final until the presence source has a watermark. Off elsewhere until plan 12 adds macOS/Linux idle sources; there, hours are over-credited exactly as the scorer already assumes, so do not publish non-Windows ledgers before plan 12.
 4. **Skips are decided once, when a claim becomes final**, and recorded in an append-only `skipped_claims` table in the same transaction as the ledger append. The ledger stays a hash chain over credited claims only. The divergence check compares it with re-scored claims minus recorded skips.
-5. **Agent commits are recognised by a marker event from plan 03** (`commit`, `by: agent`, empty `sha`, at the tool-call time) within 120 s before the real commit; the git source lags 60 s so the marker arrives first. Committer email must equal `git config user.email`; merges and remote-tracking branches never earn time.
+5. **Agent commits are recognised by plan 03's agent `commit` event** (`by: agent`, `sha: "claude:<tool_use id>"`, at the `tool_use` time; README ruling 1) by `by = agent`, project and a window of 120 s before to 5 s after the real commit; the sha is not compared. The git source emits a commit at T only once the `claude-code` watermark is at least T + 5 s; it falls back to a 60 s lag only when claude-code is disabled or has no watermark row. Committer email must equal `git config user.email`; merges and remote-tracking branches never earn time.
 6. **Git history before the daemon first sees a repository is never read** (live capture only), and a backdated commit (`ts` at or below the source watermark) is dropped.
 7. **User test runs: explicit wrapper `tally hook test-run -- <cmd>` only**; automatic shell capture is deferred.
 8. **Worktree and clone matching happens at registration only**, adopting an existing public name through the shared git common dir or normalized `origin` URL. It is not retroactive for claims already ledgered.
-9. **A failed idle sample is a gap, not a zero.** One missed poll within 60 s keeps coverage; a longer outage breaks it.
+9. **A failed idle sample is a gap, not a zero.** With plan 03's 15 s poll, up to two missed polls (samples at most 60 s apart) keep coverage; a longer outage breaks it.
 
 ## Assumes from earlier plans
 
-From plan 03 (index contracts C1, C5): `crates/tally-daemon/src/source.rs` with `trait Source { fn id(&self) -> &str; fn poll(&mut self, now_ms: i64, state: &mut dyn SourceState) -> Result<Poll, SourceError>; }`, `struct Poll { events: Vec<Event>, watermark: Option<i64> }`, `trait SourceState { fn get; fn set }`, `SourceError`; `crates/tally-daemon/src/run.rs` (the loop: poll, `append_events`, `set_watermark`, persist state, `finalize`; errors from one source are logged and do not stop the others); `source_state` table; WAL mode; `<home>/config.toml` loader with unknown keys an error; a 5 s default poll interval; the Claude adapter emitting the agent-commit marker (Task 5 step 0) and agent `test_run` events.
-From code on `main`: `Store::{open, append_events, events, set_watermark, horizon, register_project, project_names, append_ledger(entries, finalized_through, scored_events), ledger, finalized_through}`, `finalize::{finalize, FinalizeSummary, FinalizeError}`, `project::{normalize_path, project_id, find_git_root, register_git_project}`, `status::{status, Status}`, `tally_scoring::{Event, Kind, Actor, score, chain}`, `ruleset::{IDLE_SAMPLE_MIN_MS, MAX_INTERVAL_MS, FIRST_ACTION_MS, INTERRUPT_FOLLOW_MS}`, `test_support::{prompt, edit, ev}`. Task 1 changes `append_ledger` to take a fourth argument; update every caller and test in the same commit.
+From plan 03 (index contracts C1, C5): `crates/tally-daemon/src/source.rs` with `trait Source { fn id(&self) -> &str; fn poll(&mut self, now_ms: i64, state: &mut dyn SourceState) -> Result<Poll, SourceError>; }`, `struct Poll { events: Vec<Event>, watermark: Option<i64> }`, `trait SourceState { fn get; fn set }`, `SourceError`; `crates/tally-daemon/src/run.rs` (the loop: poll, `append_events`, `set_watermark`, persist state, `finalize`; errors from one source are logged and do not stop the others); `source_state` table; WAL mode; `<home>/config.toml` loader with unknown keys an error; a 15 s default poll interval (`[run] interval_secs = 15`); the Claude adapter emitting the agent `commit` event of README ruling 1 under source id `claude-code` and agent `test_run` events.
+From code on `main`: `Store::{open, append_events, events, set_watermark, horizon, register_project, project_names, append_ledger(entries, finalized_through, scored_events), ledger, finalized_through}`, `finalize::{finalize, FinalizeSummary, FinalizeError}`, `project::{normalize_path, project_id, find_git_root, register_git_project}`, `status::{status, Status}`, `tally_scoring::{Event, Kind, Actor, score, chain}`, `ruleset::{IDLE_SAMPLE_MIN_MS, MAX_INTERVAL_MS, FIRST_ACTION_MS, INTERRUPT_FOLLOW_MS}`, `test_support::{prompt, edit, ev}`. Task 1 changes `append_ledger` to take a fourth argument; update every caller and test in the same commit. Final signature (README ruling 8): `pub fn append_ledger(&mut self, entries: &[LedgerEntry], finalized_through: i64, scored_events: usize, skips: &[(String, i64, String)]) -> Result<(), StoreError>` (`skips` = `(action_id, ts, reason)`). Plans 05, 07 and 10 call it as `append_ledger(&entries, finalized_through, scored_events, &[])` when they have no skips; plan 05's test sketches (`s.append_ledger(&[..], 5, 0)`, `(.., 10, 0)` and the by-hand appends) are written with three arguments and must add `&[]`.
+
+## Contract for platform sources (plan 12)
+
+Authoritative per README ruling 13; plan 12 implements against exactly this.
+- Trait and error (`crates/tally-daemon/src/presence.rs`): `pub trait Platform { fn idle_ms(&mut self) -> Result<u64, PlatformError>; }`; `pub enum PlatformError { Unsupported, Failed(String) }`. `idle_ms` is milliseconds since the last user input in the user's session.
+- Files: `presence.rs` (trait, `Tracker`, `PresenceSource<P: Platform>`, `default_platform()`, `PRESENCE_SOURCE = "presence"`), `presence_win.rs` (`WindowsPlatform`). Plan 12 adds its platforms as sibling `#[cfg(..)]` files (for example `presence_mac.rs`, `presence_linux.rs`) and extends `default_platform()`; it does not change the trait, the tracker or the source.
+- Unsupported: `UnsupportedPlatform` returns `Err(PlatformError::Unsupported)`, and `PresenceSource::poll` turns that into `Err(SourceError)` "presence is not supported on this platform" (an error, never silence). `Failed` gives `Poll { events: [], watermark: None }` (a gap).
+- Finalization: with `[presence] require = true` and no `presence` watermark, nothing finalizes. Config `[presence] enabled` (default `true` on Windows, `false` elsewhere) and `require` (default = `enabled`); plan 12 turns both defaults on for the platforms it supports. `require = true` on an unsupported platform makes `tally run` exit with an error naming the key.
+- Sleep-gap rule: samples more than `COVERAGE_MAX_GAP_MS` (60 s) apart, or a backward clock jump, are a gap: no coverage across it, an open idle span closes at the last sample before it, and a claim whose interval touches the gap is skipped with reason `no_presence_coverage`. Platforms only report idle time; they do not detect sleep themselves.
 
 ## Not in this plan
 

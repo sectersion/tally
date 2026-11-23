@@ -40,9 +40,9 @@ Code on `main` wins where it differs; note the difference in the task that hits 
 2. **Preact + TypeScript, built with Bun, hand-written SVG charts, no chart library.** Preact is about 4 KB gzipped; a charting library is 10 to 100 times that. Output is a small `dist/` (one JS, one CSS, one HTML) embedded with `include_dir`. Rejected: plain TypeScript with no framework (the replay and tables are state-heavy; a 4 KB component model is cheaper than hand-rolled DOM updates), React (about 45 KB), Svelte or Solid (extra compiler toolchain for no gain here).
 3. **The built `dashboard/dist` is committed**, so `cargo build` and `cargo install` need no JavaScript toolchain. CI rebuilds and fails on any `git diff` in `dist/` (drift check, Bun version pinned). The alternative (a `build.rs` that runs Bun) makes every Rust contributor install Bun.
 4. **The browser sends local-midnight instants (`edges=ms1,ms2,...`) instead of a time zone name.** The daemon then needs no tz database (`chrono-tz` is about 500 KB of data) and DST days of 23 or 25 hours are right by construction. Cost: a longer query string (at most 367 numbers).
-5. **"Bugs fixed" is exactly the scorer's fail→pass loop**, by calling `tally_scoring::caps::completes_fail_pass_loop`, not a second definition. The count therefore always matches the `fail_pass_loop` reason in the ledger (tested). Time from failure to fix runs from the first failing run of the same `cmd_hash` after the previous passing run of it (within `LOOP_WINDOW_MS`) to the fixing run.
+5. **"Bugs fixed" is exactly the scorer's fail→pass loop**, by calling `tally_scoring::caps::completes_fail_pass_loop`, not a second definition. The count of loops therefore matches the `fail_pass_loop` reason over all re-scored claims (tested). Plan 04 can skip a claim (`skipped_claims`, `no_presence_coverage`); a loop whose completing run is skipped is **counted separately** (`skipped_fixes`), shown as "skipped", and not added to `fixed`. So `fixed` equals the `fail_pass_loop` reasons in the ledger, and `fixed + skipped_fixes` equals those in all re-scored claims (tested). Time from failure to fix runs from the first failing run of the same `cmd_hash` after the previous passing run of it (within `LOOP_WINDOW_MS`) to the fixing run.
 6. **Prompt-after-failure metric** (the "drew on what you saw" proxy), defined precisely in Task 3: among prompts within 5 minutes after a failing `test_run` in the same project, the share with `relevance_pm >= 300`, shown next to the same share for all other prompts so the user sees a difference rather than an absolute number. Shown with its limits on the page.
-7. **Minutes removed are derived, not stored.** The ledger records `verified_s`, `unverified_s` and `reasons`, not the interval. Because the ledger lists every human action in order, the previous entry's `ts` gives the interval (the scorer's rule: first action of a run gets `FIRST_ACTION_MS`; a gap over `MAX_INTERVAL_MS` starts a run). Removed seconds = interval minus `verified_s` minus `unverified_s`, within 1 s of rounding per claim. This avoids changing the ledger format (a ruleset change).
+7. **Minutes removed are derived, not stored.** The ledger records `verified_s`, `unverified_s` and `reasons`, not the interval. The ledger no longer lists every human action: plan 04 records claims outside presence coverage in `skipped_claims` (`Store::skipped()`, action id, ts, reason). The previous human action is the previous ledger entry or the previous skipped claim, whichever has the later `ts`; its `ts` gives the interval (the scorer's rule: first action of a run gets `FIRST_ACTION_MS`; a gap over `MAX_INTERVAL_MS` starts a run). Removed seconds = interval minus `verified_s` minus `unverified_s`, within 1 s of rounding per claim. A skipped claim's whole interval is shown as its own "no presence coverage" amount, never as verified, unverified or removed time. This avoids changing the ledger format (a ruleset change).
 8. **Two virtual generated columns on `events`** (`kind`, `project`, from the JSON) with indexes `(kind, ts)` and `(project, ts)`, added by an idempotent migration. They make "test runs in a window" and "events of one project in a window" index scans instead of full-table JSON scans. Cost: a one-time index build on first start after upgrade (seconds per million events) and disk (tens of bytes per event).
 9. **Replay sessions are defined by the dashboard, not the harness**: consecutive human actions in one project with gaps of at most 30 minutes (`REPLAY_SESSION_GAP_MS`). A display constant, not a ruleset constant.
 10. **No real browser in tests.** The end-to-end test boots the real binary against a fixture store and renders the real served page in `happy-dom` against the live API. It does not test layout or colour contrast; those are on the manual checklist in Task 10. Playwright would add a large browser download to CI for little extra signal here.
@@ -56,7 +56,8 @@ Code on `main` wins where it differs; note the difference in the task that hits 
 5. **A browser tab left open after the daemon restarts.** Expected: the poll fails, the page shows a calm "Tally is not running, retrying" banner (polite live region), keeps the last data visible, retries with backoff up to 30 s, and recovers without a reload. A new daemon on another port (`--port 0`) cannot be reached by the old tab; after 5 minutes of failures the banner adds "if you restarted Tally, reopen the address it printed". Test in Task 9.
 6. **DNS rebinding and other pages talking to localhost.** Expected: a request with `Host: evil.example:7878` is `403` with no database access; `Origin` is not needed for reads because there is nothing to forge (Security notes). Test in Task 6.
 7. **Privacy.** Expected: a test scans every JSON response and the embedded page for the fixture's secret-looking strings; `cmd_hash` and `file_hash` are never sent, only shortened ids for display (at most 8 hex characters), and no free text exists. Test in Task 6.
-8. **`status` consistency.** Expected: counts, ledger sums and `provisional_claims` come from one read transaction; a concurrent finalize cannot make `final_claims` and `verified_s` disagree. Test in Task 1.
+8. **`status` consistency.** Expected: counts, ledger sums and `provisional_claims` come from one read transaction; a concurrent finalize cannot make `final_claims` and `verified_s` disagree. Test in Task 1. The function changed is `tally_daemon::status::status` (Task 1); this closes the carried-forward item.
+9. **Skipped claims (plan 04).** Expected: a claim in `skipped_claims` is never verified time; it is the previous human action for the next claim's interval (otherwise the next claim's removed time is inflated by the skipped span); it appears as its own "no presence coverage" row in the timeline and the removed-time breakdown; a bug fix completed by a skipped run is "skipped", counted in `skipped_fixes`, not in `fixed`. Test in Tasks 2, 4 and 5 (fixture with one skipped claim).
 
 ## Security notes (localhost server)
 
@@ -103,13 +104,14 @@ dashboard/
 **Interfaces:**
 - Produces (`store.rs`):
   - `Store::open_read_only(path: &Path) -> Result<Store, StoreError>`: opens with `OpenFlags::SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX`, sets `busy_timeout` 5 s, does not run the schema or the migration. A missing file is an error.
-  - `Store::snapshot(&mut self) -> Result<Snapshot<'_>, StoreError>`: starts a deferred read transaction (`BEGIN`); the first read pins the snapshot (WAL gives snapshot isolation). `Snapshot` exposes the same read methods as `Store` that this plan needs: `horizon`, `finalized_through`, `project_names`, `ledger_len`, `ledger_range(seq_from, seq_to)`, `ledger_seq_at_or_after(ts)`, `events_in(kinds, from_ts, to_ts, after, limit)`. Dropping it ends the transaction.
+  - `Store::snapshot(&mut self) -> Result<Snapshot<'_>, StoreError>`: starts a deferred read transaction (`BEGIN`); the first read pins the snapshot (WAL gives snapshot isolation). `Snapshot` exposes the same read methods as `Store` that this plan needs: `horizon`, `finalized_through`, `project_names`, `ledger_len`, `ledger_range(seq_from, seq_to)`, `ledger_seq_at_or_after(ts)`, `events_in(kinds, from_ts, to_ts, after, limit)`, `skipped_in(from_ts, to_ts_exclusive)`. Dropping it ends the transaction.
+  - `Snapshot::skipped_in(&self, from_ts: i64, to_ts_exclusive: i64) -> Result<Vec<(String, i64, String)>, StoreError>`: the rows of plan 04's `skipped_claims` table (the same shape as `Store::skipped()`: action id, ts, reason) with `ts` in the range, in ts order. Also `Snapshot::last_human_ts_before(&self, ts: i64) -> Result<Option<i64>, StoreError>`: the greater of the last ledger entry `ts` and the last skipped `ts`, both strictly before `ts`.
   - `Snapshot::ledger_len(&self) -> Result<u64, StoreError>`.
   - `Snapshot::ledger_range(&self, from_seq: u64, to_seq_exclusive: u64) -> Result<Vec<(u64, LedgerEntry)>, StoreError>`: rows with `seq` in the range, in order.
   - `Snapshot::ledger_seq_at_or_after(&self, ts: i64) -> Result<u64, StoreError>`: the smallest `seq` (1-based) whose entry `ts >= ts`, or `ledger_len + 1` when none. Binary search over `seq` reading `json_extract(entry_json,'$.ts')` by primary key (`O(log n)` queries); correct because the ledger is a prefix of time-ordered claims.
   - `Snapshot::events_in(&self, kinds: &[&str], from_ts: i64, to_ts: i64, after: Option<(i64, String)>, limit: usize) -> Result<Vec<Event>, StoreError>`: events with `ts` in `[from_ts, to_ts)` and `kind IN kinds`, ordered by `(ts, id)`, strictly after the cursor `(ts, id)` when given, at most `limit`. Uses the `kind` column and the `(kind, ts)` index.
   - Migration inside `Store::init`: if `pragma_table_xinfo('events')` lacks `kind`, run `ALTER TABLE events ADD COLUMN kind TEXT GENERATED ALWAYS AS (json_extract(json,'$.kind')) VIRTUAL`; the same for `project` (`'$.project'`); then `CREATE INDEX IF NOT EXISTS events_kind_ts ON events(kind, ts)` and `events_project_ts ON events(project, ts)`. Also `PRAGMA journal_mode=WAL` (skip for in-memory stores) if plan 03 has not already.
-- Modifies (`status.rs`): `status()` reads inside one `BEGIN` read transaction (horizon, events count, ledger, finalized_through). Its signature does not change; it now takes `&Store` and uses a private helper that runs `BEGIN`/`COMMIT` on `store.conn` (a deferred read transaction on a shared connection is fine because `status` only reads).
+- Modifies (`status.rs`): `tally_daemon::status::status` reads inside one `BEGIN` read transaction (horizon, events count, ledger, finalized_through, and plan 04's `skipped_claims` count); this is the carried-forward "status reads in one transaction" item, done in this task. Its signature does not change; it now takes `&Store` and uses a private helper that runs `BEGIN`/`COMMIT` on `store.conn` (a deferred read transaction on a shared connection is fine because `status` only reads).
 
 - [ ] **Step 1: Write the failing tests** in `store.rs`:
 
@@ -162,16 +164,16 @@ And in `status.rs`:
 - Modify: `crates/tally-daemon/Cargo.toml` (add `serde = { version = "1", features = ["derive"] }`), `crates/tally-daemon/src/lib.rs` (`pub mod analytics;`)
 
 **Definitions (put these in the module doc comment, the page text reuses them):**
-- A **bug fixed** is one passing `test_run` that `tally_scoring::caps::completes_fail_pass_loop` accepts: a passing run whose `cmd_hash` matches an earlier failing run within `LOOP_WINDOW_MS`, with a human action in between, and no passing run of that `cmd_hash` between. This is the scoring spec's definition (§4), so the dashboard count equals the number of ledger entries with reason `fail_pass_loop`.
+- A **bug fixed** is one passing `test_run` that `tally_scoring::caps::completes_fail_pass_loop` accepts: a passing run whose `cmd_hash` matches an earlier failing run within `LOOP_WINDOW_MS`, with a human action in between, and no passing run of that `cmd_hash` between. This is the scoring spec's definition (§4), so the dashboard count equals the number of ledger entries with reason `fail_pass_loop`, once loops whose fixing run was skipped (plan 04, no presence coverage) are set aside: those are `skipped_fixes`, shown as "skipped" and never in `fixed`.
 - **Time from failure to fix** for a bug: the fixing run's `ts` minus the `ts` of the first failing run of the same `cmd_hash` after the previous passing run of it, looking back at most `LOOP_WINDOW_MS`. Milliseconds, `i64`.
 - Limits to show on the page: a bug is a failing and then passing run of the same command, so it counts test and build runs, not bugs the user never ran a test for; two unrelated failures of one command count as one bug; a loop longer than one hour is not seen (the scorer's window); runs the agent started count as runs (they feed loops) but the claim time goes to the human.
 
 **Interfaces:**
 - Produces:
-  - `#[derive(Serialize, Debug, PartialEq)] pub struct BugFix { pub fixed_ts: i64, pub failed_ts: i64, pub project: Option<String>, pub ms_to_fix: i64 }`
-  - `#[derive(Serialize, Debug, PartialEq)] pub struct Bugs { pub fixed: u32, pub avg_ms_to_fix: Option<i64>, pub median_ms_to_fix: Option<i64>, pub fixes: Vec<BugFix> }` (`fixes` newest first, at most 200; `fixed` is the full count)
+  - `#[derive(Serialize, Debug, PartialEq)] pub struct BugFix { #[serde(skip)] pub id: String, pub fixed_ts: i64, pub failed_ts: i64, pub project: Option<String>, pub ms_to_fix: i64, pub skipped: bool }` (`id` is the fixing run's event id, equal to the claim's `action_id`; `skipped` is false from `find_bug_fixes`, set by `bugs`)
+  - `#[derive(Serialize, Debug, PartialEq)] pub struct Bugs { pub fixed: u32, pub skipped_fixes: u32, pub avg_ms_to_fix: Option<i64>, pub median_ms_to_fix: Option<i64>, pub fixes: Vec<BugFix> }` (`fixes` newest first, at most 200, includes skipped ones marked `skipped: true`; `fixed` and `skipped_fixes` are full counts; avg and median use non-skipped fixes only)
   - `pub fn find_bug_fixes(events: &[Event], from_ts: i64, to_ts: i64) -> Vec<BugFix>`: `events` sorted by `(ts, id)`, deduplicated, containing test runs and human actions with `ts` from `from_ts - LOOP_WINDOW_MS` up to `to_ts`; returns fixes whose `fixed_ts` is in `[from_ts, to_ts)`.
-  - `pub fn bugs(snap: &Snapshot, from_ts: i64, to_ts: i64) -> Result<Bugs, StoreError>`: loads `events_in(HUMAN_AND_RUN_KINDS, from_ts - LOOP_WINDOW_MS, to_ts, ...)` in pages of 5000 into one `Vec` (kinds: `prompt`, `interrupt`, `tool_decision`, `user_edit`, `test_run`, `commit`; the excluded kinds are never human actions and cannot change a loop), then calls `find_bug_fixes`.
+  - `pub fn bugs(snap: &Snapshot, from_ts: i64, to_ts: i64) -> Result<Bugs, StoreError>`: loads `events_in(HUMAN_AND_RUN_KINDS, from_ts - LOOP_WINDOW_MS, to_ts, ...)` in pages of 5000 into one `Vec` (kinds: `prompt`, `interrupt`, `tool_decision`, `user_edit`, `test_run`, `commit`; the excluded kinds are never human actions and cannot change a loop), then calls `find_bug_fixes`, then reads `snap.skipped_in(from_ts, to_ts)` and sets `skipped = true` on every fix whose `id` is a skipped `action_id`.
 
 - [ ] **Step 1: Write the failing tests** in `analytics.rs`. Helpers build events with `ts` in seconds times 1000: `run(id, s, cmd, exit)` (a `TestRun` by `Actor::User`), `p(id, s)` (a prompt).
 
@@ -187,7 +189,11 @@ And in `status.rs`:
     // fail, prompt, pass, pass (same cmd) -> fixed 1
 }
 #[test] fn project_without_loops_has_none_not_zero() {
-    // only prompts and passing runs -> Bugs { fixed: 0, avg_ms_to_fix: None, median_ms_to_fix: None, fixes: [] }
+    // only prompts and passing runs -> Bugs { fixed: 0, skipped_fixes: 0, avg_ms_to_fix: None, median_ms_to_fix: None, fixes: [] }
+}
+#[test] fn a_loop_completed_by_a_skipped_run_is_skipped_not_fixed() {
+    // two loops; the second fixing run's action_id is in skipped_claims (fixture store)
+    // -> fixed 1, skipped_fixes 1, fixes has 2 rows with the second skipped == true, avg/median from the first only
 }
 #[test] fn a_failure_older_than_the_loop_window_is_not_a_bug() {
     // fail at s=0, prompt, pass at s=3601 -> 0
@@ -195,7 +201,9 @@ And in `status.rs`:
 #[test] fn count_equals_fail_pass_loop_reasons_in_scored_claims() {
     // build ~40 events (mixed cmds, passes, fails, prompts) with a fixed seed-free table;
     // claims = tally_scoring::score(&events); expected = claims.filter(reasons contains "fail_pass_loop").count();
-    // assert find_bug_fixes(&sorted, i64::MIN, i64::MAX).len() == expected
+    // assert find_bug_fixes(&sorted, i64::MIN, i64::MAX).len() == expected (all claims, skipped or not)
+    // then skip one fixing claim (record it in skipped_claims, drop it from the ledger fixture) and assert
+    // bugs().fixed == ledger entries with the reason and bugs().fixed + skipped_fixes == expected
 }
 #[test] fn window_filters_by_fixed_ts_but_looks_back_for_the_failure() {
     // failure at s=0, fix at s=4000 is outside LOOP_WINDOW; failure s=3000 fix s=4000, window [3500,5000) -> 1 fix,
@@ -270,7 +278,8 @@ And in `status.rs`:
 - Only **final** ledger entries are used (the ledger). Time not yet final (the last couple of minutes, `INTERRUPT_FOLLOW_MS`) is not shown; the response says up to when it is complete (`as_of.finalized_through`, Task 6). No float and no second scorer.
 - A claim belongs to the day containing its `ts` (the end of its interval). An interval that crosses local midnight is attributed wholly to the later day. Stated on the page.
 - **Verified** and **unverified** seconds are always separate fields and separate columns/series; they are never added together on the page.
-- **Removed seconds** of a claim: `interval_s - verified_s - unverified_s`, floored at 0, where `interval_s` is `FIRST_ACTION_MS / 1000` when the claim is the first ledger entry or `ts - prev_ts > MAX_INTERVAL_MS`, otherwise `(ts - prev_ts) / 1000`; `prev_ts` is the previous ledger entry's `ts` (all projects, because the ledger lists every human action in order). Accurate to 1 s per claim (the scorer floors each part to whole seconds).
+- **Removed seconds** of a claim: `interval_s - verified_s - unverified_s`, floored at 0, where `interval_s` is `FIRST_ACTION_MS / 1000` when the claim has no previous human action or `ts - prev_ts > MAX_INTERVAL_MS`, otherwise `(ts - prev_ts) / 1000`; `prev_ts` is the `ts` of the previous human action across all projects: the previous ledger entry or the previous skipped claim (`skipped_claims`), whichever is later. The ledger alone is not every human action once plan 04 skips claims.
+- **Skipped claims** (no presence coverage): a skipped claim's interval (computed by the same rule) is `skipped_s`, reported in its own "no presence coverage" row; it is never in `verified_s`, `unverified_s` or `removed_s`, and a skipped claim has no reasons (they are not stored), so it is not in the "why" breakdown. It still counts as the previous action of the next claim. Accurate to 1 s per claim (the scorer floors each part to whole seconds).
 - **Why** a claim lost time, from its `reasons`: `idle_subtracted` and `agent_busy_subtracted` explain removed seconds (key is the sorted `+` join of the reasons present among those two; none present gives key `unexplained`, which should hold only rounding); `capped` explains unverified seconds (moved to `unverified_s`, not removed); `first_action` marks a claim whose interval was the fixed 120 s because the previous action was over an hour earlier (time away longer than that is never credited, so it appears nowhere). `read_protected` and `think_protected` mean time was kept that would have been removed.
 
 **Interfaces:**
@@ -278,10 +287,10 @@ And in `status.rs`:
   - `#[derive(Serialize, Debug, PartialEq, Default, Clone)] pub struct Seconds { pub verified_s: u64, pub unverified_s: u64, pub removed_s: u64, pub claims: u32 }`
   - `#[derive(Serialize, Debug, PartialEq)] pub struct DayProject { pub day: usize, pub project: Option<String>, pub seconds: Seconds }` (`day` indexes into the request's edges)
   - `#[derive(Serialize, Debug, PartialEq)] pub struct RemovedReason { pub reason: String, pub claims: u32, pub seconds: u64 }`
-  - `#[derive(Serialize, Debug, PartialEq)] pub struct Hours { pub days: Vec<DayProject>, pub totals: Seconds, pub removed_by: Vec<RemovedReason>, pub capped: RemovedReason, pub protected_claims: u32, pub away_runs: u32 }`
+  - `#[derive(Serialize, Debug, PartialEq)] pub struct Hours { pub days: Vec<DayProject>, pub totals: Seconds, pub removed_by: Vec<RemovedReason>, pub capped: RemovedReason, pub no_presence: RemovedReason, pub no_presence_days: Vec<SkippedDay>, pub protected_claims: u32, pub away_runs: u32 }` and `#[derive(Serialize, Debug, PartialEq)] pub struct SkippedDay { pub day: usize, pub claims: u32, pub seconds: u64 }` (`no_presence.reason` is `"no_presence_coverage"`; not part of `totals`)
   - `pub fn day_index(edges: &[i64], ts: i64) -> Option<usize>`: index `i` with `edges[i] <= ts < edges[i+1]`, `None` outside; binary search.
-  - `pub fn hours(entries: &[(u64, LedgerEntry)], prev_ts: Option<i64>, edges: &[i64]) -> Hours`: `entries` consecutive ledger rows within the window, `prev_ts` the `ts` of the entry before the first one (or `None`). `away_runs` counts claims with reason `first_action` after the first (the user came back after more than an hour away).
-  - `pub fn hours_for(snap: &Snapshot, edges: &[i64]) -> Result<Hours, StoreError>`: `a = ledger_seq_at_or_after(edges[0])`, `b = ledger_seq_at_or_after(*edges.last())`; reads `ledger_range(a.saturating_sub(1).max(1), b)` and drops the extra leading row after using it as `prev_ts`. Rows returned are bounded by the window (at most 366 days).
+  - `pub fn hours(entries: &[(u64, LedgerEntry)], skipped: &[i64], prev_ts: Option<i64>, edges: &[i64]) -> Hours`: `entries` consecutive ledger rows within the window, `skipped` the `ts` of skipped claims in the window (ascending), `prev_ts` the `ts` of the human action (ledger or skipped) before the window's first one (or `None`). Entries and skipped are merged by `ts` (a tie puts the ledger entry first) to find each claim's previous human action. `away_runs` counts claims with reason `first_action` after the first (the user came back after more than an hour away).
+  - `pub fn hours_for(snap: &Snapshot, edges: &[i64]) -> Result<Hours, StoreError>`: `a = ledger_seq_at_or_after(edges[0])`, `b = ledger_seq_at_or_after(*edges.last())`; reads `ledger_range(a, b)` and `skipped_in(edges[0], *edges.last())`, and takes `prev_ts` from `snap.last_human_ts_before(first_ts_in_window)` (the first ledger or skipped `ts` in the window, whichever is earlier). Rows returned are bounded by the window (at most 366 days).
 
 - [ ] **Step 1: Write the failing tests.** Helper `claim(seq, ts_s, verified, unverified, reasons)` builds a `(u64, LedgerEntry)`.
 
@@ -310,11 +319,19 @@ And in `status.rs`:
     // chain it, then for every claim assert |interval_s - (v + u + removed_s)| <= 1 and unexplained seconds <= claims count
 }
 #[test] fn a_project_with_no_claims_gives_empty_hours() {
-    // hours(&[], None, &[0, 100]) -> days empty, totals all zero, removed_by empty
+    // hours(&[], &[], None, &[0, 100]) -> days empty, totals all zero, removed_by empty, no_presence zero
+}
+#[test] fn a_skipped_claim_is_its_own_row_and_is_the_previous_action_of_the_next_claim() {
+    // ledger claim A ts 0; skipped claim ts 300_000; ledger claim B ts 360_000 verified 55 unverified 0 reasons ["idle_subtracted"]
+    // -> B interval is 60 s (from the skipped claim, not 360 s from A), removed_s 5; no_presence { claims 1, seconds 300 };
+    // totals.verified_s only A's + 55; the skipped seconds appear in no totals field; removed_by has no no_presence row
+}
+#[test] fn skipped_claims_before_the_window_still_set_prev_ts() {
+    // hours_for over a fixture store with one skipped claim just before edges[0]: the first in-window claim's interval uses it
 }
 #[test] fn hours_for_reads_only_the_window() {
     // ledger of 6 entries over 3 days; hours_for with edges of day 2 only returns the entries of that day,
-    // and removed_s of the first row of the window uses the previous day's last entry.
+    // and removed_s of the first row of the window uses the previous day's last human action (ledger or skipped).
 }
 ```
 
@@ -331,7 +348,7 @@ And in `status.rs`:
 - Modify: `crates/tally-daemon/src/store.rs` (add `Snapshot::project_events_in` and `Snapshot::watermarks`), `crates/tally-daemon/src/lib.rs` (`pub mod replay;`)
 
 **What the user will and will not see (also printed on the replay page):**
-- Will see: for each moment, its time, one of these kinds: `prompt`, `run` (a test or build run that passed and is not a fix), `error` (a run that failed), `fix` (the passing run that completed a bug fix, Task 2), `commit`, `edit`, `interrupt`, `approval`, `denial`, plus bars for `agent_working` and `away` (from `agent_busy` and `idle` spans). Numbers attached: a prompt's `relevance_pm` and length class, a run's exit code, an edit's or commit's `lines_changed`, the first 8 characters of a command hash or commit sha (so repeats of the same command can be matched by eye).
+- Will see: for each moment, its time, one of these kinds: `prompt`, `run` (a test or build run that passed and is not a fix), `error` (a run that failed), `fix` (the passing run that completed a bug fix, Task 2), `commit`, `edit`, `interrupt`, `approval`, `denial`, `skipped` (a claim with no presence coverage: its own row at the claim's time, labelled "no presence coverage, not counted"; the event it belongs to is also drawn as usual, and a passing run whose claim is skipped is drawn as `run`, not `fix`), plus bars for `agent_working` and `away` (from `agent_busy` and `idle` spans). Numbers attached: a prompt's `relevance_pm` and length class, a run's exit code, an edit's or commit's `lines_changed`, the first 8 characters of a command hash or commit sha (so repeats of the same command can be matched by eye).
 - Will not see: what was typed, what the agent said, which command or file, any diff or window title. Tally never stored them; this is not a redaction that could be turned off.
 - Limits: spans that started before the window start are not drawn; `agent_output` events are not drawn (they are numerous and carry only a size); a run that the agent started is shown with an `agent` marker.
 
@@ -344,7 +361,7 @@ And in `status.rs`:
   - `#[derive(Serialize, Debug, PartialEq)] pub struct Item { pub ts: i64, pub end_ts: Option<i64>, pub kind: &'static str, pub n: Option<i64>, pub short: Option<String>, pub agent: bool, pub project: Option<String> }`
   - `#[derive(Serialize, Debug, PartialEq)] pub struct Page { pub items: Vec<Item>, pub next: Option<String>, pub truncated: bool }` (`next` is `"<ts>:<id>"` of the last item when more remain, else `None`).
   - `pub const REPLAY_PAGE_MAX: usize = 2000;`
-  - `pub fn replay_page(snap: &Snapshot, projects: &[String], from_ts: i64, to_ts: i64, after: Option<(i64, String)>, limit: usize) -> Result<Page, StoreError>`: `limit` is clamped to `1..=REPLAY_PAGE_MAX`; `projects` are local project ids (empty means all projects, via the `(kind, ts)` index); fix detection uses `find_bug_fixes` over events from `from_ts - LOOP_WINDOW_MS` to the page's last item.
+  - `pub fn replay_page(snap: &Snapshot, projects: &[String], from_ts: i64, to_ts: i64, after: Option<(i64, String)>, limit: usize) -> Result<Page, StoreError>`: `limit` is clamped to `1..=REPLAY_PAGE_MAX`; `projects` are local project ids (empty means all projects, via the `(kind, ts)` index); fix detection uses `find_bug_fixes` over events from `from_ts - LOOP_WINDOW_MS` to the page's last item; `snap.skipped_in(from_ts, to_ts)` supplies the `skipped` items (kind `skipped`, `n` and `short` `None`, `project` `None` because `skipped_claims` stores none; filtered out when a project filter is given) and demotes a `fix` whose id is a skipped `action_id` to `run`. `sessions` use ledger rows only (skipped claims neither extend nor split a session; stated on the page).
   - `Snapshot::project_events_in(projects: &[String], kinds: &[&str], from_ts, to_ts, after, limit)`: same as `events_in` plus `project IN (...)` (bind parameters), using `events_project_ts`.
   - `Snapshot::watermarks(&self) -> Result<Vec<(String, i64)>, StoreError>`.
 
@@ -361,7 +378,11 @@ And in `status.rs`:
     // serialize the page to JSON and assert it contains no key "cmd_hash","file_hash","sha","text"
 }
 #[test] fn fix_marking_matches_scored_claims_with_the_fail_pass_loop_reason() {
-    // same event table as the Task 2 count test; set of items with kind "fix" ts == set of claim ts with that reason
+    // same event table as the Task 2 count test; set of items with kind "fix" ts == set of ledger claim ts with that reason
+}
+#[test] fn a_skipped_claim_is_its_own_row_and_a_skipped_fix_is_not_a_fix() {
+    // fixture store with one skipped claim (the fixing run of a loop): the page has one item kind "skipped" at its ts,
+    // the run's own item has kind "run" (not "fix"), and no item with kind "fix" exists for it; with a project filter no "skipped" item
 }
 #[test] fn spans_become_agent_working_and_away_bars() {
     // agent_busy s=10..20 -> kind "agent_working", end_ts; idle -> "away"; agent_output is omitted
@@ -405,7 +426,7 @@ And in `status.rs`:
   - Every response (any status) carries the headers the server adds (Task 7); `Api` returns them in `Response` via a `headers()` method so tests can check them: `Content-Security-Policy` (exact string from Global Constraints), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and for `/api/` `Cache-Control: no-store`. No `Access-Control-*` header is ever produced (test asserts the header list has none).
   - Project key resolution: `fn project_key_to_ids(names: &BTreeMap<String,String>, key: &str) -> Vec<String>`.
 
-- [ ] **Step 1: Write the failing tests** in `api.rs` using a temp database built by `Store::open` and the test-support builders (a fixture with 3 final claims, one fail→pass loop, 2 projects):
+- [ ] **Step 1: Write the failing tests** in `api.rs` using a temp database built by `Store::open` and the test-support builders (a fixture with 3 final claims, one fail→pass loop, 2 projects, plus one skipped claim recorded through `append_ledger`'s `skips`; `/api/hours` returns it as `no_presence` and `/api/replay` as a `skipped` item):
 
 ```rust
 #[test] fn foreign_host_is_403_and_never_opens_the_database() {
@@ -541,9 +562,9 @@ test("poll's stop function ends all further calls", async () => {});
 - `Overview` (default view, three cards in a CSS grid, each a `<section aria-labelledby>`):
   - **Bugs fixed**: the number, "Average time from failure to fix: 12 min" (or "No fixed bugs in this period yet. A fix is a failing test run that later passes after you did something in between."), and a sparkline-free list of the last 5 fixes (time, project, duration). Period selector: `<select>` with 7, 28, 90 days.
   - **Prompts that used what you saw**: two figures side by side ("after a failing run: 62 %", "other prompts: 41 %") each as text plus a horizontal bar with the number printed; below, the definition text from `informed_pm_threshold` and `window_ms`, the limits paragraph from Task 3, and when `enough` is false "Not enough failing runs yet to compare (5 needed, 2 so far)".
-  - **Time Tally removed**: "Of the time between your actions, N min was not counted", the `removed_by` rows as a table ("while you were away from the keyboard", "while the agent worked and you were idle", "both"), the `capped` row ("N min exceeded the cap for that kind of action and is unverified"), and the note that a gap over an hour is never counted at all (`away_runs` times).
+  - **Time Tally removed**: "Of the time between your actions, N min was not counted", the `removed_by` rows as a table ("while you were away from the keyboard", "while the agent worked and you were idle", "both"), the `capped` row ("N min exceeded the cap for that kind of action and is unverified"), and the note that a gap over an hour is never counted at all (`away_runs` times); a separate row "no presence coverage, not counted" from `no_presence` ("N min of actions could not be checked against your keyboard presence"), never listed as verified time or inside the removed total. The bugs card shows "N skipped (no presence coverage)" when `skipped_fixes > 0`, not counted in the number.
 - `TimeView`: stacked-by-project daily bars from `hours` with verified in the solid fill and unverified hatched (a pattern, not colour alone), a legend, and `DataTable` under the chart (day, project, verified, unverified, removed). A project selector and the 7/28/90 selector. Verified and unverified are different series and never summed in any label.
-- `Replay`: left, the session list (`<ul>` of buttons: project, date, start to end, verified minutes); right, the `Timeline`: a vertical `<ol>` of items, each `<li>` with time, an icon with a text label (prompt, run, error, fix, commit, edit, interrupt, approval, denial), the attached numbers, and bars for `agent_working` and `away`. A "Load more" button follows `next`. Items already shown are never reordered when new data arrives; new items append and a polite live region announces "N new moments". A panel "What you see here and what you do not" repeats the will/will-not text of Task 5.
+- `Replay`: left, the session list (`<ul>` of buttons: project, date, start to end, verified minutes); right, the `Timeline`: a vertical `<ol>` of items, each `<li>` with time, an icon with a text label (prompt, run, error, fix, commit, edit, interrupt, approval, denial, skipped as "no presence coverage"), the attached numbers, and bars for `agent_working` and `away`. A "Load more" button follows `next`. Items already shown are never reordered when new data arrives; new items append and a polite live region announces "N new moments". A panel "What you see here and what you do not" repeats the will/will-not text of Task 5.
 - `DataTable`: a real `<table>` with `<caption>`, `<th scope>`; every chart has one (it is the chart's text alternative; the SVG gets `role="img"` and `aria-labelledby` pointing at a title and `aria-describedby` at the table).
 - Keyboard: all interactive elements are native (`a`, `button`, `select`); the session list and "Load more" are reachable by Tab; focus moves to the `h2` of a view after navigation (`tabindex="-1"` and `.focus()`); no keyboard trap.
 
@@ -558,6 +579,7 @@ test("a project with no fail-pass loops says so, shows 0 fixed and no average, a
 test("average time to fix is formatted from milliseconds", () => {});
 test("prompt comparison shows not-enough-yet below 5 prompts and prints the thresholds from the response", () => {});
 test("removed time table shows each reason with minutes and the capped row separately", () => {});
+test("no presence coverage is its own row, not in verified or removed totals", () => {});
 test("time view keeps verified and unverified as separate series and table columns", () => {});
 test("every chart has a data table and an accessible name", () => {});
 test("the whole app passes axe with no violations (rules: all except color-contrast, which happy-dom cannot compute)", async () => {
@@ -587,7 +609,7 @@ test("changing the period requests new edges and from/to for the local calendar"
 ### Task 10: End-to-end test, CI, measurements, manual checklist
 
 **Files:**
-- Create: `dashboard/fixtures/seed.ndjson` (about 60 events across 3 days and 2 projects; includes two fail→pass loops in one project and none in the other; every `cmd_hash`/`file_hash`/`sha` is a fixed hex string; no text), `dashboard/e2e/dashboard.e2e.test.ts`, `dashboard/e2e/gen-large.ts` (writes a 2,000,000-event NDJSON for the manual measurement), `.github/workflows/dashboard.yml`
+- Create: `dashboard/fixtures/seed.ndjson` (about 60 events across 3 days and 2 projects; includes two fail→pass loops in one project and none in the other, and one claim with no presence coverage (presence required, a gap in `coverage`) that the e2e test sees as "no presence coverage" and not in verified time; every `cmd_hash`/`file_hash`/`sha` is a fixed hex string; no text), `dashboard/e2e/dashboard.e2e.test.ts`, `dashboard/e2e/gen-large.ts` (writes a 2,000,000-event NDJSON for the manual measurement), `.github/workflows/dashboard.yml`
 - Modify: none besides `dashboard/dist` if the drift check finds a change
 
 **End-to-end test (`bun run e2e`):** in `beforeAll`, make a temp home; run the real binary (`cargo build -p tally-daemon` was done by the workflow; the test uses `../target/debug/tally` or `TALLY_BIN`): `tally ingest fixtures/seed.ndjson --source seed`, `tally project add` is not needed (events carry project ids), `tally finalize`; spawn `tally dashboard --port 0 --no-open`, read the URL from stdout; register `happy-dom` `Window` with `url` set to that URL and `fetch` set to the real `fetch`, load the served `/` HTML, run its `main.js` from the served `/main.js` by `window.eval`, wait for the app.

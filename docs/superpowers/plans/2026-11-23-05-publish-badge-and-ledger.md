@@ -20,7 +20,7 @@
 - No tokens in config or in the database. Authentication is whatever `git push` already has (credential manager, `gh auth setup-git`, SSH). The daemon runs `git` with `GIT_TERMINAL_PROMPT=0` and `GCM_INTERACTIVE=never` so it can never hang on a prompt.
 - Never force-push, never rewrite published history. The remote branch is only ever extended.
 - Publishing by the daily job is off unless `[publish] enabled = true` in `<home>/config.toml` (single publisher, see Decisions). `tally publish` run by hand works regardless of `enabled`, so the first publish can be checked before turning the daily job on.
-- Badge JSON (contract C8): `{"color":"blue","label":"tracked with Tally","message":"<N.N> h","schemaVersion":1}`, verified seconds only, all-time, summed over every published chain of the project, one decimal, rounded half up with integer arithmetic (no floats).
+- Badge JSON (contract C8): `{"color":"blue","label":"tracked with Tally","message":"<N.N> h","schemaVersion":1}`, verified seconds only, all-time, summed over every published chain of the project, one decimal, floored to one decimal, never above verified time (ruling 9): `floor(verified_s / 360) / 10` hours, integer arithmetic (no floats).
 - A failure in publishing never stops `tally run`, never touches the main ledger or events, and is reported on stderr.
 - Everything compiles and tests pass on Windows, macOS and Linux. Tests that need git use a local bare repository as the remote and return early (printing a note) if `git --version` fails.
 
@@ -58,15 +58,15 @@ README.md                       badge line and "How this badge is made"
 3. **Caching:** `raw.githubusercontent.com` caches for about 5 minutes and shields.io caches endpoint badges for at least 5 minutes; GitHub's image proxy may add more. A badge that lags by roughly 10 to 15 minutes is expected and irrelevant for a daily job. The README note says so.
 4. **Published chains are derived from main-ledger rows, not re-scored.** The published table stores `main_seq` (the main-ledger row an entry came from) so the two ledgers can be proven consistent, and so a name registered later still picks up older claims.
 5. **Single publisher per project, enforced by a prefix check, not a lock.** `[publish] enabled` defaults to false; the machine that publishes is the one with it set. A second machine with the same name is refused (`RemoteDiverged`), not merged.
-6. **Ruleset bump on the main ledger is guarded, not migrated.** `finalize` refuses to append across a ruleset change with an actionable error. Starting a new main chain needs a decision about re-scoring history that belongs to the plan that bumps the ruleset. The published side already supports it (chains are per ruleset), so that plan only has to change finalize.
+6. **Ruleset bump on the main ledger is guarded, not migrated.** `finalize` refuses to append across a ruleset change with an actionable error (`RulesetChanged`, kept here). Plan 10 owns the main-ledger epoch change after a bump (new chain at `GENESIS_HASH`). Starting a new main chain needs a decision about re-scoring history that belongs to the plan that bumps the ruleset. The published side already supports it (chains are per ruleset), so that plan only has to change finalize.
 7. **Failure retry:** a failed publish is retried at most once per hour; the day counts as done only after a successful publish (including a successful no-op).
 8. **`tally publish` ignores `enabled`**; the daily job in `tally run` honors it.
 
 ## Assumes from earlier plans
 
-- Plan 03: `crates/tally-daemon/src/config.rs` with a loader that reads `<home>/config.toml`, rejects unknown keys, and a `Config` struct to which each feature adds a table; `crates/tally-daemon/src/run.rs` with the `tally run` loop that polls sources, appends, sets watermarks and calls `finalize` once per iteration, with the current time in ms available per iteration. If names differ, adapt the two small edits in Tasks 6 and 7; nothing else depends on them.
+- Plan 03: `crates/tally-daemon/src/config.rs` with a loader that reads `<home>/config.toml`, rejects unknown keys, and a `Config` struct to which each feature adds a table; `crates/tally-daemon/src/run.rs` with the `tally run` loop that polls sources, appends, sets watermarks and calls `finalize` once per iteration, with the current time in ms available per iteration (ruling 6: `run_loop(store, cfg, home, stop)` plus a list of per-tick hooks; plan 03 defines the hook type). This plan assumes plan 03's names and registers the publish tick through that hook list; it does not edit the loop body. If names differ, adapt only the registration in Task 7 and the config table in Task 6.
 - Plan 04: projects (worktrees and clones) register with the same public name through `register_project`; this plan only reads `project_names()`.
-- Code on `main` today (verified): `Store` with `ledger()`, `project_names()`, `append_ledger(entries, finalized_through, scored_events)`; triggers `ledger_no_update` and `ledger_no_delete`; `meta(key TEXT PRIMARY KEY, value INTEGER)`; `verify_ledger(&Store)`; `main.rs` opens the store before dispatching every command (Task 4 changes that for `verify-published`). `finalize` replaces a claim's project with its public name only when registered at finalize time, so older main-ledger rows can carry the local id.
+- Code on `main` today (verified): `Store` with `ledger()`, `project_names()`, `append_ledger(entries, finalized_through, scored_events, skips)` (four arguments, added by plan 04 Task 1; this plan runs after plan 04 and assumes it is merged, and passes `&[]` for `skips`; the three-argument form no longer exists); triggers `ledger_no_update` and `ledger_no_delete`; `meta(key TEXT PRIMARY KEY, value INTEGER)`; `verify_ledger(&Store)`; `main.rs` opens the store before dispatching every command (Task 4 changes that for `verify-published`). `finalize` replaces a claim's project with its public name only when registered at finalize time, so older main-ledger rows can carry the local id.
 
 ---
 
@@ -84,7 +84,7 @@ README.md                       badge line and "How this badge is made"
 ```rust
 #[test] fn finalize_refuses_to_append_across_a_ruleset_change() {
     let mut s = Store::open_in_memory().unwrap();
-    s.append_ledger(&[old_ruleset_entry()], 5, 0).unwrap();
+    s.append_ledger(&[old_ruleset_entry()], 5, 0, &[]).unwrap();
     s.append_events(&[prompt("a", 10, 600)]).unwrap();
     s.set_watermark("src", 10_000_000).unwrap();
     assert!(matches!(finalize(&mut s),
@@ -163,7 +163,7 @@ BEGIN SELECT RAISE(ABORT, 'published ledger is append-only'); END;
     assert_eq!(s.meta_get("k").unwrap(), None);
     s.meta_set("k", 7).unwrap(); s.meta_set("k", 8).unwrap();
     assert_eq!(s.meta_get("k").unwrap(), Some(8));
-    s.append_ledger(&[entry("a1", GENESIS_HASH)], 10, 0).unwrap();
+    s.append_ledger(&[entry("a1", GENESIS_HASH)], 10, 0, &[]).unwrap();
     assert_eq!(s.ledger_rows().unwrap()[0].0, 1);
 }
 ```
@@ -190,7 +190,7 @@ BEGIN SELECT RAISE(ABORT, 'published ledger is append-only'); END;
   - `pub fn check(store: &Store) -> Result<(), PublishError>`: runs `verify_ledger(store)?`; then for every published project and every stored row: the main row with that `main_seq` exists and matches on `(action_id, ts, kind, verified_s, unverified_s, reasons, features, ruleset)` (else `Inconsistent { what: "main row differs" }` or `"main row missing"`), the entry's project is a valid public name that the registry maps to the main row's project (else `Inconsistent { what: "project mapping" }`), and each `(project, ruleset)` chain passes `verify_chain(.., GENESIS_HASH)` (else `PublishedChain`).
   - `pub fn sync(store: &mut Store, apply: bool) -> Result<Vec<PublishedRow>, PublishError>`: `check`, then `pending`; when `apply` is true, `append_published(&rows)`, retrying the whole body up to 3 attempts in total on `StoreError::ChainBroken` or a `Sqlite` constraint error (another process synced first). Returns the rows that were (or, with `apply = false`, would be) appended.
   - `pub fn verified_seconds(rows: &[PublishedRow]) -> u64` (sum of `entry.verified_s`).
-  - `pub fn hours_message(verified_s: u64) -> String`: `tenths = (verified_s * 10 + 1800) / 3600`, formatted `"{tenths/10}.{tenths%10} h"`.
+  - `pub fn hours_message(verified_s: u64) -> String`: `tenths = verified_s / 360` (integer division, floor), formatted `"{tenths/10}.{tenths%10} h"`.
   - `pub fn badge_json(verified_s: u64) -> String`: `serde_json::to_string` of an object with `schemaVersion` 1, `label` "tracked with Tally", `message` = `hours_message`, `color` "blue", followed by a newline. serde_json sorts the keys, so the bytes are stable.
 
 - [ ] **Step 1: Write the failing tests** in `published.rs`. Helper `store_with_ledger(name: Option<&str>)`: a store with `prompt("a", 0, 600)` and `edit("b", 100_000)` (from `test_support`, project `"p1"`), `register_project("p1", "C:/r", name)` when `name` is `Some`, watermark `1_000_000`, then `finalize`.
@@ -262,14 +262,16 @@ BEGIN SELECT RAISE(ABORT, 'published ledger is append-only'); END;
     assert!(valid_public_name("sectersion/tally"));
     // a registered bad name: sync returns Err(BadName(..)) and writes nothing
 }
-#[test] fn badge_hours_round_half_up_to_one_decimal() {
+#[test] fn badge_hours_floor_to_one_decimal() {
     assert_eq!(hours_message(0), "0.0 h");
-    assert_eq!(hours_message(179), "0.0 h");
-    assert_eq!(hours_message(180), "0.1 h");      // 0.05 h rounds up
+    assert_eq!(hours_message(359), "0.0 h");
+    assert_eq!(hours_message(360), "0.1 h");      // never rounds up
+    assert_eq!(hours_message(719), "0.1 h");
+    assert_eq!(hours_message(720), "0.2 h");
     assert_eq!(hours_message(3600), "1.0 h");
     assert_eq!(hours_message(45_000), "12.5 h");
     assert_eq!(badge_json(660),
-        "{\"color\":\"blue\",\"label\":\"tracked with Tally\",\"message\":\"0.2 h\",\"schemaVersion\":1}\n");
+        "{\"color\":\"blue\",\"label\":\"tracked with Tally\",\"message\":\"0.1 h\",\"schemaVersion\":1}\n");
 }
 ```
 
@@ -327,7 +329,7 @@ Fill in the three tests sketched as comments; they must assert exactly as descri
     // publish_once -> pushed == true, report.projects[0].total_entries == 2
     // clone the bare remote into a fresh tempdir (git clone -b tally-data), read owner/repo/ledger-2026.11-0.json
     // verify_published_json(text) is Ok with entries == 2 and project "owner/repo"
-    // owner/repo/badge.json == badge_json(220)
+    // owner/repo/badge.json == badge_json(220) (message `0.0 h`, floor(220/360) = 0)
     // the clone contains no other top-level entries than "owner" (and .git)
     // `git log --format=%an%n%s` shows author "tally" and a subject with no project id or path
 }
@@ -371,7 +373,7 @@ Fill in the three tests sketched as comments; they must assert exactly as descri
 ### Task 6: `tally publish [--dry-run]` and config
 
 **Files:**
-- Modify: `crates/tally-daemon/src/config.rs` (plan 03), `crates/tally-daemon/src/main.rs`, `crates/tally-daemon/tests/cli.rs`
+- Modify: `crates/tally-daemon/src/config.rs` (plan 03), `crates/tally-daemon/src/main.rs`, `crates/tally-daemon/tests/cli.rs`, `docs/spec/scoring.md`
 
 **Interfaces:**
 - Config: a `[publish]` table in `<home>/config.toml` with keys `enabled` (bool, default false), `remote` (string, optional), `branch` (string, default `tally-data`). Unknown keys are an error (rule C5). `Config` gets a field `publish: PublishConfig` (derive `Deserialize` with `deny_unknown_fields` on `PublishConfig`; if plan 03's loader uses another mechanism, follow it). There is no key for a token or password, by design.
@@ -385,11 +387,12 @@ project owner/repo: 2 new entries, 2 total, 0.1 h
 
 with `would write` for `--dry-run` and `wrote` otherwise, followed by `pushed` or `nothing to push` (not printed for `--dry-run`, which ends with `dry run: nothing written, nothing pushed`). With no named project: `no named projects; nothing to publish`. A `PublishFail` exits non-zero with its message on stderr. Also prints the badge JSON for each project in dry-run mode so the maintainer sees the exact bytes.
 
-- [ ] **Step 1: Write the failing tests** in `tests/cli.rs`: build a home with the lunch-scenario events (as in `lunch_scenario_end_to_end`), `project add <tempdir with .git> --name owner/repo` and give the events that project id (or ingest events whose `project` is the id printed by `project add`), `finalize`; then `publish --dry-run`: exit 0, stdout contains `project owner/repo: 2 new entries` and `"message":"0.2 h"` and `dry run`; `tally status` afterwards unchanged; `publish_ledger` rows not created (assert by running `publish --dry-run` twice with identical output). A config file with `[publish]\nbogus = 1\n` makes `publish` exit non-zero naming `bogus`. A real publish against a local bare remote (config `remote = "<path>"`) prints `pushed`, and a second run prints `nothing to push`. Skip the bare-remote test when git is missing.
+- [ ] **Step 1: Write the failing tests** in `tests/cli.rs`: build a home with the lunch-scenario events (as in `lunch_scenario_end_to_end`), `project add <tempdir with .git> --name owner/repo` and give the events that project id (or ingest events whose `project` is the id printed by `project add`), `finalize`; then `publish --dry-run`: exit 0, stdout contains `project owner/repo: 2 new entries` and `"message":"<hours_message of the scenario's verified_s>"` (floor rule; compute from the scenario) and `dry run`; `tally status` afterwards unchanged; `publish_ledger` rows not created (assert by running `publish --dry-run` twice with identical output). A config file with `[publish]\nbogus = 1\n` makes `publish` exit non-zero naming `bogus`. A real publish against a local bare remote (config `remote = "<path>"`) prints `pushed`, and a second run prints `nothing to push`. Skip the bare-remote test when git is missing.
 - [ ] **Step 2:** Run `cargo test -p tally-daemon --test cli publish`. Expected: FAIL.
 - [ ] **Step 3:** Implement. `main.rs` stays argument parsing and printing; the report formatting lives in a small `PublishReport::render_text(dry_run: bool) -> String` in `publish.rs`.
 - [ ] **Step 4:** Run `cargo test -p tally-daemon` and `cargo clippy -p tally-daemon --all-targets`. Expected: PASS, no warnings.
-- [ ] **Step 5:** Commit: `feat(daemon): tally publish command and [publish] config`.
+- [ ] **Step 4b (spec amendment, N4):** edit `docs/spec/scoring.md` §6 (ledger entry): change the `project` field (`"<server project id>"`, "Local project id") to the public project name (`owner/repo`), not the server project id, since published entries carry the public name. This plan makes the edit; plan 06 T2 only verifies it is present.
+- [ ] **Step 5:** Commit (include `docs/spec/scoring.md`): `feat(daemon): tally publish command and [publish] config`.
 
 ---
 
@@ -404,7 +407,7 @@ with `would write` for `--dry-run` and `wrote` otherwise, followed by `pushed` o
   - `pub fn local_day_number(now: chrono::DateTime<chrono::Local>) -> i64`: `year * 10000 + month * 100 + day` (for example `20261123`). The caller passes `chrono::Local::now()`; tests pass fixed values.
   - `pub struct Scheduler { last_failure_ms: Option<i64> }` with `Scheduler::new()` and `pub fn due(&self, store: &Store, today: i64, now_ms: i64, enabled: bool) -> Result<bool, StoreError>`: false if `!enabled`; false if `meta_get("last_publish_day") == Some(d)` with `d >= today`; false if `last_failure_ms` is within `RETRY_MS` of `now_ms`; else true. So a day missed while the daemon was off (`d < today`) is caught up at next start, once, not once per missed day.
   - `pub fn tick(&mut self, store: &mut Store, cfg: &PublishConfig, home: &Path, today: i64, now_ms: i64)`: if `due`, call `publish_once(.., false)`. On `Ok`: `meta_set("last_publish_day", today)`, clear `last_failure_ms`, print one line to stderr only if something was pushed (`published N entries`). On `Err`: set `last_failure_ms = Some(now_ms)` and print `publish failed: <error>` to stderr. It never returns an error and never panics on a publish failure.
-- `run.rs`: create one `Scheduler` before the loop and call `scheduler.tick(&mut store, &config.publish, &home, local_day_number(chrono::Local::now()), now_ms)` once per iteration, after `finalize`. The call is cheap when not due (one meta read).
+- `run.rs`: register one publish tick in plan 03's per-tick hook list (run by `run_loop` after `finalize` each iteration). The hook owns one `Scheduler` and calls `scheduler.tick(&mut store, &config.publish, &home, local_day_number(chrono::Local::now()), now_ms)`. The loop body is not edited. The call is cheap when not due (one meta read).
 
 - [ ] **Step 1: Write the failing tests** in `publish.rs` (fixed `today`, `now_ms`; named store and a bare remote from Task 5):
 
@@ -433,7 +436,7 @@ with `would write` for `--dry-run` and `wrote` otherwise, followed by `pushed` o
 ```
 
 - [ ] **Step 2:** Run `cargo test -p tally-daemon scheduler runs_once`. Expected: FAIL.
-- [ ] **Step 3:** Implement `Scheduler` and wire `run.rs`. If `run.rs` has a test with a fake clock, add one assertion there that a loop iteration with `publish.enabled = false` performs no git call (for example `cfg.remote` pointing at a nonexistent path and the loop still returns Ok).
+- [ ] **Step 3:** Implement `Scheduler` and register its hook in `run.rs`. If `run.rs` has a test with a fake clock, add one assertion there that a loop iteration with `publish.enabled = false` performs no git call (for example `cfg.remote` pointing at a nonexistent path and the loop still returns Ok).
 - [ ] **Step 4:** Run `cargo test -p tally-daemon`. Expected: PASS, no warnings.
 - [ ] **Step 5:** Commit: `feat(daemon): daily publish inside tally run with catch-up and retry`.
 

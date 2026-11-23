@@ -4,7 +4,7 @@
 
 **Goal:** `tally run` polls event sources on a timer, stores their events, moves watermarks, persists per-source cursors and finalizes claims. The first source reads Claude Code session logs (`~/.claude/projects/<dir>/*.jsonl`) into `prompt`, `interrupt`, `tool_decision`, `agent_output`, `agent_busy`, and agent-initiated `test_run`/`commit` events, with `relevance_pm` and `novelty_bytes` computed locally.
 
-**Architecture:** A `Source` trait (contract C1) and a runner in `source.rs`; a `source_state` table in the store; a `config.toml` loader; and a `claude_code` module split into a pure line classifier, a complete-line file tailer (byte cursors in source state), and a per-session state machine that emits events. Text is read, turned into numbers, and dropped in memory.
+**Architecture:** A `Source` trait (contract C1) in `source.rs` and a runner with per-tick hooks in `run.rs`; a `source_state` table in the store; a `config.toml` loader; and a `claude_code` module split into a pure line classifier, a complete-line file tailer (byte cursors in source state), and a per-session state machine that emits events. Text is read, turned into numbers, and dropped in memory.
 
 **Tech Stack:** existing crate dependencies, plus `tally-scoring` feature `text`, `serde = { version = "1", features = ["derive"] }`, `toml = "0.8"`, `ctrlc = "3"`.
 
@@ -38,7 +38,8 @@ docs/spec/scoring.md                                 §2 `id` row amended (Task 
 crates/tally-daemon/
   Cargo.toml                                         + tally-scoring "text", serde, toml, ctrlc
   src/store.rs                                       source_state table, get_state/set_state, WAL
-  src/source.rs                                      Source, Poll, SourceState, SourceError, run_once, run_loop
+  src/source.rs                                      Source, Poll, SourceState, SourceError, now_ms
+  src/run.rs                                         TickHook, HookError, run_once, run_loop, sources, hooks
   src/config.rs                                      Config from <home>/config.toml, unknown keys rejected
   src/project.rs                                     + project_for_dir (Task 11)
   src/claude_code/mod.rs                             ClaudeCode: Source impl, file discovery, wiring
@@ -70,7 +71,7 @@ crates/tally-daemon/
 3. **Human tool decision** = a `permissionDecision` whose `source` is not `config` (observed: `config` for mode, rule and classifier auto-decisions; `user_temporary` for a user click). `accept` maps to `approve`, `reject` to `deny`. Auto decisions produce nothing. The spike lists every observed `source` value.
 4. **Interrupt** = a non-sidechain `user` entry with no `toolUseResult` whose first text block starts with `[Request interrupted by user` (observed shape: text content, no `origin`). Confirmed or corrected by the spike.
 5. **Agent busy span** = human prompt `ts` to the `ts` of the turn's `system`/`turn_duration` entry. A turn without `turn_duration` for `OPEN_SPAN_MAX_MS` (6 h) is closed at its last seen entry, so a crashed session cannot hold the horizon forever.
-6. **Agent test/commit detection** from Bash `tool_use.input.command`, using a fixed prefix list (Task 10). The log has no commit sha, so `sha = "claude:" + <tool_use id>` and `lines_changed = 0`; plan 04's git source records real commits and supersedes this.
+6. **Agent test/commit detection** from Bash `tool_use.input.command`, using a fixed prefix list (Task 10). The log has no commit sha, so `sha = "claude:" + <tool_use id>` and `lines_changed = 0`; plan 04's git source records real commits and supersedes this. Plan 04 matches this event by `by = agent` plus a time window (the sha does not matter) and gates its own commits on this source's watermark (README ruling 1), so the watermark must stay below any pending Bash `git commit` tool_use (Decision 9, tested in Task 10).
 7. **Projects:** an event's `project` is the local id of `find_git_root(cwd)`, `None` outside a repo. Nothing is auto-registered; `finalize` already leaves unnamed ids as they are.
 8. **Config keys** (all optional): `[run] interval_secs = 15`; `[claude_code] enabled = true`, `projects_dir = "<user home>/.claude/projects"`.
 9. **Watermark** = `min(now - WRITE_SLACK_MS, open turn starts - 1, pending Bash tool_use ts - 1)` with `WRITE_SLACK_MS = 120 s`, so entries whose timestamp is earlier than their flush, and a partial last line, cannot fall under it. Claims therefore finalize at least about 4 minutes after they happen.
@@ -79,7 +80,7 @@ crates/tally-daemon/
 ## Source authoring notes (put this text in the `source.rs` module doc)
 
 - A source that first appears with a watermark below `finalized_through` has promised nothing about the past. Any event it emits at or before `finalized_through` is rejected by `append_events` with `LateEvent`, and the batch is lost. The runner then drops that batch but still persists the source's state, so the source does not resend it forever, and prints `source <id>: dropped <n> late events`.
-- Sources never call `finalize` and never touch the store; they read and write cursors only through `SourceState`.
+- Sources never call `finalize` and never touch the store; they read and write cursors only through `SourceState`. Extra per-source data (coverage, health, agent writes) goes through default trait methods that the runner in `run.rs` persists (README ruling 5).
 - Event ids must be derived from the log, never random, so a re-read is idempotent.
 
 ---
@@ -141,12 +142,12 @@ Whole-map get/set (rather than one key per call) lets the runner load a source's
 ### Task 3: Source contract and runner
 
 **Files:**
-- Create: `crates/tally-daemon/src/source.rs`
-- Modify: `crates/tally-daemon/src/lib.rs` (`pub mod source;`)
+- Create: `crates/tally-daemon/src/source.rs`, `crates/tally-daemon/src/run.rs`
+- Modify: `crates/tally-daemon/src/lib.rs` (`pub mod source; pub mod run;`)
 
 **Interfaces:**
 - Consumes: `Store::{append_events, set_watermark, get_state, set_state}`, `finalize`.
-- Produces (`source.rs`), contract C1 exactly:
+- Produces (`source.rs`), contract C1 exactly. Later plans add **default** methods to `Source` that the runner persists after `poll` (README ruling 5): `take_coverage` (plan 04), `take_health` and `take_agent_writes` (plan 08). This plan defines none of them; `run_once` step 3 is where they slot in.
 
 ```rust
 pub struct Poll { pub events: Vec<tally_scoring::Event>, pub watermark: Option<i64> }
@@ -158,12 +159,25 @@ pub trait Source {
     fn id(&self) -> &str;
     fn poll(&mut self, now_ms: i64, state: &mut dyn SourceState) -> Result<Poll, SourceError>;
 }
-#[derive(Debug, Default)]
-pub struct TickReport { pub added: usize, pub duplicates: usize, pub errors: Vec<String>, pub finalized: Option<FinalizeSummary> }
-pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], now_ms: i64) -> TickReport;
-pub fn run_loop(store: &mut Store, sources: &mut [Box<dyn Source>], interval: std::time::Duration, stop: &std::sync::atomic::AtomicBool);
 pub fn now_ms() -> i64; // SystemTime::now() since UNIX_EPOCH, in ms
 ```
+
+- Produces (`run.rs`, README ruling 6; plans 04, 05, 07, 08 and 12 use these names):
+
+```rust
+#[derive(thiserror::Error, Debug)] #[error("{0}")] pub struct HookError(pub String);
+/// Work done once per tick after `finalize` (plan 05: daily publish, plan 07: sync). Gets the store and `now_ms`.
+pub type TickHook = Box<dyn FnMut(&mut Store, i64) -> Result<(), HookError>>;
+#[derive(Debug, Default)]
+pub struct TickReport { pub added: usize, pub duplicates: usize, pub errors: Vec<String>, pub finalized: Option<FinalizeSummary> }
+pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut [TickHook], now_ms: i64) -> TickReport;
+// Task 5 adds, once `Config` exists:
+pub fn sources(cfg: &Config, home: &std::path::Path, store: &Store) -> Vec<Box<dyn Source>>;
+pub fn hooks(cfg: &Config, home: &std::path::Path) -> Vec<TickHook>;
+pub fn run_loop(store: &mut Store, cfg: &Config, home: &std::path::Path, stop: &std::sync::atomic::AtomicBool);
+```
+
+`sources` takes the store (read only) because plan 04's git source is built from `store.repos_to_poll()` and opens its own connection to the database file under `home`. Plans 05 and 07 push their hooks in `hooks`.
 
 `run_once`, per source in order (the part the signatures do not determine):
 1. `let mut st = store.get_state(id)` (a `BTreeMap`; a read error is pushed to `errors` and the source is skipped); `poll(now_ms, &mut st)`.
@@ -173,12 +187,13 @@ pub fn now_ms() -> i64; // SystemTime::now() since UNIX_EPOCH, in ms
    - `Err(StoreError::LateEvent { .. })`: push `"source <id>: dropped <n> late events"` (`n = p.events.len()`); still set the watermark and `set_state` (see the authoring notes).
    - any other error: push it; persist nothing (the events are re-emitted next tick and deduplicated).
 4. After all sources: `finalize(store)`; `Ok` goes in `finalized`, `Err` is pushed to `errors`.
+5. Then every hook in order: `hook(store, now_ms)`; an `Err(e)` is pushed as `"hook: <e>"` and the next hook still runs.
 
 Events are appended before state is persisted, so a crash in between only causes a re-read that the id dedup absorbs. `run_once` never returns early because of one source.
 
-`run_loop`: until `stop` is set: `run_once(.., now_ms())`, print each error to stderr, then sleep `interval` in slices of at most 200 ms, checking `stop` between slices. It returns after the tick in progress completes (graceful shutdown: no tick is cut in half).
+`run_loop` (Task 5): build `sources(cfg, home, store)` and `hooks(cfg, home)` once; until `stop` is set: `run_once(.., now_ms())`, print each error to stderr, then sleep `cfg.run.interval_secs` in slices of at most 200 ms, checking `stop` between slices. It returns after the tick in progress completes (graceful shutdown: no tick is cut in half).
 
-- [ ] **Step 1: Write the failing tests** in `source.rs`. Helper `struct Fake { id: &'static str, script: VecDeque<Result<Poll, SourceError>>, polls: usize }` whose `poll` increments `polls`, writes `state.set("polls", &polls.to_string())`, and pops the front of `script`. Events come from `crate::test_support::prompt`.
+- [ ] **Step 1: Write the failing tests** in `run.rs`. Helper `struct Fake { id: &'static str, script: VecDeque<Result<Poll, SourceError>>, polls: usize }` whose `poll` increments `polls`, writes `state.set("polls", &polls.to_string())`, and pops the front of `script`. Events come from `crate::test_support::prompt`.
 
 ```rust
 #[test] fn a_failing_source_does_not_stop_the_others() {
@@ -187,7 +202,7 @@ Events are appended before state is persisted, so a crash in between only causes
         Box::new(Fake::new("bad", vec![Err(SourceError::Other("boom".into()))])),
         Box::new(Fake::new("good", vec![Ok(Poll { events: vec![prompt("a", 0, 600)], watermark: Some(500_000) })])),
     ];
-    let r = run_once(&mut s, &mut srcs, 0);
+    let r = run_once(&mut s, &mut srcs, &mut [], 0);
     assert_eq!(r.added, 1);
     assert_eq!(r.errors, ["source bad: boom"]);
     assert!(s.get_state("bad").unwrap().is_empty());           // failed poll persists nothing
@@ -198,7 +213,7 @@ Events are appended before state is persisted, so a crash in between only causes
 #[test] fn no_watermark_leaves_the_horizon_alone() {
     let mut s = Store::open_in_memory().unwrap();
     let mut srcs: Vec<Box<dyn Source>> = vec![Box::new(Fake::new("x", vec![Ok(Poll { events: vec![], watermark: None })]))];
-    run_once(&mut s, &mut srcs, 0);
+    run_once(&mut s, &mut srcs, &mut [], 0);
     assert_eq!(s.horizon().unwrap(), None);
 }
 #[test] fn late_batch_is_dropped_but_state_moves_on() {
@@ -208,23 +223,30 @@ Events are appended before state is persisted, so a crash in between only causes
     crate::finalize::finalize(&mut s).unwrap();                // finalized_through = 1_000_000
     let mut srcs: Vec<Box<dyn Source>> = vec![Box::new(Fake::new("new",
         vec![Ok(Poll { events: vec![prompt("late", 10, 600)], watermark: Some(2_000_000) })]))];
-    let r = run_once(&mut s, &mut srcs, 0);
+    let r = run_once(&mut s, &mut srcs, &mut [], 0);
     assert_eq!(r.errors, ["source new: dropped 1 late events"]);
     assert_eq!(s.get_state("new").unwrap()["polls"], "1");
     assert_eq!(s.events().unwrap().len(), 1);
 }
-#[test] fn run_loop_returns_when_stopped() {
-    let stop = std::sync::atomic::AtomicBool::new(true);
+#[test] fn a_failing_hook_does_not_stop_the_next() {
     let mut s = Store::open_in_memory().unwrap();
-    let mut srcs: Vec<Box<dyn Source>> = vec![];
-    run_loop(&mut s, &mut srcs, std::time::Duration::from_secs(3600), &stop);  // must not hang
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+    let (a, b) = (seen.clone(), seen.clone());
+    let mut hooks: Vec<TickHook> = vec![
+        Box::new(move |_, now| { a.borrow_mut().push(now); Err(HookError("nope".into())) }),
+        Box::new(move |_, now| { b.borrow_mut().push(now); Ok(()) }),
+    ];
+    let r = run_once(&mut s, &mut [], &mut hooks, 7);
+    assert_eq!(r.errors, ["hook: nope"]);
+    assert_eq!(*seen.borrow(), [7, 7]);
+    assert!(r.finalized.is_some());
 }
 ```
 
-- [ ] **Step 2:** Run `cargo test -p tally-daemon source`. Expected: FAIL (module missing).
-- [ ] **Step 3:** Implement to the interfaces. Put the "Source authoring notes" section above in the module doc comment and the C1 watermark contract on the `Source` trait.
+- [ ] **Step 2:** Run `cargo test -p tally-daemon run::`. Expected: FAIL (modules missing).
+- [ ] **Step 3:** Implement to the interfaces (`sources`, `hooks`, `run_loop` wait for Task 5). Put the "Source authoring notes" section above in the `source.rs` module doc comment and the C1 watermark contract on the `Source` trait.
 - [ ] **Step 4:** Run `cargo test -p tally-daemon`. Expected: PASS, no warnings.
-- [ ] **Step 5:** Commit: `feat(daemon): source contract and poll runner`.
+- [ ] **Step 5:** Commit: `feat(daemon): source contract and run_once with tick hooks`.
 
 ---
 
@@ -289,12 +311,12 @@ pub fn load(home: &std::path::Path) -> Result<Config, ConfigError>;  // <home>/c
 ### Task 5: `tally run`
 
 **Files:**
-- Modify: `crates/tally-daemon/src/main.rs`, `crates/tally-daemon/src/source.rs`, `crates/tally-daemon/Cargo.toml` (add `ctrlc = "3"`), `crates/tally-daemon/tests/cli.rs`
+- Modify: `crates/tally-daemon/src/main.rs`, `crates/tally-daemon/src/run.rs`, `crates/tally-daemon/Cargo.toml` (add `ctrlc = "3"`), `crates/tally-daemon/tests/cli.rs`
 
 **Interfaces:**
-- Produces: subcommand `tally run [--interval-secs N] [--once]`. `--interval-secs` overrides `config.run.interval_secs`. `run` creates `<home>` the way `ingest` does. The source list is built in the library so the binary stays thin: `pub fn sources(cfg: &Config) -> Vec<Box<dyn Source>>` in `source.rs` (returns an empty list until Task 11).
-- `--once`: one `run_once(.., now_ms())`; prints `added <a>, duplicates <d>, final <total>, provisional <p>` (`0` for the last two if finalize failed); prints each error to stderr; exits 0 even when a source failed (a source failure is not a run failure); non-zero only when the config or store cannot be opened.
-- Without `--once`: `ctrlc::set_handler` sets a `static STOP: AtomicBool`; `run_loop`; on return prints `stopped`.
+- Produces: subcommand `tally run [--interval-secs N] [--once]`. `--interval-secs` overrides `config.run.interval_secs` (`main.rs` writes it into `cfg` before calling the library). `run` creates `<home>` the way `ingest` does. The source and hook lists are built in the library (`run.rs`, Task 3 signatures) so the binary stays thin: `sources(cfg, home, store)` returns an empty list until Task 11; `hooks(cfg, home)` returns an empty list (plans 05 and 07 add theirs). `run_loop(store, cfg, home, stop)` as described in Task 3.
+- `--once`: one `run_once(&mut store, &mut sources(&cfg, &home, &store), &mut hooks(&cfg, &home), now_ms())`; prints `added <a>, duplicates <d>, final <total>, provisional <p>` (`0` for the last two if finalize failed); prints each error to stderr; exits 0 even when a source failed (a source failure is not a run failure); non-zero only when the config or store cannot be opened.
+- Without `--once`: `ctrlc::set_handler` sets a `static STOP: AtomicBool`; `run_loop(&mut store, &cfg, &home, &STOP)`; on return prints `stopped`.
 
 - [ ] **Step 1: Write the failing tests** in `tests/cli.rs`:
 
@@ -310,7 +332,20 @@ pub fn load(home: &std::path::Path) -> Result<Config, ConfigError>;  // <home>/c
 }
 ```
 
-- [ ] **Step 2:** Run `cargo test -p tally-daemon --test cli`. Expected: FAIL (no `run` subcommand).
+Unit test in `run.rs`:
+
+```rust
+#[test] fn run_loop_returns_when_stopped() {
+    let stop = std::sync::atomic::AtomicBool::new(true);
+    let d = tempfile::tempdir().unwrap();
+    let mut s = Store::open_in_memory().unwrap();
+    let mut cfg = Config::default();
+    cfg.run.interval_secs = 3600; cfg.claude_code.enabled = false;
+    run_loop(&mut s, &cfg, d.path(), &stop);  // must not hang
+}
+```
+
+- [ ] **Step 2:** Run `cargo test -p tally-daemon --test cli` and `cargo test -p tally-daemon run::`. Expected: FAIL (no `run` subcommand, no `run_loop`).
 - [ ] **Step 3:** Implement. `main.rs` only parses arguments, loads config, opens the store and calls the library.
 - [ ] **Step 4:** Run `cargo test -p tally-daemon` and `cargo clippy -p tally-daemon --all-targets`. Expected: PASS, no warnings.
 - [ ] **Step 5:** Commit: `feat(daemon): tally run`.
@@ -386,7 +421,7 @@ pub enum Entry {
     ToolDecision { meta: Meta, decision: tally_scoring::Decision, n: usize }, // n = index within the entry
     ToolResult { meta: Meta, tool_use_id: String, is_error: bool, text: String },
     AssistantText { meta: Meta, text: String, n: usize },
-    ToolUse { meta: Meta, id: String, name: String, command: Option<String> },
+    ToolUse { meta: Meta, id: String, name: String, command: Option<String>, file_path: Option<String> },
     TurnEnd { meta: Meta },
 }
 #[derive(Debug, PartialEq)] pub enum LineError { Utf8, Json, Shape }
@@ -400,7 +435,7 @@ Rules (from `FORMAT.md`; correct them there first if the spike disagreed):
 - `user` with `origin.kind == "human"` and string (or text-block) content: `HumanPrompt`. Other `origin.kind` values (task notifications) and `turnOrigin: "sdk"`: nothing.
 - `user`, no `toolUseResult`, first text starting `[Request interrupted by user`: `Interrupt`.
 - `user` with `tool_result` items: one `ToolResult` per item (`text` = concatenated string content); plus `ToolDecision` when `permissionDecision.source != "config"` (`accept` to `Approve`, `reject` to `Deny`; unknown decision: nothing).
-- `assistant`: one `AssistantText` per `text` item; one `ToolUse` per `tool_use` item (`command` = `input.command` when it is a string). `thinking` items are ignored.
+- `assistant`: one `AssistantText` per `text` item; one `ToolUse` per `tool_use` item (`command` = `input.command` when it is a string; `file_path` = `input.file_path` for `Edit`, `Write`, `MultiEdit`, and `input.file_path` or `input.notebook_path` for `NotebookEdit`; confirm the key in the spike). `thinking` items are ignored.
 - `system` with `subtype: "turn_duration"`: `TurnEnd`.
 - `parse_rfc3339_ms`: `YYYY-MM-DDTHH:MM:SS[.fraction]Z` only (fraction truncated to ms), days-from-civil arithmetic, no dependency; anything else `None`.
 
@@ -588,6 +623,10 @@ pub struct Session {
     pub last_seen_ts: i64,
     pending: BTreeMap<String, Pending>,            // Bash tool_use id -> (meta, cmd_hash, Test|Commit)
     tail: ContextTail, last_output: String, last_error: String,
+    /// (tool_use ts, file_path) of agent Edit/Write/MultiEdit/NotebookEdit calls since the last drain. Memory only.
+    /// Plan 08 drains it into `Source::take_agent_writes` for its heartbeat agent-write filter (README ruling 7);
+    /// until then `ClaudeCode::poll` clears it after each poll.
+    pub agent_writes: Vec<(i64, String)>,
 }
 pub struct Ctx<'a> { pub project: Option<String>, pub vocab: &'a Vocab }
 impl Session {
@@ -609,6 +648,7 @@ pub fn cmd_hash(command: &str) -> String;              // lowercase hex SHA-256
 - `ToolUse` with `name == "Bash"` and `bash_kind(command) = Some(k)`: store `pending[id] = (meta, cmd_hash(command), k)`. The command string is dropped here.
 - `ToolResult` whose `tool_use_id` is pending: remove it; `Test` gives `test_run { cmd_hash, exit_code: is_error as i32, initiator: Agent }` at the tool_use `ts` (id from the tool_use entry: `claude:<s>:<uuid>:test_run`); `Commit` with `!is_error` gives `commit { sha: "claude:<tool_use id>", by: Agent, lines_changed: 0 }` at the tool_use `ts`. Any `ToolResult` with `is_error` sets `last_error = text`.
 - `TurnEnd`: if a turn is open, `agent_busy { end_ts: meta.ts }` at the open turn's ts, id `claude:<s>:<open uuid>:agent_busy`; clear it. No open turn (task-notification turns): nothing.
+- `ToolUse` with `name` in `Edit`, `Write`, `MultiEdit`, `NotebookEdit` and `Some(file_path)`: push `(meta.ts, file_path)` to `agent_writes`; no event.
 - Every entry updates `last_seen_ts = max(last_seen_ts, meta.ts)`.
 - `bash_kind`: trim, then `Commit` if it starts with `git commit`; `Test` if it starts with one of `cargo test`, `cargo nextest`, `npm test`, `npm run test`, `pnpm test`, `yarn test`, `bun test`, `pytest`, `python -m pytest`, `go test`, `dotnet test`, `make test`; else `None`. (Chained commands such as `cd x && cargo test` are not matched; noted under "Not in this plan".)
 
@@ -635,8 +675,13 @@ pub fn cmd_hash(command: &str) -> String;              // lowercase hex SHA-256
 #[test] fn agent_test_run_and_commit_come_from_bash_results() {
     /* ToolUse Bash "cargo test -p x" at 2_000 id "t1" -> limit() == 1_999 while pending;
        ToolResult t1 is_error:true -> TestRun { cmd_hash: cmd_hash("cargo test -p x"), exit_code: 1, initiator: Agent } at ts 2_000;
-       ToolUse "git commit -m x" id "t2" + ToolResult ok -> Commit { by: Agent, sha: "claude:t2", lines_changed: 0 };
+       ToolUse "git commit -m x" at 3_000 id "t2" -> limit() == 2_999 while pending (plan 04's git source gates on this
+       watermark, README ruling 1); ToolResult ok -> Commit { by: Agent, sha: "claude:t2", lines_changed: 0 } at ts 3_000;
        ToolUse "ls" -> nothing pending; no event contains the command text (serde_json::to_string(&out) has no "cargo") */
+}
+#[test] fn agent_file_edits_are_recorded_for_plan_08() {
+    /* ToolUse Edit with file_path Some("src/a.rs") at 4_000 -> agent_writes == [(4_000, "src/a.rs")], no event;
+       ToolUse Read with a file_path -> nothing recorded */
 }
 #[test] fn prompt_features_use_the_last_error() {
     /* ToolResult (not pending) is_error text "error: zebra_word failed", then HumanPrompt "why zebra_word"
@@ -657,7 +702,7 @@ pub fn cmd_hash(command: &str) -> String;              // lowercase hex SHA-256
 ### Task 11: The Claude Code source, project mapping, fixture end-to-end
 
 **Files:**
-- Modify: `crates/tally-daemon/src/claude_code/mod.rs`, `crates/tally-daemon/src/project.rs`, `crates/tally-daemon/src/source.rs` (`sources()` adds the Claude Code source when `cfg.claude_code.enabled`)
+- Modify: `crates/tally-daemon/src/claude_code/mod.rs`, `crates/tally-daemon/src/project.rs`, `crates/tally-daemon/src/run.rs` (`sources(cfg, home, store)` adds the Claude Code source when `cfg.claude_code.enabled`)
 - Create: `crates/tally-daemon/tests/claude_code.rs`
 
 **Interfaces:**
@@ -717,7 +762,7 @@ impl Source for ClaudeCode { fn id(&self) -> &str { "claude-code" } /* poll belo
 Also a unit test in `project.rs`: `project_for_dir(sub)` of a tempdir with `.git` equals `(root, project_id(root))`, and is `None` for a nonexistent path.
 
 - [ ] **Step 2:** Run `cargo test -p tally-daemon --test claude_code`. Expected: FAIL.
-- [ ] **Step 3:** Implement `project_for_dir`, `ClaudeCode`, and `sources()`.
+- [ ] **Step 3:** Implement `project_for_dir`, `ClaudeCode`, and the Claude Code entry in `run::sources`.
 - [ ] **Step 4:** Run `cargo test -p tally-daemon` and `cargo clippy -p tally-daemon --all-targets`. Expected: PASS, no warnings. CI (`.github/workflows/daemon.yml`) runs on three OSes; check `git` is on `PATH` there (it is on GitHub runners).
 - [ ] **Step 5: Manual check on the maintainer's machine** (record results in the PR description, numbers only): `tally project add C:/Users/Oliver/hc_bounty/tally --name sectersion/tally`; `tally run --interval-secs 15`; work in Claude Code for 10 minutes; Ctrl-C prints `stopped` after the current tick; `tally status` shows events and a horizon; `tally verify` prints `ok`. While `tally run` is running, `tally status` in a second terminal works (WAL).
 - [ ] **Step 6:** Commit: `feat(daemon): Claude Code session-log source`.

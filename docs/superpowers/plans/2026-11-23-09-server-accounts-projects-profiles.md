@@ -14,9 +14,9 @@
 
 From plan 06 (`docs/superpowers/plans/2026-11-23-06-server-core.md`):
 - `server/src/app.ts`: `createServer(deps: { sql: SQL; port: number }): Server`, using the `Bun.serve` `routes` table and a JSON 404 fallback. This plan adds routes there.
-- `server/src/db.ts`: `connect(url)` and `migrate(sql, dir)`, which apply `server/migrations/NNN_*.sql` in name order. This plan's migrations are `100_` to `103_` (`103_` only if Task 4 needs it), so they sort after any plan 06 file `0NN_`.
+- `server/src/db.ts`: `connect(url)` and `migrate(sql, dir)`, which apply `server/migrations/NNN_*.sql` in name order. This plan's migrations are `100_*.sql` to `103_*.sql` (three digits; `103_` only if Task 4 needs it), so they sort after any plan 06 file `0NN_`. Plan 10 continues at `104_submissions.sql` (ruling 4).
 - `server/migrations/001_init.sql` tables:
-  - `projects(id text pk, public_name text not null unique, owner_id text null, created_at)`. `owner_id` is the placeholder this plan fills.
+  - `projects(id text pk, public_name text not null unique, owner_id text null, created_at)`. `owner_id` is created by plan 06 (nullable); this plan fills it and adds the foreign key. URL `{project}` segments are the server `projects.id` (cross-plan ruling 11), never the public name.
   - `chains(id, project_id, ruleset, head_hash, count, verified_s)`, where `verified_s` is a running sum.
   - `ledger_entries(chain_id, seq, hash, prev_hash, action_id, ts, kind, verified_s, unverified_s, entry json, received_at)`. Note there is no `project_id`; join through `chains`.
   - `commits(id, project_id, hash, ts, received_at)`. These are C7 **hash commits** of the ledger head, not git commits. This plan calls git pushes **receipts** to keep the two apart.
@@ -24,13 +24,13 @@ From plan 06 (`docs/superpowers/plans/2026-11-23-06-server-core.md`):
   - The trigger function `tally_append_only()`.
 - `server/src/auth.ts`: `newToken()` (`"tly_" + base64url(32 bytes)`), `hashToken(token)` (hex SHA-256), and `requireToken(sql, req, projectId): Promise<{ tokenId: number }>` (`401` unknown or revoked, `403` wrong project).
 - `server/src/errors.ts`: `HttpError`, `json(status, body)`, `readJson(req)`, `parse(schema, value)`.
-- `server/src/ledger.ts`: `appendEntries(sql, projectId, body)` (one `sql.begin` transaction that locks the chain row) and `verifiedSeconds(...)`. The badge function `badge(seconds)` follows C8 with blue color, and its message is floored to a tenth of an hour.
+- `server/src/ledger.ts`: `appendEntries(sql, projectId, body)` (one `sql.begin` transaction that locks the chain row) and `verifiedSeconds(...)`. The badge function `badge(seconds)` follows C8 with blue color, and its message is `floor(verified_s / 360) / 10` hours, formatted with one decimal: floor to a tenth, never above verified time (ruling 9).
 - `server/src/ratelimit.ts`: an in-memory token bucket. This plan reuses it with new keys; it does not write a second limiter.
 - `server/src/log.ts`: `log(level, msg, fields)`, with redaction of named fields.
 - `server/test/helpers.ts`: `seed(sql, publicName?)` returns `{ projectId, token, publicName }`, and `start(sql)` returns `{ url, stop }`.
 - Spec §6, as amended by plan 06: an entry's `project` is the **public name**, and the hash covers it. A project's public name therefore can never change once entries exist.
 
-From plan 07: `tally login` reads a token from stdin, and the user gives `tally project link <path> --server-id <id>` from the web UI. This plan supplies that id on the project settings page, and adds the device flow (Task 4) that a later `tally login --browser` can use without changing plan 07's storage.
+From plan 07: `tally login` reads a token from stdin, and the user gives `tally project link <path> --server-id <id>` from the web UI. This plan supplies that id on the project settings page, and adds the device flow (Task 4) that `tally login --browser` (plan 12) uses, alongside plan 07's `tally login`, without changing plan 07's storage.
 
 ## Global Constraints
 
@@ -146,6 +146,7 @@ create table users (
   handle text,                                  -- public, set in settings; null until chosen
   display_name text,                            -- public
   profile_public boolean not null default true,
+  role text not null default 'user' check (role in ('user','reviewer','admin')),  -- plan 10 reviewer pages
   created_at timestamptz not null default now()
 );
 create unique index users_handle_lower on users (lower(handle));
@@ -171,6 +172,8 @@ create table oauth_states (
   - `getSession(sql, req): Promise<{ userId: string; csrf: string } | null>`, which ignores expired rows.
   - `requireUser(sql, req): Promise<{ userId: string; csrf: string }>`. With no session it throws `HttpError`: a `303` to `/auth/login?return_to=<path>` for `GET`, and `401` otherwise. Add an `HttpError` variant for a redirect (`location` header) if plan 06's has none.
   - `requireCsrf(cfg, req, s, form: FormData): void`, which throws `HttpError(403, {error:"csrf"})`.
+  - `requireRole(user: { role: string }, role: "reviewer" | "admin"): void` throws `HttpError(404)` unless `user.role === role` or `user.role === "admin"`. `requireUser` also returns `role`. Plan 10 calls it for reviewer pages.
+  - Granting a role: admin CLI `bun run user:role <handle> reviewer` (script `server/scripts/user-role.ts`, package.json script `user:role`; values `user|reviewer|admin`; updates `users.role` by lower(handle)). There is no web UI for roles. Add a test that `requireRole` rejects `user` and admits `admin`.
 - Routes:
   - `GET /auth/login?return_to=`: `return_to` must match `^/(?!/)` or becomes `/`. Inserts the `oauth_states` row and sends a `303` to `authorizeUrl`.
   - `GET /auth/callback?code&state`: `delete from oauth_states where state_hash = $1 and expires_at > now() returning *`. No row means `400`. Then `exchangeCode`, then `insert ... on conflict (hca_sub) do update set email, name, verification_status`. Then `createSession`, and a `303` to `return_to`.
@@ -241,6 +244,7 @@ create unique index projects_public_name_lower on projects (lower(public_name));
   - `POST /settings/handle` with form `handle`.
   - `POST /projects` with form `name`, which sends a `303` to `/p/{name}`.
   - `POST /p/:owner/:name/settings` with form `public=on|off` (owner only; otherwise `404`).
+  - `GET /v1/projects/:id/summary` (public projects only, else `404`; read-only JSON, `cache-control: public, max-age=60`): `{ id, public_name, owner_handle (null if the owner's profile is private), verified_s, unverified_s, last_commit_at (server `received_at` of the newest `push_receipts` row for the project, or null) }`, built from `projectHours`. Plan 10 should use this and the server-rendered project page `/p/:owner/:name`, not new queries. Add a test for private `404` and the seconds values.
   - `GET /p/:owner/:name/settings` (owner only) shows the server id with the exact command `tally project link <path> --server-id <id>` (plan 07), plus the device tokens for this project (Task 4).
 
 - [ ] **Step 1: Write the failing tests** in `server/test/projects.test.ts`. The helpers `user(sql, handle)` and `ledgerRows(sql, projectId, rows)` insert directly. Each test uses a random handle, so the database never needs cleaning.
@@ -314,7 +318,7 @@ create table device_codes (
 );
 ```
 
-- `auth.ts`, `requireToken(sql, req, projectId)`: a token with `project_id = projectId` passes, as before. A token with `project_id is null` passes only if `user_id` is the project's `owner_id`. Anything else is `403`. It is still one query (join `projects`).
+- `auth.ts`, `requireToken(sql, req, projectId)`: a token with `project_id = projectId` passes, as before. A token with `project_id is null` passes only if `user_id` is the project's `owner_id` (`projectId` is the server `projects.id`, ruling 11). Anything else is `403`. It is still one query (join `projects`).
 - `POST /v1/device/code` with `{ "device_name": "..." }` (zod strict) returns `200 { device_code, user_code, verification_uri: "<base>/device", verification_uri_complete: "<base>/device?code=<user_code>", expires_in: 600, interval: 5 }`.
 - `POST /v1/device/token` with `{ "device_code": "..." }`, all in one transaction with `select ... for update`:
   - unknown code, expired, or `consumed`: `400 {"error":"expired_token"}`
@@ -325,7 +329,7 @@ create table device_codes (
 - `GET /device?code=` (session): "Link device '<device_name>' to your Tally account? Check that this code matches your terminal: XXXX-XXXX", with Approve and Deny buttons and the `csrf` field.
 - `POST /device` with form `user_code`, `decision=approve|deny`, `csrf` (session plus CSRF). An unknown, expired, consumed or already decided code returns `400` "This code is no longer valid".
 - `GET /settings` (Task 9) lists the user's tokens (`label`, `created_at`, scope), each with `POST /settings/tokens/:id/revoke` (CSRF; owner only), which sets `revoked_at`.
-- Plan 07 hand-off: `tally login --browser` (a later change in plan 07 or 12) calls `/v1/device/code`, prints `user_code` and `verification_uri_complete`, polls `/v1/device/token` every `interval` s (adding 5 s on `slow_down`), and stores the token exactly where plan 07's stdin `tally login` stores it.
+- Plan 07 hand-off: this one device-code flow serves both `tally login` (plan 07) and `tally login --browser` (planned in plan 12, ruling 12). `--browser` calls `/v1/device/code`, prints `user_code` and `verification_uri_complete`, polls `/v1/device/token` every `interval` s (adding 5 s on `slow_down`), and stores the token exactly where plan 07's stdin `tally login` stores it.
 
 - [ ] **Step 1: Write the failing tests** in `server/test/device.test.ts`. The helpers are `poll(code)`, `approveAs(user, userCode)` (signs in through a test session and posts the form with csrf and Origin), and `rewindPoll(code)` (`update device_codes set last_poll_at = now() - interval '6 s'`).
 
@@ -595,9 +599,9 @@ test("upd link needs a linked repo", ...);
 - `esc(v: string | number): string` replaces `& < > " '` with `&amp; &lt; &gt; &quot; &#39;`.
 - `` html`...` `` is a tagged template that escapes every interpolation unless it is a `Safe` value (`{ __html: string }`, produced only by `html` itself). Pages are built only with this tag, so forgetting `esc()` is impossible.
 - `page(title: string, body: Safe, opts?: { status?: number; live?: string }): Response`. It returns a full HTML document with `<link rel="stylesheet" href="/static/style.css">`, a header (sign in, or the user's handle and a logout form with csrf), and `<script src="/static/live.js" defer>` only when `opts.live` is set. It sets the CSP from Global Constraints, `x-content-type-options: nosniff`, `referrer-policy: same-origin`, and `cache-control: no-store` for signed-in pages or `public, max-age=60` for public ones.
-- `formatHours(s: number): string` is plan 06's badge rule: floor to a tenth, `"12.3 h"`. Import or export it from plan 06's badge code; do not reimplement it. `formatMinutes(s: number): string` gives `"N min"`, floored.
+- `formatHours(s: number): string` is plan 06's badge rule: `floor(s / 360) / 10` hours with one decimal, `"12.3 h"` (never above verified time). Import or export it from plan 06's badge code; do not reimplement it. `formatMinutes(s: number): string` gives `"N min"`, floored.
 - `notFound(): Response` is one 404 page for every missing or private thing (Review Focus 7).
-- Static files: only `style.css` and `live.js`, by exact name, with `cache-control: public, max-age=3600`. Any other path under `/static/` is `404`, so there is no directory traversal.
+- Static files: only `style.css`, `live.js` and `review.js`, by exact name, with `cache-control: public, max-age=3600`. `review.js` is supplied by plan 10 (this plan only allowlists it; a missing file is `404`). The CSP forbids inline script, so plan 10's reviewer UI loads `/static/review.js` with `<script src defer>`. Any other path under `/static/` is `404`, so there is no directory traversal.
 - Amend plan 06's "every response body is JSON" wording in `server/README.md` (if present) or `docs/spikes/github-app.md` (if not) to "every `/v1` response". This is a one-line note, not a rewrite.
 
 - [ ] **Step 1: Write the failing tests** in `server/test/html.test.ts`:
@@ -853,7 +857,7 @@ test("fragment escapes like the page", ...);
 - Repo-delta caps from GitHub data (PITCH.md trust anchors). This would need the compare API and installation tokens; it belongs with plan 10.
 - SHA-level linking of ledger `commit` claims to receipts. This needs a ruleset change to carry a commit hash.
 - Handle renames, co-owned projects, organizations, admin moderation UI, and email.
-- `tally login --browser` in the daemon (plan 07 or 12 adds it against Task 4's routes).
+- `tally login --browser` in the daemon (plan 12 adds it against Task 4's routes).
 
 ## Decisions I made (maintainer to confirm)
 

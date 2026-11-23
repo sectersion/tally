@@ -4,7 +4,7 @@
 
 **Goal:** Tally runs on macOS and Linux as well as Windows (idle detection included), installs and registers itself with one command, ships as signed per-platform binaries, and has the measurement tooling behind the pitch's "Evidence before we ask": resource numbers, a Hackatime-vs-Tally replay comparator, a red-team harness, and a cost sheet.
 
-**Architecture:** (a) New idle probes in `crates/tally-daemon/src/presence/` behind the `IdleProbe` trait from plan 04, chosen by one `select_probe()`. (b) New daemon modules `detect.rs`, `init.rs`, `service.rs`, `lock.rs` plus `tally init` and `tally service ...` subcommands; service files are rendered by pure functions and golden-tested. (c) Release engineering in `.github/workflows/release.yml`, `install/`, `packaging/`. (d) A separate crate `crates/tally-evidence` (binary `tally-evidence`, depends only on `tally-scoring`, never shipped to users) holds the replay comparator, red-team scenarios, the resource harness and the cost sheet generator. Studies (pilot, blind grading) are human work; this plan builds the tooling only.
+**Architecture:** (a) New idle platforms in flat files `crates/tally-daemon/src/presence_*.rs` (beside plan 04's `presence.rs` and `presence_win.rs`) implementing plan 04's `Platform` trait, chosen by one `presence_select::choose()` that replaces the body of plan 04's `default_platform()`; plan 04's `[presence] enabled`/`require` defaults are turned on for macOS and Linux. (b) New daemon modules `detect.rs`, `init.rs`, `service.rs`, `lock.rs` plus `tally init` and `tally service ...` subcommands; service files are rendered by pure functions and golden-tested. (c) Release engineering in `.github/workflows/release.yml`, `install/`, `packaging/`. (d) A separate crate `crates/tally-evidence` (binary `tally-evidence`, depends only on `tally-scoring`, never shipped to users) holds the replay comparator, red-team scenarios, the resource harness and the cost sheet generator. Studies (pilot, blind grading) are human work; this plan builds the tooling only.
 
 **Tech Stack:** Rust stable 1.85+, existing `tally-daemon`/`tally-scoring`. New daemon dependencies, each only on the target that needs it: `x11rb` (feature `screensaver`, Linux), `zbus` (Linux, blocking API), `wayland-client` + `wayland-protocols` (Linux, `staging` feature), `fs2` (all). New evidence-crate dependencies: `sysinfo`, `serde`, `serde_json`, `clap`, `anyhow`. Shell: PowerShell 5.1 and POSIX sh. CI: GitHub Actions.
 
@@ -12,16 +12,20 @@
 
 ## Assumes from earlier plans
 
-Plans 03 and 04 are written but not executed (and plan 04's file did not exist when this plan was written), so every name below comes from the index `README.md` (C1, C5) and from this plan's reading of the code on `main`. **Before Task 1, open the merged plan 03/04 code and reconcile each name; where the code differs, the code wins and this plan's step text gets the code's names.**
+Names below come from plans 03 and 04 (and the index `README.md`, C1, C5, rulings 5, 6, 13). Plan 04's presence model is authoritative. **Before Task 1, open the merged plan 03/04 code and reconcile each name; where the code differs, the code wins and this plan's step text gets the code's names.**
 
 | Assumed | From | Used in |
 |---|---|---|
-| `Source` trait, `Poll { events, watermark }`, `SourceState`, `source_state` table (C1) | plan 03, `crates/tally-daemon/src/source.rs` | Tasks 2, 10 |
-| `tally run` poll loop; `<home>/config.toml` loader with per-source tables, unknown keys an error (C5) | plan 03 | Tasks 7, 9 |
-| Claude Code adapter id `claude-code`, config table `[claude_code]` | plan 03 | Task 7 |
-| Presence module `crates/tally-daemon/src/presence/mod.rs` with `pub trait IdleProbe { fn name(&self) -> &str; fn idle_ms(&mut self) -> Result<u64, ProbeError>; }`, `pub enum ProbeError { Unsupported(String), Transient(String) }`, and a `PresenceSource<P: IdleProbe>` implementing `Source` (id `presence`) that turns samples into `Kind::Idle` spans when idle exceeds `IDLE_SAMPLE_MIN` (30 s) and emits the closed span on resume | plan 04 (**my guess at names**) | Tasks 2 to 6 |
-| Presence coverage rule: a presence source whose probe works advances its watermark to its last good sample; one whose probe is `Unsupported` or has been failing keeps its watermark at `Some(0)`, so the horizon cannot pass it and **no claim becomes final without presence coverage** | plan 04 (**my guess; this plan relies on it and Task 2 tests it**) | Task 2 |
-| Gap handling: when two samples are further apart than 3 poll intervals (laptop asleep, daemon stalled) the presence source emits an `Idle` span over the gap, never silence | plan 04 (**my guess**) | Review Focus 1, Task 6 |
+| `Source` trait, `Poll { events, watermark }`, `SourceState`, `SourceError` in `crates/tally-daemon/src/source.rs`; `source_state` table (C1); sources never touch the store (ruling 5) | plan 03 | Tasks 2, 10 |
+| Runner `crates/tally-daemon/src/run.rs`: `run_loop(store, cfg, home, stop)` and `sources(cfg, home, store)` building the source list (ruling 6); `tally run` calls `run_loop` | plan 03 Tasks 3 and 5 | Tasks 2, 9, 10 |
+| `<home>/config.toml` loader with per-source tables, unknown keys an error (C5) | plan 03 Task 4 | Tasks 2, 7, 9 |
+| Claude Code adapter id `claude-code`, config table `[claude_code]`; scrubbed session-log fixtures in `crates/tally-daemon/tests/fixtures/claude_code/` | plan 03 Tasks 6 and 11 | Tasks 7, 17 |
+| `presence.rs`: `pub enum PlatformError { Unsupported, Failed(String) }`, `pub trait Platform { fn idle_ms(&mut self) -> Result<u64, PlatformError>; }`, `PresenceSource<P: Platform>` (id `PRESENCE_SOURCE` = `"presence"`), `Tracker`, `COVERAGE_MAX_GAP_MS` (60 s), `UnsupportedPlatform`, `pub fn default_platform()`; `presence_win.rs`: `WindowsPlatform` | plan 04 Tasks 2 to 4 | Tasks 2 to 6 |
+| Coverage model: `PresenceSource::poll` returns `Err(SourceError)` for `Unsupported` and `Poll { events: [], watermark: None }` for `Failed`; coverage goes to the store through `take_coverage()`; with `presence_required` on, nothing is final without a presence watermark, and a final claim whose interval is not inside coverage is skipped with reason `no_presence_coverage` | plan 04 Tasks 3 and 4 | Tasks 2, 6 |
+| Gap handling: two samples more than `COVERAGE_MAX_GAP_MS` apart (sleep, daemon stopped) are a gap: no coverage across it, an open idle span is closed at the last sample before it, and **no idle span reaching back into the sleep** is emitted | plan 04 Task 2 | Review Focus 1, Task 6 |
+| Config `[presence] enabled` (default `true` on Windows, `false` elsewhere) and `require` (default = `enabled`); `tally run` calls `store.set_presence_required(cfg.require)` and exits with an error naming the key if `require` is on and the platform is unsupported | plan 04 Task 4 | Task 2 (defaults changed here) |
+| Device-code flow `POST /v1/device/code`, `POST /v1/device/token` | plan 09 Task 4 | Task 10b |
+| `tally login --server-id <id> [--server <URL>]`, `credentials.rs` `save_token(home, id, token)` | plan 07 Task 3 | Task 10b |
 | `Store`, `finalize`, `register_git_project`, `find_git_root`, `project_id`, `normalize_path`, CLI `--home`/`TALLY_HOME`, `main.rs` clap enum `Cmd` | `main` today | Tasks 7 to 10 |
 | `Event`, `Kind`, `Actor`, `Claim { action_id, ts, project, kind, verified_s, unverified_s, reasons, features }`, `score()`, `ruleset::*` constants | `tally-scoring` on `main` | Tasks 15 to 18 |
 | Plan 05 `tally publish` and a daily publish job inside `tally run` | plan 05 | Task 7 explainer text only (describes publishing; no code dependency) |
@@ -29,7 +33,7 @@ Plans 03 and 04 are written but not executed (and plan 04's file did not exist w
 ## Global Constraints
 
 - No event text, ever (spec §2, C3). Nothing in this plan reads window titles, URLs, keystrokes or screen contents. Idle probes return one integer: milliseconds since the last input event, from OS APIs that do not expose what the input was. No keylogger APIs, no screen capture (PITCH Privacy).
-- Honest unsupported: a platform or desktop with no working idle source reports `Unsupported` with a human-readable reason, `tally status` and `tally init` show it, and claims are not finalized (so not scored into the ledger). Never fall back to "assume present".
+- Honest unsupported: a platform or desktop with no working idle source reports `Unsupported` with a human-readable reason, `tally status` and `tally init` show it, and with `[presence] require` on (the default) `tally run` refuses to start (plan 04), so nothing is finalized. Never fall back to "assume present".
 - One scoring implementation. `tally-evidence` calls `tally_scoring::score`; it never reimplements a rule. The Hackatime-style comparator is the only other time computation and is labelled as an approximation.
 - Every OS-specific module is behind `#[cfg(target_os = ...)]` and has a pure, platform-independent core that is unit tested on every OS in CI. Code that talks to the OS is verified by the manual checklist in its task, on real hardware, and the result is recorded in `docs/platform-notes.md`.
 - Never invent a vendor format or API: Tasks 1, 7 (harness locations), 8 (service managers) and 12 (signing) begin with a spike or a documented maintainer input.
@@ -40,8 +44,8 @@ Plans 03 and 04 are written but not executed (and plan 04's file did not exist w
 
 ## Review Focus
 
-1. **Laptop lid closed, on each OS.** Expected: while asleep no samples exist; on wake the presence source emits an `Idle` span over the gap (OS idle timers may reset or keep counting across sleep, so the code must not trust them across a gap), so sleep time is subtracted or capped, never credited as presence. The gap rule has a pure test in Task 6; a per-OS manual checklist (close lid 10 minutes, open, confirm `tally status` shows the gap as idle) is recorded for Windows, macOS, Linux/X11 and Linux/GNOME-Wayland.
-2. **A Wayland compositor without idle-notify** (for example an older wlroots compositor lacking `ext-idle-notify-v1`, or GNOME with the Mutter D-Bus name absent). Expected: `select_probe()` returns `Unsupported("...")` naming the desktop, `tally status` says "presence: unsupported on this desktop, claims are not final", the presence watermark stays at 0, nothing finalizes. Tested in Task 5 with injected environment and fake probes. XWayland must not be mistaken for coverage: the XScreenSaver idle counter under Wayland only sees X clients, so Wayland sessions never use the X11 probe (Task 4 test).
+1. **Laptop lid closed, on each OS.** Expected (plan 04's gap rule): while asleep no samples exist; on wake the sample gap exceeds `COVERAGE_MAX_GAP_MS`, so coverage is not extended across it and no idle span reaching back into the sleep is emitted (OS idle timers may reset or keep counting across sleep; neither matters, because the gap is decided by sample times, not by the timer). A claim whose interval spans the sleep is skipped with `no_presence_coverage`, never credited. Task 6 tests this per platform behaviour; a per-OS manual checklist (close lid 10 minutes, open, confirm `tally status` shows one more skipped claim and `coverage` has a gap) is recorded for Windows, macOS, Linux/X11 and Linux/GNOME-Wayland.
+2. **A Wayland compositor without idle-notify** (for example an older wlroots compositor lacking `ext-idle-notify-v1`, or GNOME with the Mutter D-Bus name absent). Expected: `choose()` returns `Choice::Unsupported("...")` naming the desktop, `tally status` prints the unsupported presence line, `tally run` refuses to start while `[presence] require` is on (plan 04), so there is no presence watermark and nothing finalizes. Tested in Tasks 2 and 5 with injected environment and fake platforms. XWayland must not be mistaken for coverage: the XScreenSaver idle counter under Wayland only sees X clients, so Wayland sessions never use the X11 platform (Task 2 test).
 3. **Two daemons for one user.** Expected: the second `tally run` exits non-zero within one second saying who holds the lock (pid) and does not touch the store. Two daemons would double-poll and race `finalize`. Different `--home` directories lock independently. Tested in Task 10. A service plus a manually started `tally run` is the realistic case.
 4. **Installer run twice.** Expected: the second run with the same version replaces nothing, keeps the config, and leaves exactly one service registration; run with a newer version it stops the service, swaps the binary, restarts. Tested by Task 13's CI workflow running each installer twice on its OS.
 5. **Uninstall leaves the data directory intact unless asked.** Expected: `tally service uninstall` removes the service registration only; the installers' uninstall option removes the binary and PATH entry only; `--purge` is the only path that deletes `<home>`, it prints the directory and the ledger length first and requires `--yes` when not interactive. Tests in Tasks 9 and 13.
@@ -53,17 +57,19 @@ Plans 03 and 04 are written but not executed (and plan 04's file did not exist w
 ```
 crates/tally-daemon/
   Cargo.toml                       target-gated deps (x11rb, zbus, wayland-*), fs2
-  src/presence/macos.rs            CGEventSourceSecondsSinceLastEventType probe
-  src/presence/x11.rs              XScreenSaver idle probe
-  src/presence/mutter.rs           org.gnome.Mutter.IdleMonitor probe (D-Bus)
-  src/presence/wayland_idle.rs     ext-idle-notify-v1 probe
-  src/presence/select.rs           select_probe(env) -> Box<dyn IdleProbe> | Unsupported
+  src/presence.rs                  (plan 04) default_platform() delegates to presence_select; config defaults
+  src/presence_macos.rs            MacPlatform: CGEventSourceSecondsSinceLastEventType
+  src/presence_x11.rs              X11Platform: XScreenSaver idle counter
+  src/presence_mutter.rs           MutterPlatform: org.gnome.Mutter.IdleMonitor (D-Bus)
+  src/presence_wayland.rs          ExtIdlePlatform: ext-idle-notify-v1; pure IdleTracker
+  src/presence_select.rs           DesktopEnv, Choice, choose(), platform_for(Choice) -> Box<dyn Platform>
   src/detect.rs                    find installed harnesses (pure over a filesystem view)
   src/init.rs                      tally init: detect, write config, register repo, print explainer
   src/explainer.txt                the one-page explainer for parents (include_str!)
   src/service.rs                   render + install/start/stop/status/uninstall per OS
   src/lock.rs                      single-instance lock on <home>/tally.lock
-  src/main.rs                      adds `init`, `service`, and the lock in `run`
+  src/login_browser.rs             `tally login --browser` (plan 09 device-code flow)
+  src/main.rs                      adds `init`, `service`, `login --browser`, and the lock in `run`
   tests/service_golden.rs          rendered unit files against golden files
   tests/golden/                    tally.service, dev.tally.agent.plist, task.xml
 crates/tally-evidence/
@@ -109,22 +115,26 @@ Nothing in later tasks may assume an API's behaviour that this task did not obse
 
 ---
 
-### Task 2: Probe selection and the unsupported coverage rule
+### Task 2: Platform selection and presence defaults on macOS and Linux
 
 **Files:**
-- Create: `crates/tally-daemon/src/presence/select.rs`
-- Modify: `crates/tally-daemon/src/presence/mod.rs` (`pub mod select;`, and `mod macos; mod x11; mod mutter; mod wayland_idle;` each under its `cfg`)
+- Create: `crates/tally-daemon/src/presence_select.rs`
+- Modify: `crates/tally-daemon/src/lib.rs` (`pub mod presence_select;`, and `mod presence_macos; mod presence_x11; mod presence_mutter; mod presence_wayland;` each under its `cfg`), `crates/tally-daemon/src/presence.rs` (plan 04: `default_platform()` and the `[presence]` defaults)
 
 **Interfaces:**
-- Consumes: `IdleProbe`, `ProbeError`, `PresenceSource` (plan 04, see Assumes).
-- Produces (`select.rs`):
+- Consumes: `Platform`, `PlatformError`, `UnsupportedPlatform`, `PresenceSource`, `default_platform()`, the `[presence]` config (plan 04, see Assumes). Sources never touch the store (ruling 5); nothing here changes the runner: plan 04's `sources(cfg, home, store)` in `run.rs` already builds `PresenceSource::new(default_platform())` when `[presence] enabled`.
+- Produces (`presence_select.rs`):
   - `pub struct DesktopEnv { pub os: &'static str, pub session_type: Option<String>, pub wayland_display: Option<String>, pub x_display: Option<String>, pub desktop: Option<String> }` with `DesktopEnv::from_process()` reading `std::env::consts::OS`, `XDG_SESSION_TYPE`, `WAYLAND_DISPLAY`, `DISPLAY`, `XDG_CURRENT_DESKTOP`.
   - `#[derive(Debug, PartialEq)] pub enum Choice { Windows, MacOs, X11, MutterWayland, ExtIdleNotify, Unsupported(String) }`
   - `pub fn choose(env: &DesktopEnv, mutter_present: bool, ext_idle_present: bool) -> Choice`: pure.
-  - `pub fn select_probe() -> Box<dyn IdleProbe>`: builds `DesktopEnv`, queries the two `*_present` facts through each module's `available()` function, calls `choose`, constructs the probe, or an `UnsupportedProbe(reason)` whose `idle_ms` always returns `Err(ProbeError::Unsupported(reason))`.
+  - `impl Choice { pub fn name(&self) -> &'static str }` (`"windows-lastinput"`, `"macos-cgevent"`, `"x11-screensaver"`, `"mutter-idlemonitor"`, `"ext-idle-notify"`, `"unsupported"`).
+  - `pub fn current_choice() -> Choice`: builds `DesktopEnv::from_process()`, queries the two `*_present` facts through each module's `available()` function, calls `choose`.
+  - `pub fn platform_for(c: &Choice) -> Box<dyn Platform>`: constructs `WindowsPlatform` (plan 04), `MacPlatform`, `X11Platform`, `MutterPlatform`, `ExtIdlePlatform`, or plan 04's `UnsupportedPlatform` (always `Err(PlatformError::Unsupported)`). A constructor that fails (X11 connect, D-Bus) yields a platform whose `idle_ms` returns `Failed(msg)` and retries the connection on the next call.
+  - In `presence.rs` (plan 04): `impl Platform for Box<dyn Platform>` (forwards `idle_ms`), and `default_platform()` becomes `platform_for(&current_choice())`. Plan 04's `PresenceSource`, `Tracker` and coverage logic are not changed.
+  - `[presence]` defaults (plan 04 Task 4): `enabled` defaults to `true` on Windows, macOS and Linux (`cfg!(any(windows, target_os = "macos", target_os = "linux"))`), `false` elsewhere; `require` still defaults to `enabled`. So on an unsupported Linux desktop `tally run` exits with plan 04's error naming `[presence] require`, and the message also prints the `Choice::Unsupported` reason. A user may set `enabled = false, require = false` to run without presence (hours then over-credit as plan 04 decision 3 says; `tally status` says so).
 - Rules in `choose`: `windows` gives `Windows`; `macos` gives `MacOs`; `linux` with a Wayland session (`session_type == "wayland"` or `wayland_display` set) gives `MutterWayland` if `mutter_present`, else `ExtIdleNotify` if `ext_idle_present`, else `Unsupported("Wayland compositor <desktop> offers neither org.gnome.Mutter.IdleMonitor nor ext-idle-notify-v1")`; `linux` with an X session and `x_display` set gives `X11`; anything else gives `Unsupported`. **Wayland wins over X11 even when `DISPLAY` is also set (XWayland).**
 
-- [ ] **Step 1: Write the failing tests** in `select.rs`:
+- [ ] **Step 1: Write the failing tests** in `presence_select.rs`:
 
 ```rust
 fn env(os: &'static str, session: Option<&str>, wl: bool, x: bool) -> DesktopEnv {
@@ -152,35 +162,42 @@ fn env(os: &'static str, session: Option<&str>, wl: bool, x: bool) -> DesktopEnv
 #[test] fn headless_linux_is_unsupported() {
     assert!(matches!(choose(&env("linux", None, false, false), false, false), Choice::Unsupported(_)));
 }
-#[test] fn unsupported_probe_keeps_the_presence_watermark_at_zero_so_nothing_finalizes() {
-    // build PresenceSource over UnsupportedProbe; poll at a late `now`; assert
-    //   poll.events is empty and poll.watermark == Some(0)
-    // then Store::open_in_memory(), append a claude-code prompt + edit 10 minutes apart,
-    // set_watermark("claude-code", i64::MAX / 4), set_watermark("presence", 0),
-    // and assert finalize(&mut store).unwrap().appended == 0 and provisional > 0.
+#[test] fn unsupported_choice_gives_plan_04s_unsupported_platform() {
+    let mut p = platform_for(&Choice::Unsupported("x".into()));
+    assert!(matches!(p.idle_ms(), Err(PlatformError::Unsupported)));
+    // PresenceSource::new(p).poll(..) is Err (plan 04 test `unsupported_platform_is_an_error_not_silence`)
+}
+#[test] fn presence_is_enabled_and_required_by_default_on_macos_and_linux() {
+    // parse an empty config.toml with plan 03's loader; on windows, macos and linux:
+    // cfg.presence.enabled && cfg.presence.require; elsewhere both false
+}
+#[test] fn required_presence_with_no_watermark_finalizes_nothing() {
+    // as plan 04's `required_without_a_presence_watermark_finalizes_nothing`, run here on every OS in CI:
+    // set_presence_required(true), claude-code prompt + edit 10 min apart, set_watermark("claude-code", 10_000_000),
+    // no presence watermark: finalize appended 0, skipped 0, provisional > 0
 }
 ```
 
-- [ ] **Step 2:** Run `cargo test -p tally-daemon select`. Expected: FAIL.
-- [ ] **Step 3:** Implement `DesktopEnv`, `Choice`, `choose`, `UnsupportedProbe`, and `select_probe` (the `available()` functions are stubs returning `false` until Tasks 4 and 5; Windows uses plan 04's probe). If plan 04's `PresenceSource` does not already return `watermark: Some(0)` for an unsupported probe, add that behaviour there and cover it with the last test.
+- [ ] **Step 2:** Run `cargo test -p tally-daemon presence`. Expected: FAIL.
+- [ ] **Step 3:** Implement `DesktopEnv`, `Choice`, `choose`, `current_choice`, `platform_for`, the `Box<dyn Platform>` impl, the new `default_platform()` body and the config defaults (the `available()` functions are stubs returning `false` and the new platforms are wired in Tasks 3 to 5; until then their `Choice` maps to `UnsupportedPlatform`).
 - [ ] **Step 4:** Run `cargo test -p tally-daemon`. Expected: PASS on all three OSes.
-- [ ] **Step 5:** Make `tally status` print one line `presence: <probe name> (ok)` or `presence: unsupported: <reason> (claims are not finalized)`. Add a test of the line builder (`fn presence_line(&dyn IdleProbe) -> String`) for both cases.
-- [ ] **Step 6:** Commit: `feat(daemon): choose an idle probe per desktop, honest unsupported`.
+- [ ] **Step 5:** Make `tally status` print one line `presence: <choice name> (ok)` or `presence: unsupported: <reason> (claims are not finalized)`, or `presence: disabled ([presence] require = false; hours are not checked against idle time)`. Add a test of the line builder (`fn presence_line(c: &Choice, cfg: &PresenceConfig) -> String`) for the three cases.
+- [ ] **Step 6:** Commit: `feat(daemon): choose an idle platform per desktop, presence on by default on macOS and Linux`.
 
 ---
 
-### Task 3: macOS idle probe
+### Task 3: macOS idle platform
 
 **Files:**
-- Create: `crates/tally-daemon/src/presence/macos.rs` (`#[cfg(target_os = "macos")]`)
-- Modify: `crates/tally-daemon/src/presence/select.rs` (wire `Choice::MacOs`)
+- Create: `crates/tally-daemon/src/presence_macos.rs` (OS call `#[cfg(target_os = "macos")]`)
+- Modify: `crates/tally-daemon/src/presence_select.rs` (wire `Choice::MacOs` in `platform_for`)
 
 **Interfaces:**
-- `pub struct MacProbe;` implementing `IdleProbe`, name `"macos-cgevent"`. `idle_ms` calls `CGEventSourceSecondsSinceLastEventType(kCGEventSourceStateCombinedSessionState = 0, kCGAnyInputEventType = !0u32)` through a hand-written `extern "C"` block linked with `#[link(name = "ApplicationServices", kind = "framework")]` (no crate for one function). It returns seconds as `f64`; convert with `(secs * 1000.0).round()`. A negative or NaN value is `ProbeError::Transient`.
-- Pure helper, tested on every OS: `pub fn seconds_to_ms(secs: f64) -> Result<u64, ProbeError>` (rejects negative, NaN, infinite; clamps above 10 years).
+- `pub struct MacPlatform;` implementing plan 04's `Platform`. `idle_ms` calls `CGEventSourceSecondsSinceLastEventType(kCGEventSourceStateCombinedSessionState = 0, kCGAnyInputEventType = !0u32)` through a hand-written `extern "C"` block linked with `#[link(name = "ApplicationServices", kind = "framework")]` (no crate for one function). It returns seconds as `f64`; convert with `(secs * 1000.0).round()`. A negative or NaN value is `PlatformError::Failed`.
+- Pure helper, tested on every OS: `pub fn seconds_to_ms(secs: f64) -> Result<u64, PlatformError>` (rejects negative, NaN, infinite; clamps above 10 years).
 - Privacy note for the explainer (Task 7): this call needs no Accessibility or Input Monitoring permission because it reports only elapsed time, not events. **Verify on a real Mac in Step 3**; if macOS prompts for a permission, record it in `platform-notes.md` and stop: that changes the privacy story and the maintainer decides.
 
-- [ ] **Step 1: Write the failing test** (runs on every OS, in `macos.rs` outside the cfg-gated block, or in a `presence/idle_math.rs` shared module):
+- [ ] **Step 1: Write the failing test** (runs on every OS, in `presence_macos.rs` outside the cfg-gated block):
 
 ```rust
 #[test] fn seconds_convert_and_reject_nonsense() {
@@ -192,44 +209,44 @@ fn env(os: &'static str, session: Option<&str>, wl: bool, x: bool) -> DesktopEnv
 }
 ```
 - [ ] **Step 2:** Run `cargo test -p tally-daemon seconds_convert`. Expected: FAIL; implement; PASS.
-- [ ] **Step 3:** Implement `MacProbe` (macOS only). Manual check on a real Mac: `cargo run -p tally-daemon --example idle_spike` while idle shows a growing number, touching the trackpad resets it, no permission prompt appears. Record in `docs/platform-notes.md`.
-- [ ] **Step 4:** CI: `macos-latest` already builds the crate; add a `#[cfg(target_os = "macos")] #[test] fn probe_returns_a_number()` that only asserts `idle_ms().is_ok()` (a CI runner has no human, but the call must succeed).
-- [ ] **Step 5:** Commit: `feat(daemon): macOS idle probe`.
+- [ ] **Step 3:** Implement `MacPlatform` (macOS only). Manual check on a real Mac: `cargo run -p tally-daemon --example idle_spike` while idle shows a growing number, touching the trackpad resets it, no permission prompt appears. Record in `docs/platform-notes.md`.
+- [ ] **Step 4:** CI: `macos-latest` already builds the crate; add a `#[cfg(target_os = "macos")] #[test] fn platform_returns_a_number()` that only asserts `MacPlatform.idle_ms().is_ok()` (a CI runner has no human, but the call must succeed).
+- [ ] **Step 5:** Commit: `feat(daemon): macOS idle platform`.
 
 ---
 
-### Task 4: Linux X11 idle probe
+### Task 4: Linux X11 idle platform
 
 **Files:**
-- Create: `crates/tally-daemon/src/presence/x11.rs` (`#[cfg(target_os = "linux")]`)
+- Create: `crates/tally-daemon/src/presence_x11.rs` (`#[cfg(target_os = "linux")]`)
 - Modify: `crates/tally-daemon/Cargo.toml`: `[target.'cfg(target_os = "linux")'.dependencies] x11rb = { version = "0.13", features = ["screensaver"] }`
 
 **Interfaces:**
 - `pub fn available() -> bool`: `DISPLAY` set, connection opens, and the `MIT-SCREEN-SAVER` extension is present (`x11rb::protocol::screensaver::query_version`).
-- `pub struct X11Probe { conn, root }`, `X11Probe::connect() -> Result<Self, ProbeError>`; `idle_ms` sends `screensaver::query_info(root)` and returns `ms_since_user_input` as `u64`. A broken connection returns `ProbeError::Transient` and the next call reconnects once.
-- The selection rule from Task 2 already ensures this probe is never used in a Wayland session. XScreenSaver is the X server's own idle counter; it exposes no input contents.
+- `pub struct X11Platform { conn, root }` implementing plan 04's `Platform`, `X11Platform::connect() -> Result<Self, PlatformError>`; `idle_ms` sends `screensaver::query_info(root)` and returns `ms_since_user_input` as `u64`. A broken connection returns `PlatformError::Failed` and the next call reconnects once.
+- The selection rule from Task 2 already ensures this platform is never used in a Wayland session. XScreenSaver is the X server's own idle counter; it exposes no input contents.
 
-- [ ] **Step 1: Write the failing test** in `x11.rs` (Linux only, skipped when no X server): `if std::env::var("DISPLAY").is_err() { return; }`, then `assert!(X11Probe::connect().unwrap().idle_ms().is_ok())`. CI runs it under `xvfb-run -a cargo test -p tally-daemon x11` (add `sudo apt-get install -y xvfb` to the Linux job in `daemon.yml`).
+- [ ] **Step 1: Write the failing test** in `presence_x11.rs` (Linux only, skipped when no X server): `if std::env::var("DISPLAY").is_err() { return; }`, then `assert!(X11Platform::connect().unwrap().idle_ms().is_ok())`. CI runs it under `xvfb-run -a cargo test -p tally-daemon x11` (add `sudo apt-get install -y xvfb` to the Linux job in `daemon.yml`).
 - [ ] **Step 2:** Run it under xvfb. Expected: FAIL (not defined).
 - [ ] **Step 3:** Implement. Make the Xvfb test also assert that `idle_ms` is at least the sleep time after `sleep(1.2s)` with no input (`>= 1000`).
 - [ ] **Step 4:** Manual check on a real X11 desktop (Task 1's machine): typing resets the counter. Record in `docs/platform-notes.md`.
-- [ ] **Step 5:** Wire `Choice::X11` in `select_probe`. Commit: `feat(daemon): X11 idle probe via XScreenSaver`.
+- [ ] **Step 5:** Wire `Choice::X11` in `platform_for` and `available()` in `current_choice`. Commit: `feat(daemon): X11 idle platform via XScreenSaver`.
 
 ---
 
-### Task 5: Wayland idle probes (Mutter and ext-idle-notify)
+### Task 5: Wayland idle platforms (Mutter and ext-idle-notify)
 
 **Files:**
-- Create: `crates/tally-daemon/src/presence/mutter.rs`, `crates/tally-daemon/src/presence/wayland_idle.rs` (both Linux only)
-- Modify: `crates/tally-daemon/Cargo.toml` (Linux target deps `zbus = { version = "4", default-features = false, features = ["blocking-api", "async-io"] }`, `wayland-client = "0.31"`, `wayland-protocols = { version = "0.32", features = ["client", "staging"] }`), `select.rs`
+- Create: `crates/tally-daemon/src/presence_mutter.rs`, `crates/tally-daemon/src/presence_wayland.rs` (OS code Linux only)
+- Modify: `crates/tally-daemon/Cargo.toml` (Linux target deps `zbus = { version = "4", default-features = false, features = ["blocking-api", "async-io"] }`, `wayland-client = "0.31"`, `wayland-protocols = { version = "0.32", features = ["client", "staging"] }`), `presence_select.rs`
 
 **Interfaces:**
-- `mutter::available() -> bool`: the session bus has the name `org.gnome.Mutter.IdleMonitor`. `MutterProbe::idle_ms` calls `GetIdletime` on `/org/gnome/Mutter/IdleMonitor/Core` (returns `t` milliseconds). Name `"mutter-idlemonitor"`.
-- `wayland_idle::available() -> bool`: connect to `WAYLAND_DISPLAY`, list globals, true iff `ext_idle_notifier_v1` is advertised. `ExtIdleProbe` name `"ext-idle-notify"`.
-- `ext-idle-notify-v1` does not report elapsed idle time; it reports `idled` after a timeout and `resumed` on input. `ExtIdleProbe` therefore runs one background thread owning the Wayland event queue with a notification at timeout `IDLE_SAMPLE_MIN` (30 000 ms), and keeps an `IdleTracker` behind a mutex. While idle, `idle_ms` returns `timeout_ms + elapsed since the idled event`; after `resumed` it returns `0`. Below the timeout the true idle time is unknown and reported as `0`. Document in the module that resolution below 30 s is not available on this path; the scorer only uses idle spans over 30 s (`IDLE_SAMPLE_MIN`), so no precision is lost for scoring.
+- `presence_mutter::available() -> bool`: the session bus has the name `org.gnome.Mutter.IdleMonitor`. `MutterPlatform::idle_ms` (plan 04's `Platform`) calls `GetIdletime` on `/org/gnome/Mutter/IdleMonitor/Core` (returns `t` milliseconds).
+- `presence_wayland::available() -> bool`: connect to `WAYLAND_DISPLAY`, list globals, true iff `ext_idle_notifier_v1` is advertised. `ExtIdlePlatform` implements `Platform`.
+- `ext-idle-notify-v1` does not report elapsed idle time; it reports `idled` after a timeout and `resumed` on input. `ExtIdlePlatform` therefore runs one background thread owning the Wayland event queue with a notification at timeout `IDLE_SAMPLE_MIN_MS` (30 000 ms), and keeps an `IdleTracker` behind a mutex. While idle, `idle_ms` returns `timeout_ms + elapsed since the idled event`; after `resumed` it returns `0`. Below the timeout the true idle time is unknown and reported as `0`. Document in the module that resolution below 30 s is not available on this path; plan 04's `Tracker` only opens spans at `IDLE_SAMPLE_MIN_MS` and dates them from `now - idle_ms`, so the span start is still exact.
 - Pure core (tested everywhere): `pub struct IdleTracker { timeout_ms: u64, idle_since: Option<i64> }` with `on_idled(now_ms)`, `on_resumed()`, `idle_ms(now_ms) -> u64`.
 
-- [ ] **Step 1: Write the failing tests** for the pure core, in `wayland_idle.rs` outside the cfg-gated parts (so they run on every OS, move `IdleTracker` into `presence/idle_math.rs` if cfg gating makes that awkward):
+- [ ] **Step 1: Write the failing tests** for the pure core, in `presence_wayland.rs` outside the cfg-gated parts (so they run on every OS):
 
 ```rust
 #[test] fn tracker_reports_zero_until_idled_then_timeout_plus_elapsed() {
@@ -243,27 +260,23 @@ fn env(os: &'static str, session: Option<&str>, wl: bool, x: bool) -> DesktopEnv
 }
 ```
 - [ ] **Step 2:** Run `cargo test -p tally-daemon tracker`. Expected: FAIL; implement `IdleTracker`; PASS.
-- [ ] **Step 3:** Implement `MutterProbe` (blocking zbus proxy; a missing name makes `available()` false, a call error is `Transient`).
-- [ ] **Step 4:** Implement `ExtIdleProbe` with the background thread; thread death makes `idle_ms` return `Transient` so the presence source stops advancing its watermark (no claims final while blind).
-- [ ] **Step 5:** Wire both into `select_probe`. Add the compile-only CI check `cargo check -p tally-daemon --target x86_64-unknown-linux-gnu` already covered by the Linux job.
-- [ ] **Step 6:** Manual checks, recorded in `platform-notes.md`: GNOME Wayland (Mutter path: idle grows, input resets); Sway or another wlroots compositor with `ext-idle-notify-v1` (ExtIdle path); and a compositor or environment **without** either (for example an old wlroots build, or `WAYLAND_DISPLAY` pointing at a bare `weston` without the protocol): `tally status` must print the unsupported line from Task 2. Write `NOT VERIFIED` for any not available.
-- [ ] **Step 7:** Commit: `feat(daemon): Wayland idle probes (Mutter, ext-idle-notify)`.
+- [ ] **Step 3:** Implement `MutterPlatform` (blocking zbus proxy; a missing name makes `available()` false, a call error is `PlatformError::Failed`).
+- [ ] **Step 4:** Implement `ExtIdlePlatform` with the background thread; thread death makes `idle_ms` return `PlatformError::Failed`, so plan 04's source returns no watermark and, after `COVERAGE_MAX_GAP_MS`, coverage breaks (claims in the blind stretch are skipped, never credited).
+- [ ] **Step 5:** Wire both into `platform_for` and `current_choice`. Add the compile-only CI check `cargo check -p tally-daemon --target x86_64-unknown-linux-gnu` already covered by the Linux job.
+- [ ] **Step 6:** Manual checks, recorded in `platform-notes.md`: GNOME Wayland (Mutter path: idle grows, input resets); Sway or another wlroots compositor with `ext-idle-notify-v1` (ExtIdle path); and a compositor or environment **without** either (for example an old wlroots build, or `WAYLAND_DISPLAY` pointing at a bare `weston` without the protocol): `tally status` must print the unsupported line from Task 2 and `tally run` must refuse to start naming `[presence] require`. Write `NOT VERIFIED` for any not available.
+- [ ] **Step 7:** Commit: `feat(daemon): Wayland idle platforms (Mutter, ext-idle-notify)`.
 
 ---
 
 ### Task 6: Sleep and lid-close gap handling, verified per OS
 
 **Files:**
-- Modify: `crates/tally-daemon/src/presence/mod.rs` (only if plan 04's gap rule is missing or differs), `docs/platform-notes.md`
+- Modify: `crates/tally-daemon/src/presence_select.rs` (tests only), `docs/platform-notes.md`. Plan 04's `Tracker` and `PresenceSource` are not changed: its gap rule (`COVERAGE_MAX_GAP_MS`, no coverage across a gap, open span closed at the last sample before the gap, no idle span reaching back into the sleep) is the design, and this task only proves it holds for every way an OS idle timer behaves across sleep (Task 1 records which one each OS shows).
 
-**Interfaces:**
-- Rule (Review Focus 1): if `now - last_good_sample_ts > 3 * poll_interval_ms`, `PresenceSource` emits `Kind::Idle { end_ts: now }` starting at `last_good_sample_ts`, id `presence:<start>:idle`, before any new sample logic, and the probe's value right after the gap is ignored for that one sample (a probe that resets to 0 on wake would otherwise hide the gap; one that keeps counting would double count). The watermark stays below the gap's start until the span is emitted.
-
-- [ ] **Step 1: Write the failing test** (fake probe, fake clock, no OS): samples at 0 s, 5 s, 10 s with the probe returning 0; then the clock jumps to 610 s (lid closed 10 minutes) and the probe returns 0 on wake. Assert exactly one `Idle` event with `ts == 10_000` and `end_ts == 610_000`, and that scoring `[prompt at 5 s, prompt at 615 s]` credits no time for the gap (`score(...)` second claim `verified_s` is at most the first-action allowance, and reasons contain `idle_subtracted`).
-- [ ] **Step 2:** Run. Expected: FAIL or PASS-already (if plan 04 implemented it; then keep the test and skip Step 3).
-- [ ] **Step 3:** Implement the rule; run; PASS.
-- [ ] **Step 4:** Manual lid-close checklist on every machine from Task 1: run `tally run` with a debug log, work for a minute, close the lid for 10 minutes, open it, type one prompt. Then `tally status` must show the 10 minutes as idle and the prompt's claim must not include them. Record pass or `NOT VERIFIED` per OS in `docs/platform-notes.md`. Also test hibernate on Windows and suspend-to-RAM on Linux if available.
-- [ ] **Step 5:** Commit: `test(daemon): sleep gap becomes an idle span on every OS`.
+- [ ] **Step 1: Write the test** (fake platform, fake clock, no OS), parameterised over three wake behaviours of the idle timer: `reset` (returns 0 on wake), `kept_counting` (returns the sleep length plus the pre-sleep idle), `jumped` (returns an arbitrary large value, 10 h). For each: `PresenceSource` over the fake platform sampled every 5 s from 0 to 300 s (idle 0), then the clock jumps to 900 s (lid closed 10 minutes), then samples every 5 s to 1000 s (idle 0 after the first wake sample). Feed each poll into a store as plan 03's runner does (`take_coverage()` -> `extend_coverage`, then `set_watermark("presence", ..)`). Assert: `coverage()` has no interval containing any of `(300 s, 900 s)`; no `Idle` event has `ts < 900_000` and `end_ts > 300_000`. Then with `set_presence_required(true)`, a claude-code prompt at 200 s (first-action interval [80 s, 200 s], covered) and one at 950 s (interval [200 s, 950 s] spans the sleep), and the claude-code watermark past 1000 s: `finalize` ledgers the 200 s prompt and `skipped()` is exactly the 950 s prompt with reason `no_presence_coverage`.
+- [ ] **Step 2:** Run `cargo test -p tally-daemon sleep_gap`. Expected: PASS (plan 04 implemented the rule). If it fails, the bug is in plan 04's code: fix it there to plan 04's rule, not by adding a span over the gap.
+- [ ] **Step 3:** Manual lid-close checklist on every machine from Task 1: run `tally run` with a debug log, work for a minute, close the lid for 10 minutes, open it, type one prompt. Then `sqlite3 <home>/tally.db "select * from coverage"` must show a gap over the sleep, and once final, `tally status` must count the prompt under `skipped_claims` (reason `no_presence_coverage`), never as credited time. Record pass or `NOT VERIFIED` per OS in `docs/platform-notes.md`. Also test hibernate on Windows and suspend-to-RAM on Linux if available.
+- [ ] **Step 4:** Commit: `test(daemon): sleep gap leaves no presence coverage on every OS`.
 
 ---
 
@@ -287,7 +300,7 @@ fn env(os: &'static str, session: Option<&str>, wl: bool, x: bool) -> DesktopEnv
   - `pub fn apply_init(plan: &InitPlan, store: &mut Store, write_config: bool) -> Result<InitReport>`: creates `<home>`, writes `<home>/config.toml` **only if it does not exist** (an existing config is never overwritten; report "kept existing config"), registers the current git repo with `register_git_project` (no public name unless `--name`), returns lines to print.
   - `pub const EXPLAINER: &str = include_str!("explainer.txt");` printed by `tally init` before it asks to continue, and by `tally init --explain` alone.
 - CLI: `tally init [--yes] [--name <public-name>] [--no-service] [--explain]`. Interactive default asks `Continue? [y/N]` after printing the explainer and the detection summary; `--yes` skips the prompt. With `--yes` and without `--no-service` it ends by running `tally service install` (Task 9).
-- `explainer.txt` (one printed page, plain text, 70 columns, written for a parent; the pitch promises it ships with the installer). Required content, each as its own short paragraph: what Tally is for; **what is captured** (when you send a prompt, when you approve or interrupt the agent, when you run tests, when you commit, how long the keyboard and mouse were idle; counts and lengths, never the words); **what is never captured** (prompt text, file contents, commands, window titles, web addresses, keystrokes, screenshots); what leaves the computer (nothing unless the user publishes; then only a ledger of project name, action type, seconds and a reason code); how to see the data (`tally status`), how to stop it (`tally service stop`), how to remove it (`tally service uninstall`, and `--purge` to delete all data); who to ask. Every claim in it must match the code; Step 6 below checks the two lists mechanically.
+- `explainer.txt` (one printed page, plain text, 70 columns, written for a parent; the pitch promises it ships with the installer). Required content, each as its own short paragraph: what Tally is for; **what is captured** (when you send a prompt, when you approve or interrupt the agent, when you run tests, when you commit, how long the keyboard and mouse were idle; counts and lengths, never the words); **what is never captured** (prompt text, file contents, commands, window titles, web addresses, keystrokes, screenshots); what can leave the computer (ruling 14), each as one sentence: if the user links a project to the Tally server, its ledger entries (project name, action type, time, seconds, reason codes, numeric features such as prompt length) and the ledger's head hashes are uploaded (plan 07 sync); if the user publishes, badge data (verified hours per project) is published (plan 05); and only when the user explicitly runs `tally submit`, scrubbed session text for that one submission is sent for review (plan 10); nothing else, and nothing at all before the user links, publishes or submits; how to see the data (`tally status`), how to stop it (`tally service stop`), how to remove it (`tally service uninstall`, and `--purge` to delete all data); who to ask. Every claim in it must match the code; Step 6 below checks the two lists mechanically.
 
 - [ ] **Step 1 (spike):** On a machine with Claude Code, and any other harness you can, list the log directories and record them in `docs/platform-notes.md` ("Harness log locations", per OS, with the tool version). Put only verified entries in `CANDIDATES`. Claude Code's `~/.claude/projects` is known from the roadmap design; others are `NOT VERIFIED` until seen, and are omitted from `CANDIDATES` until plan 08 adds their adapters.
 - [ ] **Step 2: Write the failing tests** (`detect.rs`):
@@ -321,6 +334,9 @@ fn env(os: &'static str, session: Option<&str>, wl: bool, x: bool) -> DesktopEnv
 }
 #[test] fn explainer_lists_what_is_never_captured() {
     for w in ["prompt text", "file contents", "window titles", "web addresses", "keystrokes", "screenshots"] {
+        assert!(EXPLAINER.contains(w), "{w}");
+    }
+    for w in ["ledger entries", "head hashes", "badge", "tally submit"] {   // what can leave (ruling 14)
         assert!(EXPLAINER.contains(w), "{w}");
     }
     assert!(EXPLAINER.lines().all(|l| l.len() <= 72));
@@ -416,7 +432,7 @@ fn spec() -> ServiceSpec { ServiceSpec { exe: "/usr/local/bin/tally".into(), hom
 
 **Files:**
 - Create: `crates/tally-daemon/src/lock.rs`
-- Modify: `crates/tally-daemon/Cargo.toml` (`fs2 = "0.4"`), `src/main.rs` (take the lock at the start of `run`; `finalize`, `status`, `ingest` and `verify` do not take it, they must work while the daemon runs)
+- Modify: `crates/tally-daemon/Cargo.toml` (`fs2 = "0.4"`), `src/main.rs` (the `run` subcommand takes the lock before it calls plan 03's `run_loop(store, cfg, home, stop)` from `run.rs`, and also for `run --once`; nothing in `run.rs` changes; `finalize`, `status`, `ingest` and `verify` do not take it, they must work while the daemon runs)
 
 **Interfaces:**
 - `pub struct InstanceLock { file: File }`, `pub enum LockError { Held { pid: Option<u32> }, Io(io::Error) }`, `InstanceLock::acquire(home: &Path) -> Result<InstanceLock, LockError>`: opens `<home>/tally.lock`, `try_lock_exclusive`, writes the current pid after taking it. Dropping releases it (and a crashed process releases it, which is why this is an OS lock and not a pid file).
@@ -441,6 +457,24 @@ fn spec() -> ServiceSpec { ServiceSpec { exe: "/usr/local/bin/tally".into(), hom
 - [ ] **Step 2:** Run; FAIL; implement; PASS on all three OSes in CI.
 - [ ] **Step 3:** End-to-end test in `tests/cli.rs`: spawn `tally run --home <tmp>` (plan 03's command) as a child, wait until `<home>/tally.lock` is held, spawn a second `tally run` with the same home; assert it exits non-zero in under 2 s with stderr containing `already running` and the first child's pid; kill the first child, run again, assert it starts. Kill the child in a drop guard so a failing test does not leak a daemon.
 - [ ] **Step 4:** Commit: `feat(daemon): one daemon per data directory`.
+
+---
+
+### Task 10b: `tally login --browser` (ruling 12)
+
+**Files:**
+- Create: `crates/tally-daemon/src/login_browser.rs`
+- Modify: `src/lib.rs`, `src/main.rs` (plan 07's `Login` subcommand gains `--browser`)
+
+**Interfaces:**
+- Consumes: plan 09 Task 4's endpoints (`POST /v1/device/code {device_name}` -> `{device_code, user_code, verification_uri, verification_uri_complete, expires_in, interval}`; `POST /v1/device/token {device_code}` -> `200 {access_token}` or `400 {error}` with `authorization_pending`, `slow_down`, `access_denied`, `expired_token`), plan 07's `ureq` client, `save_token(home, id, token)` and its `[sync]` config handling.
+- `pub enum PollStep { Wait(u64 /* secs */), Done(String), Fail(String) }` and `pub fn next_step(status: u16, body: &str, interval: u64) -> PollStep` (pure): `200` -> `Done(access_token)`; `authorization_pending` -> `Wait(interval)`; `slow_down` -> `Wait(interval + 5)` (and the caller keeps the larger interval); `access_denied` -> `Fail("denied in the browser")`; `expired_token` or anything else -> `Fail(..)`.
+- `tally login --browser --server-id <id> [--server <URL>]`: the same arguments and storage as plan 07's stdin `tally login`. `device_name` is the hostname (truncated to 64 chars). Prints `open <verification_uri_complete>` and `code: <user_code>` to stderr, tries to open the browser (`open` / `xdg-open` / `cmd /c start`, failure ignored), polls with `next_step` until `Done` or `expires_in` passes, then `save_token(home, id, token)` exactly as plan 07 does (the token is user-scoped, so it also works for the user's other projects; plan 07 stores one line per server id, and the user may repeat `--server-id` for each). Never prints the token.
+
+- [ ] **Step 1: Write the failing tests** in `login_browser.rs`: `next_step` for each of the five responses; and one end-to-end against plan 07's in-process fake server (`TcpListener`) answering `authorization_pending`, then `slow_down`, then `200`: the token lands in `<home>/device_tokens` for the id, the waits were `interval` then `interval + 5` (inject the sleep function), and stdout/stderr never contain the token.
+- [ ] **Step 2:** Run `cargo test -p tally-daemon login_browser`. Expected: FAIL; implement; PASS.
+- [ ] **Step 3:** Manual against a dev server with plan 09 running: `tally login --browser --server-id <id> --server http://localhost:8080`, approve in the browser, then `tally sync` succeeds.
+- [ ] **Step 4:** Commit: `feat(daemon): tally login --browser via the device-code flow`.
 
 ---
 
@@ -593,7 +627,7 @@ The studies (pilot, blind grading, reviewer verdicts) are human work. This part 
   5. `esc_spam`: an `Interrupt` every 5 s, no prompts.
   6. `trivial_commits`: a `Commit { by: User, lines_changed: 1 }` every 90 s.
   7. `parallel_agents`: five overlapping 60-minute `AgentBusy` spans plus agent outputs; no human events.
-  8. `idle_youtube_while_agent_runs`: `AgentBusy` for 60 minutes, `Idle` from minute 3 to 58, one honest prompt at minute 0 and one at minute 59.
+  8. `idle_youtube_while_agent_runs`: `AgentBusy` for 60 minutes, `Idle` from minute 3 to 58, one honest prompt at minute 0 and one at minute 59, both `chars` 200 and `relevance_pm` 400 (below `THINK_RELEVANCE_PM` 500, so no think allowance; at 600 the 300 s think window would protect part of the idle and the bound below would be wrong).
   9. `hourly_bot_push` is server-side (plan 09): not modelled; listed in the report as `not modelled here`, with the plan that covers it. Likewise `prompt_injection_in_transcript` (plan 10).
 - Report: Markdown table `attack | relies on | simulated minutes | credited minutes | credited as % of honest control | assumption`, then a section per attack with its reasons, then a **Gaps** list that names every attack whose credited minutes exceed 5 percent of the duration. The output starts with the ruleset version and the commit hash of `tally-scoring`.
 
@@ -616,7 +650,9 @@ The studies (pilot, blind grading, reviewer verdicts) are human work. This part 
     assert!(r.verified_s <= prompts * 90, "{}", r.verified_s);     // trivial/zero-relevance cap is 90 s (spec §4)
 }
 #[test] fn youtube_while_agent_runs_credits_only_the_edges() {
-    assert!(run(&by_name("idle_youtube_while_agent_runs")).verified_s <= 600);
+    // prompts have relevance_pm < 500 (no think window). Prompt 1: first action, 120 s.
+    // Prompt 2 at 3540 s: interval [0, 3540 s] minus busy ∩ agent-idle [180+45, 3480 s] = 3540 - 3255 = 285 s.
+    assert!(run(&by_name("idle_youtube_while_agent_runs")).verified_s <= 405);
 }
 #[test] fn every_scenario_names_its_assumption_and_pitch_row() {
     for s in all() { assert!(!s.assumption.is_empty() && !s.pitch_row.is_empty(), "{}", s.name); }
@@ -638,7 +674,7 @@ The studies (pilot, blind grading, reviewer verdicts) are human work. This part 
 **Goal:** the pitch's "under 50 MB of RAM and under 1% CPU during active use, measured on a real 2016 Windows laptop", as a repeatable command that writes a numbers file. The measurement itself is run by a human on the real laptop (Step 6).
 
 **Interfaces:**
-- `load.rs`: `pub struct LoadPlan { pub hours: u32, pub prompts_per_hour: u32, pub tool_events_per_prompt: u32, pub seed: u64 }` and `pub fn write_session_log(dir: &Path, plan: &LoadPlan, clock: &mut dyn Clock) -> io::Result<()>`: appends lines to a session log under `dir`, in the **Claude Code log format fixture that plan 03's Task 1 spike captured** (copy its line shapes from `crates/tally-daemon/tests/fixtures/`; do not invent a format), at realistic cadence (default 8 h simulated, 40 prompts per hour, 6 tool events per prompt). Two modes: `--real-time` (writes at wall-clock cadence, for the laptop run) and `--accelerated N` (N times faster, for CI smoke).
+- `load.rs`: `pub struct LoadPlan { pub hours: u32, pub prompts_per_hour: u32, pub tool_events_per_prompt: u32, pub seed: u64 }` and `pub fn write_session_log(dir: &Path, plan: &LoadPlan, clock: &mut dyn Clock) -> io::Result<()>`: appends lines to a session log under `dir`, in the **Claude Code log format fixture that plan 03's Task 6 spike captured** (copy its line shapes from `crates/tally-daemon/tests/fixtures/claude_code/`; do not invent a format), at realistic cadence (default 8 h simulated, 40 prompts per hour, 6 tool events per prompt). Two modes: `--real-time` (writes at wall-clock cadence, for the laptop run) and `--accelerated N` (N times faster, for CI smoke).
 - `resources.rs`: `pub struct Sample { pub t_s: u64, pub rss_bytes: u64, pub cpu_pct_x100: u32 }`; `pub fn summarize(samples: &[Sample]) -> Summary { rss_p50, rss_p95, rss_max, cpu_mean_x100, cpu_p95_x100, cpu_max_x100, n }` (pure); `pub fn measure(child_pid: u32, duration: Duration, every: Duration) -> Vec<Sample>` using `sysinfo` for that pid only (the harness and the load writer are other processes and are excluded); `pub fn render_numbers(s: &Summary, machine: &MachineInfo, load: &LoadPlan, version: &str) -> String` (Markdown).
 - `MachineInfo { description: String /* from --machine, required */, os, cpu_model, logical_cores, total_ram_bytes }` (the last four read through `sysinfo`).
 - CLI: `tally-evidence resources --tally <path-to-tally-binary> --machine "<free text>" --duration-min 60 --load real-time --out docs/evidence/resources-<slug>.md`. It creates a temporary home and a temporary harness log directory, writes a `config.toml` pointing the Claude adapter at it, spawns `tally run --home <tmp>`, starts the load writer, samples once a second, kills the daemon, and writes the numbers file. **It refuses to write the file when `--machine` is missing.** Phases are reported separately: `idle` (first 10 minutes, no load) and `active` (rest); the 50 MB and 1% targets are checked against `active`, and the file states pass or fail for each next to the measured figure.
@@ -708,8 +744,9 @@ The studies (pilot, blind grading, reviewer verdicts) are human work. This part 
 
 ## Done when
 
-- `cargo test --workspace` and clippy pass on Windows, macOS and Linux CI; the presence probes compile everywhere and are exercised for real on at least Windows plus one macOS and one Linux machine, with every unverified environment marked `NOT VERIFIED` in `docs/platform-notes.md`.
-- On a desktop with no idle support, `tally status` says unsupported and the ledger gains no entries.
+- `cargo test --workspace` and clippy pass on Windows, macOS and Linux CI; the presence platforms compile everywhere and are exercised for real on at least Windows plus one macOS and one Linux machine, with every unverified environment marked `NOT VERIFIED` in `docs/platform-notes.md`.
+- On a desktop with no idle support, `tally status` says unsupported, `tally run` refuses to start naming `[presence] require`, and the ledger gains no entries; after a lid-close, the claim spanning the sleep is skipped with `no_presence_coverage` on every verified OS.
+- `tally login --browser` links a device through plan 09's device-code flow.
 - `tally init` on a clean machine prints the explainer, finds Claude Code, registers the current repo and writes the config once; `tally service install/status/stop/uninstall` works on all three OSes and uninstall leaves `<home>` intact.
 - A second `tally run` on the same home is refused.
 - A tagged dry run produces six archives and `SHA256SUMS`; both installers pass the run-twice CI test.
@@ -726,14 +763,14 @@ The studies (pilot, blind grading, reviewer verdicts) are human work. This part 
 ## Decisions I made (maintainer to confirm)
 
 1. **User-session background task, not a Windows Service.** Idle input is per interactive session; a service in session 0 cannot read it. Task Scheduler logon task, launchd agent, systemd user unit (`graphical-session.target`).
-2. **Unsupported means no finalization.** An unsupported or failing presence probe pins the presence watermark at 0 so the horizon never advances; nothing is scored into the ledger. I chose this over "assume present" because the scorer over-credits missing idle data.
-3. **Wayland takes priority over X11** whenever a Wayland session is detected (XWayland's XScreenSaver counter only sees X clients). `ext-idle-notify` only gives 30 s-resolution idle, which matches `IDLE_SAMPLE_MIN`.
+2. **Presence on by default on macOS and Linux; unsupported means no finalization.** Plan 04's `[presence] enabled`/`require` default to true on all three OSes. An unsupported desktop makes `tally run` refuse to start (plan 04), so there is no presence watermark and nothing is final; a failing platform gives no watermark and, past `COVERAGE_MAX_GAP_MS`, a coverage gap whose claims are skipped. I chose this over "assume present" because the scorer over-credits missing idle data. A user can opt out with `require = false`.
+3. **Wayland takes priority over X11** whenever a Wayland session is detected (XWayland's XScreenSaver counter only sees X clients). `ext-idle-notify` only gives 30 s-resolution idle, which matches `IDLE_SAMPLE_MIN_MS`.
 4. **Installers do not start tracking.** They install the binary only; consent, the explainer and service registration happen in `tally init`.
 5. **`tally-evidence` is a separate, unshipped crate** so evidence tooling never bloats the 50 MB budget binary.
 6. **Linux builds are static musl**; Windows and macOS native, six targets.
 7. **Hackatime comparator is an approximation** (all non-idle events as heartbeats, 2-minute timeout) unless real Hackatime heartbeats are supplied.
 8. **Red-team harness drives the scorer with the events each adapter would emit**, and prints the assumption per attack; it reports gaps (the planted-failing-test attack currently earns credit) rather than tuning tests to pass.
-9. Presence trait names (`IdleProbe`, `ProbeError`, `PresenceSource`) are guessed because plan 04's file did not exist; reconcile first.
+9. New platform files are flat (`presence_macos.rs` and so on) to match plan 04's `presence.rs`/`presence_win.rs`; no `Platform::name` method is added, the status line names the `Choice` instead.
 
 ## Questions only the maintainer can answer
 
