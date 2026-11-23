@@ -112,6 +112,12 @@ enum ProjectCmd {
         #[arg(long)]
         name: Option<String>,
     },
+    /// Store the server's project id for a registered repository.
+    Link {
+        path: PathBuf,
+        #[arg(long)]
+        server_id: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -188,6 +194,9 @@ fn main() -> Result<()> {
                 eprintln!("matched {name} via {via}");
             }
             println!("{id}");
+        }
+        Cmd::Project { cmd: ProjectCmd::Link { path, server_id } } => {
+            println!("{}", tally_daemon::project::link_git_project(&mut store, &path, &server_id)?);
         }
         Cmd::Finalize => {
             let s = finalize(&mut store)?;

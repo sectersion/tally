@@ -82,6 +82,28 @@ fn project_add_rejects_a_directory_outside_git_and_prints_the_id_inside_one() {
 }
 
 #[test]
+fn project_link_stores_the_server_id() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let repo = t.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let r = repo.to_str().unwrap();
+    let added = tally(&home, &["project", "add", r, "--name", "owner/repo"]);
+    assert!(added.status.success(), "{}", err(&added));
+    let o = tally(&home, &["project", "link", r, "--server-id", "srv_1"]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(out(&o), out(&added));
+    assert_eq!(out(&o).len(), 64);
+    let c = rusqlite::Connection::open(home.join("tally.db")).unwrap();
+    let (name, sid): (String, String) = c
+        .query_row("SELECT public_name, server_id FROM projects WHERE local_id = ?1", [out(&o)], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap();
+    assert_eq!((name.as_str(), sid.as_str()), ("owner/repo", "srv_1"));
+    let bad = tally(&home, &["project", "link", r, "--server-id", "a/b"]);
+    assert!(!bad.status.success());
+}
+
+#[test]
 fn project_add_reports_an_adopted_name_on_stderr_only() {
     if Command::new("git").arg("--version").output().is_err() {
         return;

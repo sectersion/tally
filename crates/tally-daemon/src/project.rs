@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 pub enum ProjectError {
     #[error("not inside a git repository")]
     NotGit,
+    #[error("server id must be 1 to 64 characters of letters, digits, '_' and '-'")]
+    BadServerId,
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -17,6 +19,17 @@ pub enum ProjectError {
 /// `public_name = None` keeps an existing name.
 pub fn register_git_project(store: &mut Store, path: &Path, public_name: Option<&str>) -> Result<String, ProjectError> {
     Ok(register_git_project_matched(store, path, public_name)?.0)
+}
+
+/// Registers the repository (name kept) and stores the server's project id for it; returns the local id.
+/// The id goes into a URL path, so it is checked before anything else.
+pub fn link_git_project(store: &mut Store, path: &Path, server_id: &str) -> Result<String, ProjectError> {
+    if !(1..=64).contains(&server_id.len()) || !server_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+        return Err(ProjectError::BadServerId);
+    }
+    let id = register_git_project(store, path, None)?;
+    store.set_server_id(&id, server_id)?;
+    Ok(id)
 }
 
 /// `(adopted name, "common dir" or "remote")`.
@@ -430,6 +443,17 @@ mod tests {
         s.set_project_identity("a", &RepoIdentity { common_dir: Some("/r/.git".into()), remote: Some("h/o/r".into()) }).unwrap();
         assert_eq!(s.projects().unwrap()[0].remote.as_deref(), Some("h/o/r"));
         Store::open(&p).unwrap(); // reopening is a no-op
+    }
+    #[test]
+    fn link_rejects_a_server_id_that_is_not_url_safe() {
+        let t = tempfile::tempdir().unwrap();
+        let mut s = Store::open_in_memory().unwrap();
+        for bad in ["a/b", "", &"a".repeat(65), "x?y"] {
+            assert!(matches!(link_git_project(&mut s, t.path(), bad), Err(ProjectError::BadServerId)), "{bad:?}");
+        }
+        std::fs::create_dir(t.path().join(".git")).unwrap();
+        let id = link_git_project(&mut s, t.path(), "srv_1-A").unwrap();
+        assert_eq!(id, project_id(t.path()).unwrap());
     }
     #[test]
     fn no_git_root_in_plain_directory() {

@@ -17,6 +17,8 @@ pub enum StoreError {
     ChainBroken,
     #[error("events at or before the finalize horizon changed while finalizing; retry")]
     Conflict,
+    #[error("project {0} is not registered; run tally project add first")]
+    UnknownProject(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,7 +104,7 @@ impl Store {
 
     fn init(conn: Connection) -> Result<Store, StoreError> {
         conn.execute_batch(SCHEMA)?;
-        for col in ["common_dir", "remote"] {
+        for col in ["common_dir", "remote", "server_id"] {
             let have: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM pragma_table_info('projects') WHERE name = ?1)",
                 [col],
@@ -264,6 +266,30 @@ impl Store {
             params![local_id, id.common_dir, id.remote],
         )?;
         Ok(())
+    }
+
+    /// Sets the server's project id; the public name is untouched.
+    pub fn set_server_id(&mut self, local_id: &str, server_id: &str) -> Result<(), StoreError> {
+        let n = self.conn.execute("UPDATE projects SET server_id = ?2 WHERE local_id = ?1", params![local_id, server_id])?;
+        if n == 0 {
+            return Err(StoreError::UnknownProject(local_id.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Public name to the distinct, sorted server ids of its local ids (only rows with both).
+    pub fn server_ids(&self) -> Result<BTreeMap<String, Vec<String>>, StoreError> {
+        let mut st = self.conn.prepare(
+            "SELECT DISTINCT public_name, server_id FROM projects
+             WHERE public_name IS NOT NULL AND server_id IS NOT NULL ORDER BY public_name, server_id",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for r in rows {
+            let (name, sid) = r?;
+            out.entry(name).or_default().push(sid);
+        }
+        Ok(out)
     }
 
     /// All projects in insertion order.
@@ -741,6 +767,28 @@ mod tests {
         assert_eq!(s.get_state("a").unwrap(), m(&[("f1", "11"), ("f2", "20")]));
         assert_eq!(s.get_state("b").unwrap(), m(&[("f1", "99")]));
         assert!(s.get_state("none").unwrap().is_empty());
+    }
+    #[test] fn server_ids_group_by_public_name_and_never_touch_the_name() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.register_project("id1", "C:/r", Some("owner/repo")).unwrap();
+        s.register_project("id2", "C:/r2", Some("owner/repo")).unwrap();   // a worktree
+        s.register_project("id3", "C:/q", None).unwrap();                  // unnamed
+        s.set_server_id("id1", "srv_1").unwrap();
+        s.set_server_id("id2", "srv_1").unwrap();
+        s.set_server_id("id3", "srv_9").unwrap();
+        assert_eq!(s.server_ids().unwrap(), BTreeMap::from([("owner/repo".to_string(), vec!["srv_1".to_string()])]));
+        assert_eq!(s.project_names().unwrap().get("id1").map(String::as_str), Some("owner/repo"));
+        assert!(matches!(s.set_server_id("nope", "x"), Err(StoreError::UnknownProject(_))));
+    }
+    #[test] fn an_old_database_without_server_id_is_migrated() {
+        let dir = tempfile::tempdir().unwrap(); let p = dir.path().join("tally.db");
+        { let c = rusqlite::Connection::open(&p).unwrap();
+          c.execute_batch("CREATE TABLE projects(local_id TEXT PRIMARY KEY, root TEXT NOT NULL, public_name TEXT);
+                           INSERT INTO projects VALUES ('id1','C:/r','owner/repo');").unwrap(); }
+        let mut s = Store::open(&p).unwrap();
+        s.set_server_id("id1", "srv_1").unwrap();
+        drop(s);
+        Store::open(&p).unwrap();                       // second open: no "duplicate column" error
     }
     #[test] fn file_store_uses_wal() {
         let dir = tempfile::tempdir().unwrap();
