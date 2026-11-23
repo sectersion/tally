@@ -1,7 +1,8 @@
 import type { BunRequest, Server, SQL } from "bun";
-import { requireToken } from "./auth.ts";
-import { MAX_BATCH, MAX_BODY_BYTES } from "./config";
+import { hashToken, newToken, requireToken } from "./auth.ts";
+import { type Config, loadConfig, MAX_BATCH, MAX_BODY_BYTES } from "./config";
 import { HttpError, json, parse, readJson } from "./errors.ts";
+import { authorizeUrl, exchange } from "./hca.ts";
 import {
   appendEntries,
   badge,
@@ -13,9 +14,17 @@ import {
 import { log } from "./log.ts";
 import { createLimiter, type Limiter } from "./ratelimit.ts";
 import { CommitBody, UploadBody } from "./schema.ts";
+import { clearCookie, createSession, requireCsrf, requireUser, sessionToken } from "./session.ts";
 import { rulesetVersion } from "./wasm.ts";
 
-type Deps = { sql: SQL; port: number; ruleset?: string; limiter?: Limiter };
+type Deps = { sql: SQL; port: number; ruleset?: string; limiter?: Limiter; cfg?: Config };
+
+const b64url = (b: ArrayBuffer | Uint8Array) => Buffer.from(b as Uint8Array).toString("base64url");
+const redirect = (to: string, setCookie?: string) =>
+  new Response(null, {
+    status: 303,
+    headers: setCookie ? { location: to, "set-cookie": setCookie } : { location: to },
+  });
 
 type Srv = Server<undefined>;
 const ip = (server: Srv, req: Request) => `ip:${server.requestIP(req)?.address ?? "unknown"}`;
@@ -34,7 +43,8 @@ function handle<P extends string>(
     try {
       res = await f(req, server);
     } catch (e) {
-      if (e instanceof HttpError)
+      if (e instanceof HttpError && e.location) res = redirect(e.location);
+      else if (e instanceof HttpError)
         res = json(e.status, e.body, e.status === 429 ? { "retry-after": "60" } : undefined);
       else {
         log("error", e instanceof Error ? e.message : String(e)); // message only: never bodies or tokens
@@ -55,6 +65,7 @@ function handle<P extends string>(
 
 export function createServer(deps: Deps) {
   const { sql } = deps;
+  const cfg = deps.cfg ?? loadConfig({ DATABASE_URL: "-", NODE_ENV: "test" }); // main.ts always passes the real one
   const ruleset = deps.ruleset ?? rulesetVersion();
   const limiter = deps.limiter ?? createLimiter();
   const limit = (key: string) => {
@@ -117,6 +128,63 @@ export function createServer(deps: Deps) {
           await authed(req, server, projectId);
           await recordCommit(sql, projectId, parse(CommitBody, await readJson(req)));
           return json(200, { ok: true });
+        }),
+      },
+      "/auth/login": {
+        GET: handle("/auth/login", async (req, server) => {
+          limit(ip(server, req));
+          const rt = new URL(req.url).searchParams.get("return_to") ?? "/";
+          const returnTo = /^\/(?![/\\])/.test(rt) ? rt : "/";
+          const state = newToken();
+          const nonce = newToken();
+          const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
+          const challenge = b64url(
+            await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)),
+          );
+          await sql`delete from oauth_states where expires_at < now()`;
+          await sql`insert into oauth_states (state_hash, verifier, nonce, return_to, expires_at)
+            values (${hashToken(state)}, ${verifier}, ${nonce}, ${returnTo}, now() + interval '10 minutes')`;
+          return redirect(authorizeUrl(cfg, state, nonce, challenge));
+        }),
+      },
+      "/auth/callback": {
+        GET: handle("/auth/callback", async (req, server) => {
+          limit(ip(server, req));
+          const q = new URL(req.url).searchParams;
+          const code = q.get("code");
+          const state = q.get("state");
+          if (!code || !state) throw new HttpError(400, { error: "bad_callback" });
+          const [st] =
+            await sql`delete from oauth_states where state_hash = ${hashToken(state)} and expires_at > now() returning verifier, nonce, return_to`;
+          if (!st) throw new HttpError(400, { error: "bad_state" });
+          let u: Awaited<ReturnType<typeof exchange>>;
+          try {
+            u = await exchange(cfg, code, st.verifier, st.nonce);
+          } catch (e) {
+            log("warn", "hca exchange failed", { reason: e instanceof Error ? e.message : "?" });
+            throw new HttpError(502, { error: "hca_failed" });
+          }
+          const [user] = await sql`insert into users (id, hca_sub, email, name, verification_status)
+            values (${crypto.randomUUID()}, ${u.sub}, ${u.email}, ${u.name}, ${u.verification_status})
+            on conflict (hca_sub) do update set email = excluded.email, name = excluded.name,
+              verification_status = excluded.verification_status returning id`;
+          const { setCookie } = await createSession(sql, cfg, user.id);
+          return redirect(st.return_to, setCookie);
+        }),
+      },
+      "/auth/logout": {
+        POST: handle("/auth/logout", async (req) => {
+          const s = await requireUser(sql, req);
+          requireCsrf(cfg, req, s, await req.formData().catch(() => new FormData()));
+          await sql`delete from sessions where token_hash = ${hashToken(sessionToken(req) as string)}`;
+          return redirect("/", clearCookie(cfg));
+        }),
+      },
+      // Placeholder until the settings page lands: proves requireUser's login redirect.
+      "/settings": {
+        GET: handle("/settings", async (req) => {
+          const s = await requireUser(sql, req);
+          return json(200, { user_id: s.userId });
         }),
       },
       "/v1/projects/:id/badge.json": {

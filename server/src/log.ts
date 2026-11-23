@@ -1,4 +1,13 @@
-const SECRET = new Set(["authorization", "token", "token_hash", "database_url"]);
+const SECRET = new Set([
+  "authorization",
+  "token",
+  "token_hash",
+  "database_url",
+  "cookie",
+  "csrf",
+  "code",
+  "client_secret",
+]);
 
 export function log(level: string, msg: string, fields: Record<string, unknown> = {}): void {
   const safe: Record<string, unknown> = {};

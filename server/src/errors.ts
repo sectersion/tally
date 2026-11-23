@@ -5,6 +5,8 @@ export class HttpError extends Error {
   constructor(
     public status: number,
     public body: { error: string; [k: string]: unknown },
+    /** When set, the response is a 303-style redirect to this location. */
+    public location?: string,
   ) {
     super(body.error);
   }

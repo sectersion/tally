@@ -14,5 +14,5 @@ const cfg = loadConfig();
 const sql = connect(cfg.databaseUrl);
 const applied = await migrate(sql);
 if (applied.length) log("info", "migrated", { applied });
-const s = createServer({ sql, port: cfg.port });
+const s = createServer({ sql, port: cfg.port, cfg });
 log("info", "listening", { port: s.port });

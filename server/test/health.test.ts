@@ -21,10 +21,12 @@ test("unknown route is a JSON 404", async () => {
 
 test("config requires DATABASE_URL", () => {
   expect(() => loadConfig({})).toThrow("DATABASE_URL is required");
-  expect(loadConfig({ DATABASE_URL: "x" })).toEqual({
+  expect(() => loadConfig({ DATABASE_URL: "x" })).toThrow("PUBLIC_BASE_URL is required");
+  expect(loadConfig({ DATABASE_URL: "x", NODE_ENV: "test" })).toMatchObject({
     port: 8080,
     databaseUrl: "x",
     logLevel: "info",
+    publicBaseUrl: "http://localhost:8080",
   });
   expect(() => loadConfig({ DATABASE_URL: "x", LOG_LEVEL: "loud" })).toThrow();
 });
