@@ -174,3 +174,34 @@ fn verify_reports_a_tampered_ledger_entry_by_index() {
     assert_eq!(o.status.code(), Some(1));
     assert_eq!(out(&o), "FAIL at entry 0: bad_hash");
 }
+
+fn status_events(home: &Path) -> String {
+    let s = out(&tally(home, &["status"]));
+    s.lines().find(|l| l.starts_with("events:")).unwrap().to_string()
+}
+
+#[test]
+fn hook_test_run_passes_the_exit_code_through_and_records_one_user_event() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let bin = env!("CARGO_BIN_EXE_tally");
+    let o = tally(&home, &["hook", "test-run", "--", bin, "--help"]);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert_eq!(status_events(&home), "events: 1");
+
+    let o = tally(&home, &["hook", "test-run", "--", bin, "no-such-subcommand"]);
+    let code = o.status.code().unwrap();
+    assert_ne!(code, 0);
+    assert_eq!(code, Command::new(bin).arg("no-such-subcommand").output().unwrap().status.code().unwrap());
+    assert_eq!(status_events(&home), "events: 2");
+}
+
+#[test]
+fn hook_test_run_of_a_missing_program_exits_127_and_records_nothing() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let o = tally(&home, &["hook", "test-run", "--", "tally-no-such-program-xyz"]);
+    assert_eq!(o.status.code(), Some(127));
+    assert!(err(&o).contains("tally-no-such-program-xyz"), "{}", err(&o));
+    assert!(!home.join("tally.db").exists());
+}
