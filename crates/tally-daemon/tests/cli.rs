@@ -447,3 +447,18 @@ fn login_checks_the_token_against_a_configured_server() {
     assert!(o.status.success(), "{}", err(&o));
     assert!(err(&o).contains("warning"), "{}", err(&o));
 }
+
+#[test]
+fn repair_on_a_clean_store_prints_ok_and_new_epoch_is_refused() {
+    let t = tempfile::tempdir().unwrap();
+    let home = named_home(t.path());
+    let o = tally(&home, &["repair"]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(out(&o).starts_with("ok:"), "{}", out(&o));
+    let o = tally(&home, &["repair", "--new-epoch", "--reason", "store-damaged"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(err(&o).contains("not available"), "{}", err(&o));
+    let o = tally(&home, &["repair", "--new-epoch", "--reason", "my text"]);
+    assert!(!o.status.success());
+    assert!(err(&o).contains("invalid value"), "{}", err(&o));
+}

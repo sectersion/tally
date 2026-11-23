@@ -72,6 +72,14 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Diagnose a ledger that no longer matches a fresh derivation (read-only).
+    Repair {
+        /// Close the current chain and start a new epoch (not yet available).
+        #[arg(long, requires = "reason")]
+        new_epoch: bool,
+        #[arg(long, value_enum, requires = "new_epoch")]
+        reason: Option<tally_daemon::repair::Reason>,
+    },
     Status,
     Verify,
     /// Check downloaded published chain files; needs no home or database. Exits 1 if any fail.
@@ -176,6 +184,10 @@ fn main() -> Result<()> {
         println!("{}", if gone { "logged out" } else { "not logged in" });
         return Ok(());
     }
+    if let Cmd::Repair { new_epoch: true, .. } = &cli.cmd {
+        eprintln!("{}", tally_daemon::repair::NEW_EPOCH_UNAVAILABLE);
+        std::process::exit(1);
+    }
     if matches!(cli.cmd, Cmd::Ingest { .. } | Cmd::Project { .. } | Cmd::Run { .. }) {
         std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
     } else if !db.exists() {
@@ -272,6 +284,30 @@ fn main() -> Result<()> {
             }
             if failed {
                 std::process::exit(1);
+            }
+        }
+        Cmd::Repair { .. } => {
+            use tally_daemon::repair::{diagnose, Diagnosis};
+            let msg = match diagnose(&store)? {
+                Diagnosis::Clean => None,
+                Diagnosis::ScoringChanged { index, field, .. } => Some(format!("scoring changed at entry {index} ({field}): uploads are stopped; repair needs plan 10 Task 1b merged and server epoch support; see docs/superpowers/plans/2026-11-23-07-daemon-sync.md Task 9")),
+                Diagnosis::Diverged { index, field, .. } => Some(format!("ledger diverged at entry {index} ({field}): uploads are stopped for all projects; a new epoch needs tally repair --new-epoch (not yet available: needs plan 10 Task 1b merged and server epoch support)")),
+                Diagnosis::Published(e) => Some(format!("published chains are inconsistent: {e}")),
+            };
+            if let Some(m) = msg {
+                println!("{m}");
+                std::process::exit(1);
+            }
+            println!("ok: ledger matches a fresh derivation");
+            // Server counts, when logged in: one GET /head per linked chain.
+            if let Some(server) = config::load(&home)?.sync.server {
+                let tokens = tally_daemon::credentials::load_tokens(&home).context("reading device tokens")?;
+                for (p, r) in tally_daemon::sync::dry_run(&mut store, &server, &tokens) {
+                    match r {
+                        Ok(c) => println!("{} {}: server has {}", c.project, c.ruleset, c.server_count),
+                        Err(e) => eprintln!("{p}: {e}"),
+                    }
+                }
             }
         }
         Cmd::Status => {

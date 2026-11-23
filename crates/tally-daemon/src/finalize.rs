@@ -20,7 +20,7 @@ pub struct FinalizeSummary {
 pub enum FinalizeError {
     #[error(transparent)]
     Store(#[from] StoreError),
-    #[error("ledger diverges from re-scored claims at index {index} (action {action_id}, field {field})")]
+    #[error("ledger diverges from re-scored claims at index {index} (action {action_id}, field {field}); run tally repair")]
     Divergence { index: usize, action_id: String, field: &'static str },
     #[error("ledger was written under ruleset {ledger} but this build scores with {current}; finalize will not append across a ruleset change")]
     RulesetChanged { ledger: String, current: String },
@@ -130,6 +130,13 @@ fn derive(store: &Store) -> Result<Derived, FinalizeError> {
 /// Verifies the stored ledger is a prefix of the re-scored claims; writes nothing.
 pub fn check_derivation(store: &Store) -> Result<(), FinalizeError> {
     derive(store).map(|_| ())
+}
+
+/// Fresh `(verified_s, unverified_s)` of the claim that should sit at ledger `index`; `None` when
+/// the re-scored claims have no such entry. Read-only; for `repair::diagnose`.
+pub(crate) fn rescored_seconds(store: &Store, index: usize) -> Result<Option<(u32, u32)>, StoreError> {
+    let skipped: BTreeSet<String> = store.skipped()?.into_iter().map(|(id, ..)| id).collect();
+    Ok(score(&store.events()?).into_iter().filter(|c| !skipped.contains(&c.action_id)).nth(index).map(|c| (c.verified_s, c.unverified_s)))
 }
 
 /// First ledger index that differs from the claims (minus `skipped`, never ledgered) and the

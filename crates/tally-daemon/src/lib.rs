@@ -12,6 +12,7 @@ pub mod presence;
 mod presence_win;
 pub mod project;
 pub mod published;
+pub mod repair;
 pub mod run;
 pub mod source;
 pub mod status;
