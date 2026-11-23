@@ -1,5 +1,7 @@
 # Tally
 
+[![tracked with Tally](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fsectersion%2Ftally%2Ftally-data%2Fsectersion%2Ftally%2Fbadge.json)](https://github.com/sectersion/tally/tree/tally-data/sectersion/tally)
+
 **Open-source AI time tracking that counts the hours of human decisions, not agent activity.**
 
 Tally passively measures the hours of *productive struggle* you spend building projects with AI. Hackatime counts how active your editor (and your AI agent) is. Tally counts how often **you** decide something, and how long you spent getting to that decision.
@@ -25,7 +27,7 @@ A local dashboard focused on getting better at building with AI: bugs fixed, tim
 
 ## How this badge is made
 
-The number is verified hours only, all-time for this repository, counted from the day the daemon first ran on the maintainer's machine (`<start date: filled in at first publish>`). Earlier work, and time while the daemon was off, are not counted.
+The number is verified hours only, all-time for this repository, counted from the day the daemon first ran on the maintainer's machine (2026-11-23). Earlier work, and time while the daemon was off, are not counted.
 
 The `tally-data` branch holds `sectersion/tally/badge.json` and `sectersion/tally/ledger-<ruleset>.json`. They update about once a day, and the badge can lag up to about 15 minutes behind a publish because of caching.
 
