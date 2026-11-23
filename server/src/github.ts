@@ -214,7 +214,7 @@ export async function dispatch(
   const action = z.object({ action: z.string() }).safeParse(payload).data?.action;
   if (event === "push") {
     const p = parse(Push, payload);
-    if (p.deleted) return true;
+    if (p.deleted || /^0+$/.test(p.after)) return true; // branch deletion
     const [link] = await tx`select project_id from project_repos
       where github_repo_id = ${p.repository.id} and unlinked_at is null`;
     const projectId: string | null = link?.project_id ?? null;
@@ -247,9 +247,12 @@ export async function dispatch(
   }
   if (event === "installation_repositories" && action === "removed") {
     const p = parse(Removed, payload);
+    // Only repos still on this installation: a stale removal after a transfer must not cut the new link.
+    const mine = await tx`select id from github_repos where installation_id = ${p.installation.id}
+      and id = any(${p.repositories_removed.map((r) => r.id)}::bigint[])`;
     await unlink(
       tx,
-      p.repositories_removed.map((r) => r.id),
+      mine.map((r: { id: string | number }) => Number(r.id)),
       "removed",
       `installation ${p.installation.id}`,
     );

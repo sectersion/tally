@@ -90,7 +90,7 @@ test("gh sets headers, follows Link next, 502 on non-2xx", async () => {
   expect(calls[0]?.h.get("x-github-api-version")).toBe("2022-11-28");
   expect(calls[0]?.h.get("user-agent")).toBe("tally-server");
   expect(calls[0]?.h.get("authorization")).toBe("Bearer t0k");
-  expect(gh("t0k", "/boom", f)).rejects.toMatchObject({ status: 502 });
+  await expect(gh("t0k", "/boom", f)).rejects.toMatchObject({ status: 502 });
 });
 
 test("linking a repo the user can access works and bumps change_seq", async () => {

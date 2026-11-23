@@ -284,20 +284,44 @@ test("renames of unknown repos do nothing", async () => {
   const { res } = await deliver("repository.renamed.json", { body });
   expect(res.status).toBe(200);
   expect((await sql`select 1 from github_repos where id = 999999`).length).toBe(0);
+  expect((await sql`select 1 from repo_events where github_repo_id = 999999`).length).toBe(0);
 });
 
 test("receipts cannot be updated or deleted", async () => {
   await linked();
   const { delivery } = await deliver("push.push.json");
-  expect(sql`update push_receipts set ref = 'x' where delivery_id = ${delivery}`).rejects.toThrow(
+  await expect(
+    sql`update push_receipts set ref = 'x' where delivery_id = ${delivery}`,
+  ).rejects.toThrow(/append-only/);
+  await expect(sql`delete from push_receipts where delivery_id = ${delivery}`).rejects.toThrow(
     /append-only/,
   );
-  expect(sql`delete from push_receipts where delivery_id = ${delivery}`).rejects.toThrow(
+  await expect(sql`delete from webhook_deliveries where delivery_id = ${delivery}`).rejects.toThrow(
     /append-only/,
   );
-  expect(sql`delete from webhook_deliveries where delivery_id = ${delivery}`).rejects.toThrow(
-    /append-only/,
-  );
+});
+
+test("a stale removal from the old installation after a transfer keeps the link", async () => {
+  const p = await linked();
+  await deliver("repository.transferred.json"); // repo now on installation 5002
+  await sql`delete from repo_events where github_repo_id = ${REPO}`; // earlier tests' rows; the table is not append-only
+  const { res } = await deliver("installation_repositories.removed.json"); // from 5001
+  expect(res.status).toBe(200);
+  expect(
+    (await sql`select 1 from project_repos where project_id = ${p.id} and unlinked_at is null`)
+      .length,
+  ).toBe(1);
+  const ev =
+    await sql`select 1 from repo_events where github_repo_id = ${REPO} and kind = 'removed'`;
+  expect(ev.length).toBe(0);
+});
+
+test("a push whose after is all zeros stores nothing", async () => {
+  await linked();
+  const body = { ...JSON.parse(fx("push.push.json").body), after: "0".repeat(40), commits: [] };
+  const { res, delivery } = await deliver("push.push.json", { body: JSON.stringify(body) });
+  expect(res.status).toBe(200);
+  expect((await sql`select 1 from push_receipts where delivery_id = ${delivery}`).length).toBe(0);
 });
 
 test("a failing dispatch rolls back the delivery row, and the redelivery is processed", async () => {
