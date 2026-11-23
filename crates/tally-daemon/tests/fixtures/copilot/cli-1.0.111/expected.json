@@ -1,0 +1,76 @@
+[
+  {
+    "end_ts": 41777,
+    "id": "e1",
+    "kind": "agent_busy",
+    "project": "proj",
+    "session": "00000000-0000-4000-8000-000000000001",
+    "source": "copilot",
+    "t": 0,
+    "v": 1
+  },
+  {
+    "chars": 31,
+    "id": "e2",
+    "kind": "prompt",
+    "novelty_bytes": 31,
+    "project": "proj",
+    "relevance_pm": 500,
+    "session": "00000000-0000-4000-8000-000000000001",
+    "source": "copilot",
+    "t": 0,
+    "v": 1
+  },
+  {
+    "chars": 102,
+    "id": "e3",
+    "kind": "agent_output",
+    "project": "proj",
+    "session": "00000000-0000-4000-8000-000000000001",
+    "source": "copilot",
+    "t": 4807,
+    "v": 1
+  },
+  {
+    "chars": 7841,
+    "id": "e4",
+    "kind": "agent_output",
+    "project": "proj",
+    "session": "00000000-0000-4000-8000-000000000001",
+    "source": "copilot",
+    "t": 41775,
+    "v": 1
+  },
+  {
+    "end_ts": 54684,
+    "id": "e5",
+    "kind": "agent_busy",
+    "project": "proj",
+    "session": "00000000-0000-4000-8000-000000000001",
+    "source": "copilot",
+    "t": 52757,
+    "v": 1
+  },
+  {
+    "chars": 11,
+    "id": "e6",
+    "kind": "prompt",
+    "novelty_bytes": 11,
+    "project": "proj",
+    "relevance_pm": 500,
+    "session": "00000000-0000-4000-8000-000000000001",
+    "source": "copilot",
+    "t": 52757,
+    "v": 1
+  },
+  {
+    "chars": 12,
+    "id": "e7",
+    "kind": "agent_output",
+    "project": "proj",
+    "session": "00000000-0000-4000-8000-000000000001",
+    "source": "copilot",
+    "t": 54683,
+    "v": 1
+  }
+]

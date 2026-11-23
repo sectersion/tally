@@ -157,7 +157,7 @@ fn run_once_with_an_empty_projects_dir_finalizes_and_exits() {
     let home = t.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     let empty = tempfile::tempdir().unwrap();
-    std::fs::write(home.join("config.toml"), format!("[claude_code]\nprojects_dir = '{}'\n", empty.path().display())).unwrap();
+    std::fs::write(home.join("config.toml"), format!("[copilot]\nenabled = false\n[claude_code]\nprojects_dir = '{}'\n", empty.path().display())).unwrap();
     let o = tally(&home, &["run", "--once"]);
     assert!(o.status.success(), "{}", err(&o));
     assert_eq!(out(&o), "added 0, duplicates 0, skipped 0, final 0, provisional 0");
@@ -471,7 +471,11 @@ fn doctor_prints_a_line_per_configured_source() {
     tally_daemon::store::Store::open(&home.join("tally.db")).unwrap();
     let o = tally(&home, &["doctor"]);
     assert!(o.status.success(), "{}", err(&o));
-    assert_eq!(out(&o), "claude-code  no_logs  files=0  last=never  format=-  errors=0/0");
+    assert_eq!(
+        out(&o),
+        "claude-code  no_logs  files=0  last=never  format=-  errors=0/0
+copilot  no_logs  files=0  last=never  format=-  errors=0/0"
+    );
     let o = tally(&home, &["doctor", "--json"]);
     assert!(out(&o).contains("\"status\": \"no_logs\""), "{}", out(&o));
 }

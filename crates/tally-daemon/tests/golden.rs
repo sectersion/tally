@@ -109,3 +109,51 @@ fn two_harnesses_one_project_do_not_double_credit() {
     assert!(secs(&a) > 0);
     assert!(secs(&merged) < secs(&a) + secs(&b), "{} {} {}", secs(&merged), secs(&a), secs(&b));
 }
+
+mod copilot {
+    use super::*;
+    use tally_daemon::adapters::copilot::Copilot;
+
+    const DIR: &str = "copilot/cli-1.0.111";
+    fn fixture(rel: &str) -> String {
+        std::fs::read_to_string(format!("{}/tests/fixtures/{DIR}/{rel}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    }
+
+    #[test]
+    fn copilot_cli_v1_golden() {
+        golden::<Copilot>(DIR);
+    }
+
+    #[test]
+    fn copilot_fixture_has_the_two_typed_prompts_and_session_project() {
+        let (p, r) = Copilot::parse(&fixture("events.jsonl"), &StubCtx);
+        let prompts = p.events.iter().filter(|e| matches!(e.kind, Kind::Prompt { .. })).count();
+        assert_eq!((prompts, r.format.as_str(), r.records), (2, "cli-events-v1", 233));
+        assert!(p.events.iter().all(|e| e.project.as_deref() == Some("proj") && e.source == "copilot"));
+    }
+
+    #[test]
+    fn copilot_no_text_leak() {
+        let (p, _) = Copilot::parse(&fixture("events.jsonl"), &StubCtx);
+        assert_no_text_leak(&p.events, &["\"text\"", "\"cmd\"", "\"path\"", "\"content\"", "xxxx", "tallyproj"]);
+    }
+
+    #[test]
+    fn copilot_format_drift() {
+        let (clean, _) = Copilot::parse(&fixture("events.jsonl"), &StubCtx);
+        let (p, r) = Copilot::parse(&fixture("drift/events.jsonl"), &StubCtx);
+        assert_eq!(r.errors, 2); // one line cut mid-JSON, one without a timestamp
+        assert!(r.skipped >= 1);
+        // a renamed record type loses only that record's events (its prompt and busy span); nothing is invented
+        assert!(p.events.iter().all(|e| clean.events.iter().any(|c| c.id == e.id)));
+        let lost = clean.events.len() - p.events.len();
+        assert!((1..=3).contains(&lost), "lost {lost}");
+    }
+
+    #[test]
+    fn copilot_reread_gives_same_ids() {
+        let ids = || -> Vec<String> { Copilot::parse(&fixture("events.jsonl"), &StubCtx).0.events.into_iter().map(|e| e.id).collect() };
+        assert_eq!(ids(), ids());
+        assert!(!ids().is_empty());
+    }
+}
