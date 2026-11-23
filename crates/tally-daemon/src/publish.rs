@@ -178,6 +178,55 @@ pub fn publish_once(
     Ok(PublishReport { projects, pushed })
 }
 
+pub const RETRY_MS: i64 = 3_600_000;
+
+/// `year * 10000 + month * 100 + day` in local time, for example 20261123.
+pub fn local_day_number(now: chrono::DateTime<chrono::Local>) -> i64 {
+    use chrono::Datelike;
+    now.year() as i64 * 10_000 + now.month() as i64 * 100 + now.day() as i64
+}
+
+/// Publishes at most once per local day; a failure waits `RETRY_MS` before the next try.
+#[derive(Default)]
+pub struct Scheduler {
+    last_failure_ms: Option<i64>,
+}
+
+impl Scheduler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// A day missed while off (`last_publish_day < today`) is caught up once, not once per missed day.
+    pub fn due(&self, store: &Store, today: i64, now_ms: i64, enabled: bool) -> Result<bool, crate::store::StoreError> {
+        if !enabled || store.meta_get("last_publish_day")?.is_some_and(|d| d >= today) {
+            return Ok(false);
+        }
+        Ok(self.last_failure_ms.is_none_or(|f| now_ms - f >= RETRY_MS))
+    }
+    pub fn tick(&mut self, store: &mut Store, cfg: &PublishConfig, home: &Path, today: i64, now_ms: i64) {
+        match self.due(store, today, now_ms, cfg.enabled) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(e) => return eprintln!("publish failed: {e}"),
+        }
+        let done = publish_once(store, cfg, home, false).map_err(|e| e.to_string()).and_then(|r| {
+            store.meta_set("last_publish_day", today).map(|_| r).map_err(|e| e.to_string())
+        });
+        match done {
+            Ok(r) => {
+                self.last_failure_ms = None;
+                if r.pushed {
+                    eprintln!("published {} entries", r.projects.iter().map(|p| p.new_entries).sum::<usize>());
+                }
+            }
+            Err(e) => {
+                self.last_failure_ms = Some(now_ms);
+                eprintln!("publish failed: {e}");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,6 +445,72 @@ mod tests {
         assert!(!r.pushed);
         assert!(s.published_projects().unwrap().is_empty());
         assert!(!home.path().join("publish").exists());
+    }
+    fn day(s: &Store) -> Option<i64> { s.meta_get("last_publish_day").unwrap() }
+    #[test] fn runs_once_per_day_and_again_the_next_day() {
+        if skip_without_git() { return; }
+        let (bare, url) = bare_remote();
+        let home = tempfile::tempdir().unwrap();
+        let mut s = named_store();
+        let mut sch = Scheduler::new();
+        sch.tick(&mut s, &cfg(&url), home.path(), 20261123, 0);
+        assert_eq!((commits(bare.path()), day(&s)), (1, Some(20261123)));
+        let missing = home.path().join("nope").to_string_lossy().into_owned();
+        sch.tick(&mut s, &cfg(&missing), home.path(), 20261123, 10);
+        assert_eq!(sch.last_failure_ms, None);
+        assert!(!sch.due(&s, 20261123, 10, true).unwrap());
+        sch.tick(&mut s, &cfg(&url), home.path(), 20261124, 20);
+        assert_eq!((commits(bare.path()), day(&s)), (1, Some(20261124)));
+    }
+    #[test] fn a_missed_day_is_caught_up_once_at_next_start() {
+        if skip_without_git() { return; }
+        let (bare, url) = bare_remote();
+        let home = tempfile::tempdir().unwrap();
+        let mut s = named_store();
+        s.meta_set("last_publish_day", 20261120).unwrap();
+        let mut sch = Scheduler::new();
+        assert!(sch.due(&s, 20261125, 0, true).unwrap());
+        sch.tick(&mut s, &cfg(&url), home.path(), 20261125, 0);
+        assert_eq!((commits(bare.path()), day(&s)), (1, Some(20261125)));
+        assert!(!sch.due(&s, 20261125, 1, true).unwrap());
+    }
+    #[test] fn a_day_with_no_new_claims_is_marked_done_without_a_commit() {
+        if skip_without_git() { return; }
+        let (bare, url) = bare_remote();
+        let home = tempfile::tempdir().unwrap();
+        let mut s = named_store();
+        let mut sch = Scheduler::new();
+        sch.tick(&mut s, &cfg(&url), home.path(), 20261123, 0);
+        sch.tick(&mut s, &cfg(&url), home.path(), 20261124, 1);
+        assert_eq!((commits(bare.path()), day(&s)), (1, Some(20261124)));
+    }
+    #[test] fn a_failure_is_retried_after_an_hour_not_every_tick() {
+        if skip_without_git() { return; }
+        let (bare, url) = bare_remote();
+        let home = tempfile::tempdir().unwrap();
+        let mut s = named_store();
+        let mut sch = Scheduler::new();
+        let missing = home.path().join("nope").to_string_lossy().into_owned();
+        sch.tick(&mut s, &cfg(&missing), home.path(), 20261123, 0);
+        assert_eq!((day(&s), sch.last_failure_ms), (None, Some(0)));
+        assert!(!sch.due(&s, 20261123, RETRY_MS - 1, true).unwrap());
+        // a tick inside the window must not touch the (now good) remote
+        sch.tick(&mut s, &cfg(&url), home.path(), 20261123, RETRY_MS - 1);
+        let o = Command::new("git").current_dir(bare.path()).args(["rev-parse", "--verify", "tally-data"]).output().unwrap();
+        assert!(!o.status.success() && day(&s).is_none());
+        sch.tick(&mut s, &cfg(&url), home.path(), 20261123, RETRY_MS);
+        assert_eq!((day(&s), commits(bare.path())), (Some(20261123), 1));
+        assert_eq!(sch.last_failure_ms, None);
+    }
+    #[test] fn disabled_never_publishes() {
+        let s = named_store();
+        assert!(!Scheduler::new().due(&s, 20261123, 0, false).unwrap());
+        assert!(Scheduler::new().due(&s, 20261123, 0, true).unwrap());
+    }
+    #[test] fn local_day_number_formats_year_month_day() {
+        use chrono::TimeZone;
+        let t = chrono::Local.with_ymd_and_hms(2026, 11, 23, 12, 0, 0).unwrap();
+        assert_eq!(local_day_number(t), 20261123);
     }
     #[test] fn git_errors_do_not_echo_the_remote_url() {
         if skip_without_git() { return; }
