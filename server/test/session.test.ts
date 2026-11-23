@@ -3,11 +3,12 @@ import { hashToken } from "../src/auth.ts";
 import { connect } from "../src/db.ts";
 import { HttpError } from "../src/errors.ts";
 import { setHcaExchangeForTests } from "../src/hca.ts";
+import { createLimiter } from "../src/ratelimit.ts";
 import { requireRole } from "../src/session.ts";
 import { start } from "./helpers.ts";
 
 const sql = connect(process.env.DATABASE_URL ?? "");
-const srv = start(sql);
+const srv = start(sql, createLimiter(6000, 1000)); // these tests make many auth calls from one ip
 const ORIGIN = "http://localhost:8080"; // PUBLIC_BASE_URL under NODE_ENV=test
 const sub = `ident!${crypto.randomUUID()}`;
 
@@ -27,18 +28,24 @@ afterAll(async () => {
 
 const noFollow = { redirect: "manual" } as const;
 
-/** Runs /auth/login then /auth/callback; returns the callback response and the login state. */
-async function signIn(returnTo = "/") {
-  const login = await fetch(
+async function login(returnTo = "/") {
+  const r = await fetch(
     `${srv.url}/auth/login?return_to=${encodeURIComponent(returnTo)}`,
     noFollow,
   );
-  expect(login.status).toBe(303);
-  const state = new URL(login.headers.get("location") as string).searchParams.get(
-    "state",
-  ) as string;
-  const cb = await fetch(`${srv.url}/auth/callback?code=c1&state=${state}`, noFollow);
-  return { cb, state };
+  expect(r.status).toBe(303);
+  const state = new URL(r.headers.get("location") as string).searchParams.get("state") as string;
+  return { state, oauth: r.headers.get("set-cookie") as string };
+}
+const callback = (state: string, cookie?: string) =>
+  fetch(`${srv.url}/auth/callback?code=c1&state=${state}`, {
+    ...noFollow,
+    headers: cookie ? { cookie } : {},
+  });
+/** Runs /auth/login then /auth/callback with the browser's oauth cookie. */
+async function signIn(returnTo = "/") {
+  const { state, oauth } = await login(returnTo);
+  return { cb: await callback(state, `tally_oauth=${state}`), state, oauth };
 }
 const cookieOf = (r: Response) => (r.headers.get("set-cookie") ?? "").split(";")[0] as string;
 async function session() {
@@ -63,7 +70,7 @@ const sessionCount = async (cookie: string) =>
 test("unknown state is 400 and creates no user", async () => {
   const n = async () => (await sql`select 1 from users where hca_sub = ${sub}`).length;
   const before = await n();
-  const r = await fetch(`${srv.url}/auth/callback?code=c&state=nope`, noFollow);
+  const r = await callback("nope", "tally_oauth=nope");
   expect(r.status).toBe(400);
   expect(await n()).toBe(before);
   expect(before).toBe(0); // first test: nothing has signed in yet
@@ -72,8 +79,39 @@ test("unknown state is 400 and creates no user", async () => {
 test("a state works once", async () => {
   const { cb, state } = await signIn();
   expect(cb.status).toBe(303);
-  const again = await fetch(`${srv.url}/auth/callback?code=c1&state=${state}`, noFollow);
-  expect(again.status).toBe(400);
+  expect((await callback(state, `tally_oauth=${state}`)).status).toBe(400);
+});
+
+test("login sets the oauth cookie bound to the state", async () => {
+  const { state, oauth } = await login();
+  expect(oauth).toContain(`tally_oauth=${state}`);
+  for (const f of ["HttpOnly", "SameSite=Lax", "Path=/auth/callback", "Max-Age=600"])
+    expect(oauth).toContain(f);
+  expect(oauth).not.toContain("Secure"); // localhost
+});
+
+test("a correct state without the oauth cookie is 400 and creates no user", async () => {
+  const count = async () => Number((await sql`select count(*) as n from users`)[0].n);
+  const before = await count();
+  const { state } = await login();
+  expect((await callback(state)).status).toBe(400);
+  expect(await count()).toBe(before);
+  // the state was not consumed, so the right browser can still finish
+  expect((await callback(state, `tally_oauth=${state}`)).status).toBe(303);
+});
+
+test("a wrong oauth cookie is 400", async () => {
+  const { state } = await login();
+  expect((await callback(state, "tally_oauth=tly_other")).status).toBe(400);
+  expect((await callback(state, "tally_oauth=é")).status).toBe(400); // non-ASCII must not 500
+});
+
+test("a good callback clears the oauth cookie", async () => {
+  const { cb } = await signIn();
+  const cookies = cb.headers.getSetCookie();
+  const cleared = cookies.find((c) => c.startsWith("tally_oauth=;")) as string;
+  expect(cleared).toContain("Max-Age=0");
+  expect(cleared).toContain("Path=/auth/callback");
 });
 
 test("callback redirects to return_to and upserts the user", async () => {
@@ -83,7 +121,14 @@ test("callback redirects to return_to and upserts the user", async () => {
 });
 
 test("return_to cannot leave the site", async () => {
-  for (const bad of ["//evil.example", "https://evil", "/\\evil"]) {
+  for (const bad of [
+    "//evil.example",
+    "https://evil",
+    "/\\evil",
+    "/\t/evil",
+    "/\n/evil",
+    "/\r/evil",
+  ]) {
     const { cb } = await signIn(bad);
     expect(cb.headers.get("location")).toBe("/");
   }
@@ -107,6 +152,13 @@ test("sessions store only the hash", async () => {
 test("logout without csrf is 403 and keeps the session", async () => {
   const { cookie } = await session();
   expect((await logout(cookie, {}, ORIGIN)).status).toBe(403);
+  expect(await sessionCount(cookie)).toBe(1);
+});
+
+test("a non-ASCII csrf of the same string length is 403, not 500", async () => {
+  const { cookie, csrf } = await session();
+  const wrong = "é".repeat(csrf.length);
+  expect((await logout(cookie, { csrf: wrong }, ORIGIN)).status).toBe(403);
   expect(await sessionCount(cookie)).toBe(1);
 });
 

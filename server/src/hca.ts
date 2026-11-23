@@ -60,6 +60,7 @@ export async function exchangeCode(
   const tok = (await res.json()) as { id_token?: unknown; access_token?: unknown };
   if (typeof tok.id_token === "string") {
     const { payload } = await jwtVerify(tok.id_token, jwks, {
+      algorithms: ["RS256"],
       issuer: ISSUER,
       audience: cfg.hcaClientId,
     });

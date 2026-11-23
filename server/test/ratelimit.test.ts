@@ -1,5 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
 import { createServer } from "../src/app.ts";
+import { testConfig } from "../src/config.ts";
 import { connect } from "../src/db.ts";
 import { createLimiter } from "../src/ratelimit.ts";
 import { seedFixture } from "./helpers.ts";
@@ -18,7 +19,7 @@ test("bucket allows burst then refuses, then refills", () => {
 
 test("HTTP 429 after the burst", async () => {
   const p = await seedFixture(sql, "acme/demo-10");
-  const s = createServer({ sql, port: 0, limiter: createLimiter(60, 2) });
+  const s = createServer({ cfg: testConfig(), sql, port: 0, limiter: createLimiter(60, 2) });
   try {
     const get = () =>
       fetch(`http://localhost:${s.port}/v1/ledger/${p.projectId}/head`, {
@@ -36,7 +37,7 @@ test("HTTP 429 after the burst", async () => {
 
 test("failed auth is limited by ip", async () => {
   const p = await seedFixture(sql, "acme/demo-11");
-  const s = createServer({ sql, port: 0, limiter: createLimiter(60, 2) });
+  const s = createServer({ cfg: testConfig(), sql, port: 0, limiter: createLimiter(60, 2) });
   try {
     const bad = async () =>
       (await fetch(`http://localhost:${s.port}/v1/ledger/${p.projectId}/head`)).status;
@@ -48,7 +49,7 @@ test("failed auth is limited by ip", async () => {
 
 test("request log has route pattern and no secrets", async () => {
   const p = await seedFixture(sql, "acme/demo-12");
-  const s = createServer({ sql, port: 0 });
+  const s = createServer({ cfg: testConfig(), sql, port: 0 });
   const lines: string[] = [];
   const orig = process.stdout.write;
   process.stdout.write = ((c: string) => {

@@ -1,6 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
 import { createServer } from "../src/app.ts";
-import { MAX_BATCH, MAX_BODY_BYTES } from "../src/config.ts";
+import { MAX_BATCH, MAX_BODY_BYTES, testConfig } from "../src/config.ts";
 import { connect } from "../src/db.ts";
 import { chains, seed, seedFixture, start } from "./helpers.ts";
 
@@ -145,7 +145,7 @@ test("append to an existing older-ruleset chain succeeds", async () => {
   const c = chains["acme/demo-6"] ?? [];
   const p = await seedFixture(sql, "acme/demo-6");
   await ok(await post(p, { prev_hash: GENESIS, entries: c.slice(0, 3) }), at("acme/demo-6", 2), 3);
-  const next = createServer({ sql, port: 0, ruleset: "2099.01-0" });
+  const next = createServer({ cfg: testConfig(), sql, port: 0, ruleset: "2099.01-0" });
   const url = `http://localhost:${next.port}`;
   try {
     const r = await post(p, { prev_hash: c[2]?.hash, entries: c.slice(3) }, p.token, url);

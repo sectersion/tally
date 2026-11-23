@@ -9,16 +9,25 @@ const MAX_AGE = 2_592_000; // 30 days
 
 type Session = { userId: string; csrf: string; role: string };
 
-const attrs = (cfg: Pick<Config, "publicBaseUrl">, maxAge: number) =>
-  `HttpOnly; ${cfg.publicBaseUrl.startsWith("http://localhost") ? "" : "Secure; "}SameSite=Lax; Path=/; Max-Age=${maxAge}`;
+type Base = Pick<Config, "publicBaseUrl">;
+export const OAUTH_COOKIE = "tally_oauth";
 
-export const clearCookie = (cfg: Pick<Config, "publicBaseUrl">) => `${COOKIE}=; ${attrs(cfg, 0)}`;
+const attrs = (cfg: Base, maxAge: number, path = "/") =>
+  `HttpOnly; ${new URL(cfg.publicBaseUrl).hostname === "localhost" ? "" : "Secure; "}SameSite=Lax; Path=${path}; Max-Age=${maxAge}`;
 
-export function sessionToken(req: Request): string | null {
+export const clearCookie = (cfg: Base) => `${COOKIE}=; ${attrs(cfg, 0)}`;
+/** Binds an OAuth state to the browser that started the login. */
+export const oauthCookie = (cfg: Base, state: string) =>
+  `${OAUTH_COOKIE}=${state}; ${attrs(cfg, 600, "/auth/callback")}`;
+export const clearOauthCookie = (cfg: Base) =>
+  `${OAUTH_COOKIE}=; ${attrs(cfg, 0, "/auth/callback")}`;
+
+export function cookieValue(req: Request, name: string): string | null {
   return (
-    new RegExp(`(?:^|;\\s*)${COOKIE}=([^;]+)`).exec(req.headers.get("cookie") ?? "")?.[1] ?? null
+    new RegExp(`(?:^|;\\s*)${name}=([^;]+)`).exec(req.headers.get("cookie") ?? "")?.[1] ?? null
   );
 }
+export const sessionToken = (req: Request) => cookieValue(req, COOKIE);
 
 export async function createSession(
   sql: SQL,
@@ -55,8 +64,12 @@ export async function requireUser(sql: SQL, req: Request): Promise<Session> {
   throw new HttpError(401, { error: "unauthorized" });
 }
 
-const same = (a: string, b: string) =>
-  a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+/** Constant-time compare; lengths are checked in bytes, so non-ASCII input cannot throw. */
+export function same(a: string, b: string): boolean {
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+}
 
 /** State-changing browser routes: Origin must be our own and the form must carry the session's csrf token. */
 export function requireCsrf(

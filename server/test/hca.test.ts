@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
-import { loadConfig } from "../src/config.ts";
+import { testConfig } from "../src/config.ts";
 import { authorizeUrl, exchangeCode } from "../src/hca.ts";
 
-const cfg = loadConfig({ DATABASE_URL: "x", NODE_ENV: "test", HCA_CLIENT_ID: "cid" });
+const cfg = testConfig({ hcaClientId: "cid" });
 const { publicKey, privateKey } = await generateKeyPair("RS256");
 const jwks = createLocalJWKSet({ keys: [{ ...(await exportJWK(publicKey)), alg: "RS256" }] });
 

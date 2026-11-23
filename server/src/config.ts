@@ -31,8 +31,22 @@ const REQUIRED = {
   githubWebhookSecret: "GITHUB_WEBHOOK_SECRET",
 } as const;
 
-/** With NODE_ENV=test, any unset REQUIRED var gets this dummy value (default "test"). */
-const TEST_VALUES: Record<string, string> = { PUBLIC_BASE_URL: "http://localhost:8080" };
+/** Dummy config for tests only; loadConfig never fills in missing values. */
+export function testConfig(over: Partial<Config> = {}): Config {
+  return {
+    port: 0,
+    databaseUrl: "-",
+    logLevel: "info",
+    publicBaseUrl: "http://localhost:8080",
+    hcaClientId: "test",
+    hcaClientSecret: "test",
+    githubAppSlug: "test",
+    githubAppClientId: "test",
+    githubAppClientSecret: "test",
+    githubWebhookSecret: "test",
+    ...over,
+  };
+}
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
   const databaseUrl = env.DATABASE_URL;
@@ -44,7 +58,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     throw new Error(`invalid PORT: ${env.PORT}`);
   const v = {} as Record<keyof typeof REQUIRED, string>;
   for (const [key, name] of Object.entries(REQUIRED) as [keyof typeof REQUIRED, string][]) {
-    const val = env[name] || (env.NODE_ENV === "test" ? (TEST_VALUES[name] ?? "test") : "");
+    const val = env[name];
     if (!val) throw new Error(`${name} is required`);
     v[key] = val;
   }

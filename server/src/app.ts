@@ -1,6 +1,6 @@
 import type { BunRequest, Server, SQL } from "bun";
 import { hashToken, newToken, requireToken } from "./auth.ts";
-import { type Config, loadConfig, MAX_BATCH, MAX_BODY_BYTES } from "./config";
+import { type Config, MAX_BATCH, MAX_BODY_BYTES } from "./config";
 import { HttpError, json, parse, readJson } from "./errors.ts";
 import { authorizeUrl, exchange } from "./hca.ts";
 import {
@@ -14,17 +14,28 @@ import {
 import { log } from "./log.ts";
 import { createLimiter, type Limiter } from "./ratelimit.ts";
 import { CommitBody, UploadBody } from "./schema.ts";
-import { clearCookie, createSession, requireCsrf, requireUser, sessionToken } from "./session.ts";
+import {
+  clearCookie,
+  clearOauthCookie,
+  cookieValue,
+  createSession,
+  OAUTH_COOKIE,
+  oauthCookie,
+  requireCsrf,
+  requireUser,
+  same,
+  sessionToken,
+} from "./session.ts";
 import { rulesetVersion } from "./wasm.ts";
 
-type Deps = { sql: SQL; port: number; ruleset?: string; limiter?: Limiter; cfg?: Config };
+type Deps = { sql: SQL; port: number; ruleset?: string; limiter?: Limiter; cfg: Config };
 
 const b64url = (b: ArrayBuffer | Uint8Array) => Buffer.from(b as Uint8Array).toString("base64url");
-const redirect = (to: string, setCookie?: string) =>
-  new Response(null, {
-    status: 303,
-    headers: setCookie ? { location: to, "set-cookie": setCookie } : { location: to },
-  });
+const redirect = (to: string, setCookies: string[] = []) => {
+  const headers = new Headers({ location: to });
+  for (const c of setCookies) headers.append("set-cookie", c);
+  return new Response(null, { status: 303, headers });
+};
 
 type Srv = Server<undefined>;
 const ip = (server: Srv, req: Request) => `ip:${server.requestIP(req)?.address ?? "unknown"}`;
@@ -65,7 +76,7 @@ function handle<P extends string>(
 
 export function createServer(deps: Deps) {
   const { sql } = deps;
-  const cfg = deps.cfg ?? loadConfig({ DATABASE_URL: "-", NODE_ENV: "test" }); // main.ts always passes the real one
+  const { cfg } = deps;
   const ruleset = deps.ruleset ?? rulesetVersion();
   const limiter = deps.limiter ?? createLimiter();
   const limit = (key: string) => {
@@ -134,7 +145,8 @@ export function createServer(deps: Deps) {
         GET: handle("/auth/login", async (req, server) => {
           limit(ip(server, req));
           const rt = new URL(req.url).searchParams.get("return_to") ?? "/";
-          const returnTo = /^\/(?![/\\])/.test(rt) ? rt : "/";
+          // Printable ASCII only: browsers strip tabs/newlines from URLs, so "/\t/evil" would become "//evil".
+          const returnTo = /^\/(?![/\\])[\x21-\x7e]*$/.test(rt) ? rt : "/";
           const state = newToken();
           const nonce = newToken();
           const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
@@ -144,7 +156,7 @@ export function createServer(deps: Deps) {
           await sql`delete from oauth_states where expires_at < now()`;
           await sql`insert into oauth_states (state_hash, verifier, nonce, return_to, expires_at)
             values (${hashToken(state)}, ${verifier}, ${nonce}, ${returnTo}, now() + interval '10 minutes')`;
-          return redirect(authorizeUrl(cfg, state, nonce, challenge));
+          return redirect(authorizeUrl(cfg, state, nonce, challenge), [oauthCookie(cfg, state)]);
         }),
       },
       "/auth/callback": {
@@ -154,6 +166,9 @@ export function createServer(deps: Deps) {
           const code = q.get("code");
           const state = q.get("state");
           if (!code || !state) throw new HttpError(400, { error: "bad_callback" });
+          // The state must come back with the browser that started the login (login CSRF).
+          const bound = cookieValue(req, OAUTH_COOKIE);
+          if (!bound || !same(bound, state)) throw new HttpError(400, { error: "bad_state" });
           const [st] =
             await sql`delete from oauth_states where state_hash = ${hashToken(state)} and expires_at > now() returning verifier, nonce, return_to`;
           if (!st) throw new HttpError(400, { error: "bad_state" });
@@ -169,7 +184,7 @@ export function createServer(deps: Deps) {
             on conflict (hca_sub) do update set email = excluded.email, name = excluded.name,
               verification_status = excluded.verification_status returning id`;
           const { setCookie } = await createSession(sql, cfg, user.id);
-          return redirect(st.return_to, setCookie);
+          return redirect(st.return_to, [setCookie, clearOauthCookie(cfg)]);
         }),
       },
       "/auth/logout": {
@@ -177,7 +192,7 @@ export function createServer(deps: Deps) {
           const s = await requireUser(sql, req);
           requireCsrf(cfg, req, s, await req.formData().catch(() => new FormData()));
           await sql`delete from sessions where token_hash = ${hashToken(sessionToken(req) as string)}`;
-          return redirect("/", clearCookie(cfg));
+          return redirect("/", [clearCookie(cfg)]);
         }),
       },
       // Placeholder until the settings page lands: proves requireUser's login redirect.

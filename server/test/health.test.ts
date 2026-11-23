@@ -1,10 +1,10 @@
 import { expect, spyOn, test } from "bun:test";
 import { createServer } from "../src/app.ts";
-import { loadConfig } from "../src/config.ts";
+import { loadConfig, testConfig } from "../src/config.ts";
 import { log } from "../src/log.ts";
 
 test("healthz is ok", async () => {
-  const s = createServer({ sql: null as never, port: 0 });
+  const s = createServer({ cfg: testConfig(), sql: null as never, port: 0 });
   const r = await fetch(`http://localhost:${s.port}/healthz`);
   expect(r.status).toBe(200);
   expect(await r.json()).toEqual({ ok: true });
@@ -12,7 +12,7 @@ test("healthz is ok", async () => {
 });
 
 test("unknown route is a JSON 404", async () => {
-  const s = createServer({ sql: null as never, port: 0 });
+  const s = createServer({ cfg: testConfig(), sql: null as never, port: 0 });
   const r = await fetch(`http://localhost:${s.port}/nope`);
   expect(r.status).toBe(404);
   expect(await r.json()).toEqual({ error: "not_found" });
@@ -22,12 +22,23 @@ test("unknown route is a JSON 404", async () => {
 test("config requires DATABASE_URL", () => {
   expect(() => loadConfig({})).toThrow("DATABASE_URL is required");
   expect(() => loadConfig({ DATABASE_URL: "x" })).toThrow("PUBLIC_BASE_URL is required");
-  expect(loadConfig({ DATABASE_URL: "x", NODE_ENV: "test" })).toMatchObject({
-    port: 8080,
-    databaseUrl: "x",
-    logLevel: "info",
-    publicBaseUrl: "http://localhost:8080",
-  });
+  expect(() => loadConfig({ DATABASE_URL: "x", NODE_ENV: "test" })).toThrow(
+    "PUBLIC_BASE_URL is required",
+  );
+  const all = {
+    DATABASE_URL: "x",
+    PUBLIC_BASE_URL: "https://tally.example/",
+    HCA_CLIENT_ID: "a",
+    HCA_CLIENT_SECRET: "b",
+    GITHUB_APP_SLUG: "c",
+    GITHUB_APP_CLIENT_ID: "d",
+    GITHUB_APP_CLIENT_SECRET: "e",
+    GITHUB_WEBHOOK_SECRET: "f",
+  };
+  expect(loadConfig(all)).toMatchObject({ port: 8080, publicBaseUrl: "https://tally.example" });
+  expect(() => loadConfig({ ...all, GITHUB_WEBHOOK_SECRET: "" })).toThrow(
+    "GITHUB_WEBHOOK_SECRET is required",
+  );
   expect(() => loadConfig({ DATABASE_URL: "x", LOG_LEVEL: "loud" })).toThrow();
 });
 
