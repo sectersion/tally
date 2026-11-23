@@ -24,6 +24,11 @@ pub enum FinalizeError {
 /// prefix of the re-scored claims, compared by `(action_id, ts, verified_s, unverified_s)`;
 /// `project` is not compared, so naming a project later does not diverge the past.
 pub fn finalize(store: &mut Store) -> Result<FinalizeSummary, FinalizeError> {
+    // Read order matters: horizon first. Every event with ts <= h was committed before the
+    // watermark reached h, so events read after the horizon are a superset of what h covers,
+    // and claims final under h depend only on events <= h. Reading events first could score
+    // a snapshot missing an event that a newer horizon already covers.
+    let horizon = store.horizon()?;
     let mut claims = score(&store.events()?);
     let names = store.project_names()?;
     for c in &mut claims {
@@ -31,7 +36,6 @@ pub fn finalize(store: &mut Store) -> Result<FinalizeSummary, FinalizeError> {
             c.project = Some(name.clone());
         }
     }
-    let horizon = store.horizon()?;
     let final_count = horizon.map_or(0, |h| {
         claims.iter().take_while(|c| c.ts.saturating_add(INTERRUPT_FOLLOW_MS) <= h).count()
     });
@@ -137,6 +141,17 @@ mod tests {
         let before = s.ledger().unwrap();
         assert!(matches!(finalize(&mut s), Err(FinalizeError::Divergence { index: 1, .. })));
         assert_eq!(s.ledger().unwrap(), before);
+    }
+    #[test] fn a_new_slower_source_lowers_the_horizon_without_undoing_anything() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.append_events(&[prompt("a", 0, 600), edit("b", 100_000)]).unwrap();
+        s.set_watermark("fast", 1_000_000).unwrap();
+        finalize(&mut s).unwrap();
+        let before = s.ledger().unwrap();
+        s.set_watermark("slow", 50_000).unwrap();
+        assert_eq!(finalize(&mut s).unwrap().appended, 0);
+        assert_eq!(s.ledger().unwrap(), before);
+        assert_eq!(s.finalized_through().unwrap(), 1_000_000);
     }
     #[test] fn naming_a_project_later_does_not_diverge_the_past() {
         let mut s = Store::open_in_memory().unwrap();
