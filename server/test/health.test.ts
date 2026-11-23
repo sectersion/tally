@@ -35,7 +35,13 @@ test("config requires DATABASE_URL", () => {
     GITHUB_APP_CLIENT_SECRET: "e",
     GITHUB_WEBHOOK_SECRET: "f",
   };
-  expect(loadConfig(all)).toMatchObject({ port: 8080, publicBaseUrl: "https://tally.example" });
+  expect(loadConfig(all)).toMatchObject({
+    port: 8080,
+    publicBaseUrl: "https://tally.example",
+    trustProxy: false,
+  });
+  expect(loadConfig({ ...all, TRUST_PROXY: "1" }).trustProxy).toBe(true);
+  expect(() => loadConfig({ ...all, TRUST_PROXY: "yes" })).toThrow("invalid TRUST_PROXY");
   expect(() => loadConfig({ ...all, GITHUB_WEBHOOK_SECRET: "" })).toThrow(
     "GITHUB_WEBHOOK_SECRET is required",
   );

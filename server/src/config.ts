@@ -10,6 +10,8 @@ export type Config = {
   githubAppClientId: string;
   githubAppClientSecret: string;
   githubWebhookSecret: string;
+  /** TRUST_PROXY=1: take the client ip from the last x-forwarded-for hop. */
+  trustProxy: boolean;
 };
 
 export const MAX_BODY_BYTES = 1_048_576;
@@ -44,6 +46,7 @@ export function testConfig(over: Partial<Config> = {}): Config {
     githubAppClientId: "test",
     githubAppClientSecret: "test",
     githubWebhookSecret: "test",
+    trustProxy: false,
     ...over,
   };
 }
@@ -56,6 +59,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const port = Number(env.PORT ?? "8080");
   if (!Number.isInteger(port) || port < 0 || port > 65535)
     throw new Error(`invalid PORT: ${env.PORT}`);
+  const trustProxy = env.TRUST_PROXY ?? "0";
+  if (trustProxy !== "0" && trustProxy !== "1")
+    throw new Error(`invalid TRUST_PROXY: ${trustProxy}`);
   const v = {} as Record<keyof typeof REQUIRED, string>;
   for (const [key, name] of Object.entries(REQUIRED) as [keyof typeof REQUIRED, string][]) {
     const val = env[name];
@@ -63,5 +69,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     v[key] = val;
   }
   v.publicBaseUrl = v.publicBaseUrl.replace(/\/+$/, "");
-  return { port, databaseUrl, logLevel: logLevel as LogLevel, ...v };
+  return {
+    port,
+    databaseUrl,
+    logLevel: logLevel as LogLevel,
+    trustProxy: trustProxy === "1",
+    ...v,
+  };
 }

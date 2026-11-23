@@ -172,8 +172,12 @@ test("database error is 503 unavailable, no-store", async () => {
 });
 
 test("rate limited per ip", async () => {
-  const lim = createLimiter(1, 1);
-  const s = createServer({ cfg: testConfig(), sql, port: 0, badgeLimiter: lim });
+  const s = createServer({
+    cfg: testConfig(),
+    sql,
+    port: 0,
+    limits: { badge: { perMin: 1, burst: 1 } },
+  });
   try {
     const u = `http://localhost:${s.port}/badge/x/y.svg`;
     expect((await fetch(u)).status).toBe(404);

@@ -2,7 +2,7 @@ import type { SQL } from "bun";
 import { createServer } from "../src/app.ts";
 import { createProjectToken } from "../src/auth.ts";
 import { testConfig } from "../src/config.ts";
-import type { Limiter } from "../src/ratelimit.ts";
+import type { Limiter, Limits } from "../src/ratelimit.ts";
 import type { LedgerEntry } from "../src/schema.ts";
 import fixture from "./fixtures/chain.json";
 
@@ -31,7 +31,7 @@ export async function seed(sql: SQL, publicName = `t/${crypto.randomUUID()}`) {
 
 export const seedFixture = (sql: SQL, name: string) => seed(sql, name);
 
-export function start(sql: SQL, limiter?: Limiter) {
-  const s = createServer({ cfg: testConfig(), sql, port: 0, limiter });
+export function start(sql: SQL, limiter?: Limiter, limits?: Partial<Limits>) {
+  const s = createServer({ cfg: testConfig(), sql, port: 0, limiter, limits });
   return { url: `http://localhost:${s.port}`, stop: () => s.stop(true) };
 }

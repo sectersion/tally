@@ -8,7 +8,9 @@ import { requireRole } from "../src/session.ts";
 import { start } from "./helpers.ts";
 
 const sql = connect(process.env.DATABASE_URL ?? "");
-const srv = start(sql, createLimiter(6000, 1000)); // these tests make many auth calls from one ip
+const wide = { perMin: 6000, burst: 1000 };
+// these tests make many auth calls from one ip
+const srv = start(sql, createLimiter(6000, 1000), { auth: wide, form: wide });
 const ORIGIN = "http://localhost:8080"; // PUBLIC_BASE_URL under NODE_ENV=test
 const sub = `ident!${crypto.randomUUID()}`;
 

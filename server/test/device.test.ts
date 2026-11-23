@@ -4,16 +4,17 @@ import { hashToken } from "../src/auth.ts";
 import { testConfig } from "../src/config.ts";
 import { connect } from "../src/db.ts";
 import { createProject } from "../src/projects.ts";
-import { createLimiter, type Limiter } from "../src/ratelimit.ts";
+import type { Limits } from "../src/ratelimit.ts";
 import { createSession } from "../src/session.ts";
 import { seed } from "./helpers.ts";
 
 const sql = connect(process.env.DATABASE_URL ?? "");
-const mk = (deviceLimiter?: Limiter) => {
-  const s = createServer({ cfg: testConfig(), sql, port: 0, deviceLimiter });
+const mk = (limits?: Partial<Limits>) => {
+  const s = createServer({ cfg: testConfig(), sql, port: 0, limits });
   return { url: `http://localhost:${s.port}`, stop: () => s.stop(true) };
 };
-const srv = mk(createLimiter(6000, 1000)); // the tests make many codes; the limit has its own test
+// The tests make many codes and form posts; the limits have their own tests.
+const srv = mk({ device: { perMin: 6000, burst: 1000 }, form: { perMin: 6000, burst: 1000 } });
 const ORIGIN = "http://localhost:8080";
 afterAll(async () => {
   srv.stop();
@@ -213,8 +214,9 @@ test("/v1/device/code is limited to 10 per minute per ip", async () => {
   const s = mk();
   try {
     const statuses: number[] = [];
+    let r = new Response();
     for (let i = 0; i < 11; i++) {
-      const r = await fetch(`${s.url}/v1/device/code`, {
+      r = await fetch(`${s.url}/v1/device/code`, {
         method: "POST",
         body: '{"device_name":"x"}',
       });
@@ -222,6 +224,8 @@ test("/v1/device/code is limited to 10 per minute per ip", async () => {
     }
     expect(statuses.slice(0, 10).every((c) => c === 200)).toBe(true);
     expect(statuses[10]).toBe(429);
+    expect(r.headers.get("retry-after")).toBe("60");
+    expect(await r.json()).toEqual({ error: "rate_limited" });
   } finally {
     s.stop();
   }

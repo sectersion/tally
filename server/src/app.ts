@@ -51,7 +51,14 @@ import {
   setHandle,
   unique,
 } from "./projects.ts";
-import { createLimiter, type Limiter } from "./ratelimit.ts";
+import {
+  clientIp,
+  createLimiter,
+  LIMITS,
+  type Limiter,
+  type Limits,
+  type Rate,
+} from "./ratelimit.ts";
 import { CommitBody, DeviceCodeBody, DeviceTokenBody, UploadBody } from "./schema.ts";
 import {
   clearCookie,
@@ -77,8 +84,8 @@ type Deps = {
   port: number;
   ruleset?: string;
   limiter?: Limiter;
-  deviceLimiter?: Limiter;
-  badgeLimiter?: Limiter;
+  /** Overrides for the LIMITS table; tests shrink or widen them. */
+  limits?: Partial<Limits>;
   cfg: Config;
   /** GitHub calls; tests stub it. */
   fetchFn?: typeof fetch;
@@ -99,7 +106,20 @@ const STATIC = new Set(["style.css", "live.js", "review.js"]);
 const safeReturn = (rt: string | null) => (rt && /^\/(?![/\\])[\x21-\x7e]*$/.test(rt) ? rt : "/");
 
 type Srv = Server<undefined>;
-const ip = (server: Srv, req: Request) => `ip:${server.requestIP(req)?.address ?? "unknown"}`;
+
+/** Browser routes get a page; /v1 keeps its JSON body. Never cached: the limit is per caller. */
+const tooMany = () => {
+  const r = page(
+    "Too many requests",
+    html`<h1>Too many requests</h1><p>Try again in a minute.</p>`,
+    {
+      status: 429,
+    },
+  );
+  r.headers.set("retry-after", "60");
+  r.headers.set("cache-control", "no-store");
+  return r;
+};
 
 /**
  * The router's one try/catch: HttpError becomes its response, anything else a logged 500.
@@ -116,6 +136,8 @@ function handle<P extends string>(
       res = await f(req, server);
     } catch (e) {
       if (e instanceof HttpError && e.location) res = redirect(e.location);
+      else if (e instanceof HttpError && e.status === 429 && !route.startsWith("/v1"))
+        res = tooMany();
       else if (e instanceof HttpError)
         res = json(e.status, e.body, e.status === 429 ? { "retry-after": "60" } : undefined);
       else {
@@ -141,25 +163,35 @@ export function createServer(deps: Deps) {
   const fetchFn = deps.fetchFn ?? fetch;
   const live = deps.live ?? createLive(sql);
   const ruleset = deps.ruleset ?? rulesetVersion();
-  const limiter = deps.limiter ?? createLimiter();
-  const deviceLimiter = deps.deviceLimiter ?? createLimiter(10, 10); // /v1/device/code: 10 per minute per ip
-  const badgeLimiter = deps.badgeLimiter ?? createLimiter(600, 600); // badge:<ip>, 600 per minute
-  const limit = (key: string) => {
-    if (!limiter.take(key)) throw new HttpError(429, { error: "rate_limited" });
+  const limiter = deps.limiter ?? createLimiter(); // one bucket map; unkeyed calls use plan 06's rate
+  const rates: Limits = { ...LIMITS, ...deps.limits };
+  const ip = (req: Request, server: Srv) => clientIp(req, server, cfg);
+  const limit = (key: string, rate?: Rate) => {
+    if (!limiter.take(key, rate)) throw new HttpError(429, { error: "rate_limited" });
   };
+  const limitAuth = (req: Request, server: Srv) => limit(`auth:${ip(req, server)}`, rates.auth);
+  const limitPage = (req: Request, server: Srv) => limit(`page:${ip(req, server)}`, rates.page);
   /** Token auth, then the per-token bucket; failed auth spends the caller's ip bucket instead. */
   const authed = async (req: Request, server: Srv, projectId: string) => {
     let tokenId: number;
     try {
       ({ tokenId } = await requireToken(sql, req, projectId));
     } catch (e) {
-      if (e instanceof HttpError && e.status === 401) limit(ip(server, req));
+      if (e instanceof HttpError && e.status === 401) limit(`ip:${ip(req, server)}`);
       throw e;
     }
     limit(`tok:${tokenId}`);
   };
   /** Read the body once per request. */
   const formOf = (req: Request) => req.formData().catch(() => new FormData());
+  /** Every session POST: the signed-in user, their form:<user_id> bucket, then CSRF. */
+  const sessionForm = async (req: Request) => {
+    const s = await requireUser(sql, req);
+    limit(`form:${s.userId}`, rates.form);
+    const form = await formOf(req);
+    requireCsrf(cfg, req, s, form);
+    return { s, form };
+  };
   /** Runs a call made with the user's stored token; a 401 means it is dead, so drop it and reconnect. */
   const withGhToken = async <T>(userId: string, returnTo: string, f: () => Promise<T>) => {
     try {
@@ -254,7 +286,7 @@ export function createServer(deps: Deps) {
       },
       "/auth/login": {
         GET: handle("/auth/login", async (req, server) => {
-          limit(ip(server, req));
+          limitAuth(req, server);
           const returnTo = safeReturn(new URL(req.url).searchParams.get("return_to"));
           const state = newToken();
           const nonce = newToken();
@@ -270,7 +302,7 @@ export function createServer(deps: Deps) {
       },
       "/auth/callback": {
         GET: handle("/auth/callback", async (req, server) => {
-          limit(ip(server, req));
+          limitAuth(req, server);
           const q = new URL(req.url).searchParams;
           const code = q.get("code");
           const state = q.get("state");
@@ -298,8 +330,7 @@ export function createServer(deps: Deps) {
       },
       "/auth/logout": {
         POST: handle("/auth/logout", async (req) => {
-          const s = await requireUser(sql, req);
-          requireCsrf(cfg, req, s, await req.formData().catch(() => new FormData()));
+          await sessionForm(req);
           await sql`delete from sessions where token_hash = ${hashToken(sessionToken(req) as string)}`;
           return redirect("/", [clearCookie(cfg)]);
         }),
@@ -308,40 +339,32 @@ export function createServer(deps: Deps) {
         GET: handle("/", async (req) => homePage(sql, req, await getSession(sql, req))),
       },
       "/u/:handle": {
-        GET: handle("/u/:handle", async (req) =>
-          profilePage(sql, req.params.handle, await getSession(sql, req)),
-        ),
+        GET: handle("/u/:handle", async (req, server) => {
+          limitPage(req, server);
+          return profilePage(sql, req.params.handle, await getSession(sql, req));
+        }),
       },
       "/p/:owner/:name": {
-        GET: handle("/p/:owner/:name", async (req) =>
-          projectPage(
-            sql,
-            cfg,
-            req.params.owner,
-            req.params.name,
-            await getSession(sql, req),
-            fetchFn,
-          ),
-        ),
+        GET: handle("/p/:owner/:name", async (req, server) => {
+          limitPage(req, server);
+          const { owner, name } = req.params;
+          return projectPage(sql, cfg, owner, name, await getSession(sql, req), fetchFn);
+        }),
       },
       "/p/:owner/:name/fragment": {
-        GET: handle("/p/:owner/:name/fragment", async (req) =>
-          projectFragment(
-            sql,
-            cfg,
-            req.params.owner,
-            req.params.name,
-            await getSession(sql, req),
-            fetchFn,
-          ),
-        ),
+        GET: handle("/p/:owner/:name/fragment", async (req, server) => {
+          limitPage(req, server);
+          const { owner, name } = req.params;
+          return projectFragment(sql, cfg, owner, name, await getSession(sql, req), fetchFn);
+        }),
       },
       "/p/:owner/:name/events": {
         GET: handle("/p/:owner/:name/events", async (req, server) => {
+          limitPage(req, server); // opening costs queries; live.ts separately caps streams held per ip
           const { owner, name } = req.params;
           const p = await visibleProject(sql, owner, name, await getSession(sql, req));
           if (!p) return notFound();
-          return live.stream(req, server, p.id, ip(server, req));
+          return live.stream(req, server, p.id, ip(req, server));
         }),
       },
       "/settings": {
@@ -351,18 +374,14 @@ export function createServer(deps: Deps) {
       },
       "/settings/profile": {
         POST: handle("/settings/profile", async (req) => {
-          const s = await requireUser(sql, req);
-          const form = await formOf(req);
-          requireCsrf(cfg, req, s, form);
+          const { s, form } = await sessionForm(req);
           const err = await saveProfile(sql, s.userId, form);
           return redirect(err ? `/settings?error=${err}` : "/settings");
         }),
       },
       "/settings/delete": {
         POST: handle("/settings/delete", async (req) => {
-          const s = await requireUser(sql, req);
-          const form = await formOf(req);
-          requireCsrf(cfg, req, s, form);
+          const { s, form } = await sessionForm(req);
           if (!(await deleteAccount(sql, s.userId, String(form.get("confirm") ?? ""))))
             return redirect("/settings?error=confirm");
           return redirect("/", [clearCookie(cfg)]);
@@ -370,17 +389,14 @@ export function createServer(deps: Deps) {
       },
       "/settings/handle": {
         POST: handle("/settings/handle", async (req) => {
-          const s = await requireUser(sql, req);
-          const form = await formOf(req);
-          requireCsrf(cfg, req, s, form);
+          const { s, form } = await sessionForm(req);
           const r = await setHandle(sql, s.userId, String(form.get("handle") ?? ""));
           return redirect(r === "ok" ? "/settings" : `/settings?error=${r}`);
         }),
       },
       "/v1/device/code": {
         POST: handle("/v1/device/code", async (req, server) => {
-          if (!deviceLimiter.take(`device:${ip(server, req)}`))
-            throw new HttpError(429, { error: "rate_limited" });
+          limit(`device:${ip(req, server)}`, rates.device);
           const b = parse(DeviceCodeBody, await readJson(req));
           const c = await createDeviceCode(sql, b.device_name);
           return json(200, {
@@ -426,9 +442,7 @@ export function createServer(deps: Deps) {
           );
         }),
         POST: handle("/device", async (req) => {
-          const s = await requireUser(sql, req);
-          const form = await formOf(req);
-          requireCsrf(cfg, req, s, form);
+          const { s, form } = await sessionForm(req);
           const d = form.get("decision");
           if (d !== "approve" && d !== "deny") throw new HttpError(400, { error: "bad_decision" });
           const viewer = viewerOf(s);
@@ -446,8 +460,7 @@ export function createServer(deps: Deps) {
       },
       "/settings/tokens/:id/revoke": {
         POST: handle("/settings/tokens/:id/revoke", async (req) => {
-          const s = await requireUser(sql, req);
-          requireCsrf(cfg, req, s, await formOf(req));
+          const { s } = await sessionForm(req);
           const id = req.params.id;
           const rows = /^\d{1,15}$/.test(id)
             ? await sql`update device_tokens set revoked_at = now()
@@ -460,9 +473,7 @@ export function createServer(deps: Deps) {
       },
       "/projects": {
         POST: handle("/projects", async (req) => {
-          const s = await requireUser(sql, req);
-          const form = await formOf(req);
-          requireCsrf(cfg, req, s, form);
+          const { s, form } = await sessionForm(req);
           const name = String(form.get("name") ?? "");
           const r = await createProject(sql, s.userId, name, () =>
             withGhToken(s.userId, "/settings", () => userRepos(sql, s.userId, fetchFn)),
@@ -472,8 +483,8 @@ export function createServer(deps: Deps) {
       },
       "/github/connect": {
         GET: handle("/github/connect", async (req, server) => {
+          limitAuth(req, server);
           const s = await requireUser(sql, req);
-          limit(ip(server, req));
           const state = newToken();
           const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
           const challenge = b64url(
@@ -487,6 +498,7 @@ export function createServer(deps: Deps) {
       },
       "/github/callback": {
         GET: handle("/github/callback", async (req, server) => {
+          limitAuth(req, server);
           const q = new URL(req.url).searchParams;
           const code = q.get("code");
           const state = q.get("state");
@@ -495,7 +507,6 @@ export function createServer(deps: Deps) {
           if (code && !state && !cookieValue(req, GH_OAUTH_COOKIE))
             return redirect("/github/connect");
           const s = await requireUser(sql, req);
-          limit(ip(server, req));
           if (!code || !state) throw new HttpError(400, { error: "bad_callback" });
           const bound = cookieValue(req, GH_OAUTH_COOKIE);
           if (!bound || !same(bound, state)) throw new HttpError(400, { error: "bad_state" });
@@ -538,9 +549,7 @@ export function createServer(deps: Deps) {
       },
       "/p/:owner/:name/link-repo": {
         POST: handle("/p/:owner/:name/link-repo", async (req) => {
-          const s = await requireUser(sql, req);
-          const form = await formOf(req);
-          requireCsrf(cfg, req, s, form);
+          const { s, form } = await sessionForm(req);
           const p = await ownedProject(s.userId, req.params.owner, req.params.name);
           const token = await userToken(sql, s.userId);
           const back = `/p/${p.public_name}/settings`;
@@ -582,8 +591,7 @@ export function createServer(deps: Deps) {
       },
       "/p/:owner/:name/unlink-repo": {
         POST: handle("/p/:owner/:name/unlink-repo", async (req) => {
-          const s = await requireUser(sql, req);
-          requireCsrf(cfg, req, s, await formOf(req));
+          const { s } = await sessionForm(req);
           const p = await ownedProject(s.userId, req.params.owner, req.params.name);
           // project_repos is state, not evidence: this is its one allowed update.
           await sql.begin(async (tx) => {
@@ -600,9 +608,7 @@ export function createServer(deps: Deps) {
       },
       "/p/:owner/:name/upd-link": {
         POST: handle("/p/:owner/:name/upd-link", async (req) => {
-          const s = await requireUser(sql, req);
-          const form = await formOf(req);
-          requireCsrf(cfg, req, s, form);
+          const { s, form } = await sessionForm(req);
           const p = await ownedProject(s.userId, req.params.owner, req.params.name);
           const full = await liveRepoName(p.id);
           if (!full) throw new HttpError(400, { error: "link a GitHub repo first" });
@@ -619,8 +625,7 @@ export function createServer(deps: Deps) {
       },
       "/p/:owner/:name/upd-unlink": {
         POST: handle("/p/:owner/:name/upd-unlink", async (req) => {
-          const s = await requireUser(sql, req);
-          requireCsrf(cfg, req, s, await formOf(req));
+          const { s } = await sessionForm(req);
           const p = await ownedProject(s.userId, req.params.owner, req.params.name);
           await sql.begin(async (tx) => {
             const r = await tx`update projects set upd_record_id = null
@@ -632,9 +637,7 @@ export function createServer(deps: Deps) {
       },
       "/p/:owner/:name/settings": {
         POST: handle("/p/:owner/:name/settings", async (req) => {
-          const s = await requireUser(sql, req);
-          const form = await formOf(req);
-          requireCsrf(cfg, req, s, form);
+          const { s, form } = await sessionForm(req);
           const p = await ownedProject(s.userId, req.params.owner, req.params.name);
           const next = form.get("public") === "on";
           // A flip changes what badges and pages show, so it bumps change_seq (the badge etag).
@@ -645,7 +648,8 @@ export function createServer(deps: Deps) {
           });
           return redirect(`/p/${p.public_name}/settings`);
         }),
-        GET: handle("/p/:owner/:name/settings", async (req) => {
+        GET: handle("/p/:owner/:name/settings", async (req, server) => {
+          limitPage(req, server);
           const s = await requireUser(sql, req);
           const p = await ownedProject(s.userId, req.params.owner, req.params.name);
           const [{ public: isPublic }] = await sql`select public from projects where id = ${p.id}`;
@@ -736,7 +740,7 @@ export function createServer(deps: Deps) {
         GET: handle("/badge/:owner/:file", async (req, server) => {
           const m = /^(.+)\.(svg|json)$/.exec(req.params.file);
           if (!m) return notFound();
-          if (!badgeLimiter.take(`badge:${ip(server, req)}`))
+          if (!limiter.take(`badge:${ip(req, server)}`, rates.badge))
             return rateLimited(m[2] as "svg" | "json");
           return badgeResponse(
             sql,
@@ -748,7 +752,7 @@ export function createServer(deps: Deps) {
       },
       "/v1/projects/:id/summary": {
         GET: handle("/v1/projects/:id/summary", async (req, server) => {
-          limit(ip(server, req));
+          limit(`ip:${ip(req, server)}`); // not in the table: plan 06's per-ip rate
           const [p] = await sql`select p.id, p.public_name, u.handle, u.profile_public
             from projects p join users u on u.id = p.owner_id
             where p.id = ${req.params.id} and p.public`;
@@ -771,7 +775,7 @@ export function createServer(deps: Deps) {
       },
       "/v1/projects/:id/badge.json": {
         GET: handle("/v1/projects/:id/badge.json", async (req, server) => {
-          limit(ip(server, req));
+          limit(`badge:${ip(req, server)}`, rates.badge);
           const s = await verifiedSeconds(sql, req.params.id);
           if (s === null) throw new HttpError(404, { error: "not_found" });
           return json(200, badge(s), { "cache-control": "public, max-age=300" });

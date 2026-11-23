@@ -53,7 +53,8 @@ One container or VM running `bun run start` behind a TLS-terminating proxy (C7 r
 - Every `/v1` response is JSON; pages outside `/v1` are server-rendered HTML.
 - Body 1 MiB, 1000 entries per batch. A body over 2 MiB is rejected by Bun itself with an empty-body 413; the JSON `body_too_large` applies between 1 and 2 MiB.
 - 120 requests/min per token (burst 30), single instance (in-process limiter).
-- Failed auth is limited per client ip; behind a proxy all clients share the proxy's address.
+- Per minute: sign-in and GitHub connect 20 per ip, `/v1/device/code` 10 per ip, session form posts 60 per user, `/u` and `/p` pages 120 per ip, badges 600 per ip (table: `LIMITS` in `src/ratelimit.ts`). Webhooks are not limited. Over a limit is `429` with `retry-after: 60`.
+- Failed auth is limited per client ip. Behind a proxy, set `TRUST_PROXY=1` so the client ip is the last `x-forwarded-for` hop (the one the proxy appended); otherwise every client shares the proxy's address. Never set it without a proxy that appends that header: clients could then pick their own ip.
 
 ## Monthly cost envelope check
 
