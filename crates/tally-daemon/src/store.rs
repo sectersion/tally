@@ -43,7 +43,7 @@ pub struct Store {
 
 /// `source_state` owner of run-level facts (no source has this id).
 const RUN_STATE: &str = "_run";
-const ENABLED_KEY: &str = "enabled_sources";
+const DISABLED_KEY: &str = "disabled_sources";
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, ts INTEGER NOT NULL, json TEXT NOT NULL);
@@ -182,22 +182,25 @@ impl Store {
         Ok(self.conn.query_row("SELECT ts FROM watermarks WHERE source = ?1", [source], |r| r.get(0)).optional()?)
     }
 
-    /// Records which sources `tally run` has enabled; `horizon` then ignores the rest.
-    pub fn set_enabled_sources(&mut self, ids: &[&str]) -> Result<(), StoreError> {
-        self.set_state(RUN_STATE, &BTreeMap::from([(ENABLED_KEY.to_string(), ids.join(","))]))
+    /// Records the sources config.toml switches off; `horizon` skips only those rows. The list
+    /// is as of the last `tally run` start. Re-enabling a source makes its stale watermark
+    /// count again at the next start, and events between that watermark and `finalized_through`
+    /// are then late (dropped).
+    pub fn set_disabled_sources(&mut self, ids: &[&str]) -> Result<(), StoreError> {
+        self.set_state(RUN_STATE, &BTreeMap::from([(DISABLED_KEY.to_string(), ids.join(","))]))
     }
 
-    /// Minimum watermark over the enabled sources (all of them if `tally run` never recorded
-    /// the set, see `set_enabled_sources`); `None` if there are none. A disabled source's old
-    /// watermark row stays but no longer holds the horizon back.
+    /// Minimum watermark over every source except those in the recorded disabled list (none
+    /// skipped if `tally run` never recorded one, see `set_disabled_sources`); `None` if no
+    /// rows count. A disabled source's old watermark row stays but no longer holds the horizon.
     pub fn horizon(&self) -> Result<Option<i64>, StoreError> {
-        let enabled = self.get_state(RUN_STATE)?.remove(ENABLED_KEY);
+        let disabled = self.get_state(RUN_STATE)?.remove(DISABLED_KEY).unwrap_or_default();
         let mut st = self.conn.prepare("SELECT source, ts FROM watermarks")?;
         let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         let mut min: Option<i64> = None;
         for row in rows {
             let (source, ts) = row?;
-            if enabled.as_ref().is_none_or(|e| e.split(',').any(|i| i == source)) {
+            if !disabled.split(',').any(|i| i == source) {
                 min = Some(min.map_or(ts, |m| m.min(ts)));
             }
         }
@@ -483,16 +486,17 @@ mod tests {
         s.set_watermark("b", 10).unwrap();
         assert_eq!(s.horizon().unwrap(), Some(50));
     }
-    #[test] fn a_disabled_source_does_not_hold_the_horizon_until_it_is_enabled_again() {
+    #[test] fn only_config_disabled_sources_are_skipped_by_the_horizon() {
         let mut s = Store::open_in_memory().unwrap();
-        s.set_watermark("a", 100).unwrap(); s.set_watermark("old", 5).unwrap();
+        s.set_watermark("git", 100).unwrap(); s.set_watermark("presence", 5).unwrap();
+        s.set_watermark("claude-code", 7).unwrap(); s.set_watermark("ingest", 50).unwrap();
         assert_eq!(s.horizon().unwrap(), Some(5));                 // key absent: every row counts
-        s.set_enabled_sources(&["a"]).unwrap();
-        assert_eq!(s.horizon().unwrap(), Some(100));
-        s.set_enabled_sources(&["a", "old"]).unwrap();             // next `tally run` start
+        s.set_disabled_sources(&["presence", "claude-code"]).unwrap();
+        assert_eq!(s.horizon().unwrap(), Some(50));                // ingest still counts
+        s.set_disabled_sources(&["claude-code"]).unwrap();         // presence re-enabled at the next start
         assert_eq!(s.horizon().unwrap(), Some(5));
-        s.set_enabled_sources(&[]).unwrap();
-        assert_eq!(s.horizon().unwrap(), None);
+        s.set_disabled_sources(&[]).unwrap();
+        assert_eq!(s.horizon().unwrap(), Some(5));
     }
     #[test] fn a_skipped_row_between_prepare_and_append_is_a_conflict() {
         let mut s = Store::open_in_memory().unwrap();

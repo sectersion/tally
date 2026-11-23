@@ -399,6 +399,7 @@ mod tests {
         b.append_ledger(&[], 3_300_000, p.scored_events, &[("zz".into(), 1, "x".into())]).unwrap();
         assert!(matches!(commit(&mut a, p), Err(FinalizeError::Store(StoreError::Conflict))));
         assert_eq!(a.ledger().unwrap().len(), 2);
+        assert_eq!(finalize(&mut a).unwrap().appended, 1);        // the retry sees the new skip and succeeds
     }
     #[test] fn retry_gives_up_after_three_attempts_and_only_on_conflict_or_chain_broken() {
         let mut calls = 0;

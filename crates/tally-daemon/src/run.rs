@@ -97,7 +97,7 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
 }
 
 /// The sources for this config. Claude Code reads `projects_dir`, default `~/.claude/projects`.
-/// Also records the enabled ids (the finalize horizon ignores disabled sources) and fills
+/// Also records the config-disabled ids (the finalize horizon skips them) and fills
 /// missing project identities; failures there are reported on stderr, not fatal.
 pub fn sources(cfg: &Config, home: &Path, store: &mut Store) -> Vec<Box<dyn Source>> {
     if let Err(e) = crate::project::backfill_identities(store) {
@@ -130,9 +130,16 @@ pub fn sources(cfg: &Config, home: &Path, store: &mut Store) -> Vec<Box<dyn Sour
             }
         }
     }
-    let ids: Vec<&str> = v.iter().map(|s| s.id()).collect();
-    if let Err(e) = store.set_enabled_sources(&ids) {
-        eprintln!("recording enabled sources failed: {e}");
+    // What config switched off, not what got built: a git setup error must not drop git's watermark.
+    let mut disabled = vec![];
+    if !cfg.presence.enabled {
+        disabled.push("presence");
+    }
+    if !cc.enabled {
+        disabled.push("claude-code");
+    }
+    if let Err(e) = store.set_disabled_sources(&disabled) {
+        eprintln!("recording disabled sources failed: {e}");
     }
     v
 }
@@ -287,6 +294,14 @@ mod tests {
         cfg.presence.enabled = false;
         assert_eq!(ids(&cfg), ["git"]);
         // the disabled presence watermark no longer holds the horizon
+        assert_eq!(s.horizon().unwrap(), Some(100));
+        cfg.presence.enabled = true;
+        sources(&cfg, d.path(), &mut s); // next run start: the stale watermark counts again
+        assert_eq!(s.horizon().unwrap(), Some(5));
+        // a git setup error leaves git out of the sources but its watermark still counts
+        s.conn.execute("DROP TABLE projects", []).unwrap();
+        cfg.presence.enabled = false;
+        assert_eq!(sources(&cfg, d.path(), &mut s).len(), 0);
         assert_eq!(s.horizon().unwrap(), Some(100));
     }
     #[test]
