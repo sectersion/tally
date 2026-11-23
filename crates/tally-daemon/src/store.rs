@@ -34,6 +34,13 @@ pub struct ProjectRow {
     pub remote: Option<String>,
 }
 
+/// A public-ledger row: the main-ledger `seq` it came from and its entry (`project` is the public name).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PublishedRow {
+    pub main_seq: i64,
+    pub entry: LedgerEntry,
+}
+
 /// `(start, end)` in ms.
 pub type Interval = (i64, i64);
 
@@ -59,6 +66,14 @@ CREATE TRIGGER IF NOT EXISTS skipped_no_update BEFORE UPDATE ON skipped_claims
 BEGIN SELECT RAISE(ABORT, 'skipped_claims is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS skipped_no_delete BEFORE DELETE ON skipped_claims
 BEGIN SELECT RAISE(ABORT, 'skipped_claims is append-only'); END;
+CREATE TABLE IF NOT EXISTS published_ledger(
+  project TEXT NOT NULL, ruleset TEXT NOT NULL, n INTEGER NOT NULL,
+  main_seq INTEGER NOT NULL, hash TEXT NOT NULL, entry_json TEXT NOT NULL,
+  PRIMARY KEY(project, ruleset, n), UNIQUE(project, main_seq));
+CREATE TRIGGER IF NOT EXISTS published_no_update BEFORE UPDATE ON published_ledger
+BEGIN SELECT RAISE(ABORT, 'published ledger is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS published_no_delete BEFORE DELETE ON published_ledger
+BEGIN SELECT RAISE(ABORT, 'published ledger is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS ledger_no_update BEFORE UPDATE ON ledger
 BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS ledger_no_delete BEFORE DELETE ON ledger
@@ -431,6 +446,85 @@ impl Store {
         Ok(out)
     }
 
+    /// Main ledger with its `seq`, in append order.
+    pub fn ledger_rows(&self) -> Result<Vec<(i64, LedgerEntry)>, StoreError> {
+        let mut st = self.conn.prepare("SELECT seq, entry_json FROM ledger ORDER BY seq")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (seq, j) = r?;
+            out.push((seq, serde_json::from_str(&j)?));
+        }
+        Ok(out)
+    }
+
+    /// All chains of one project, in append order.
+    pub fn published_rows(&self, project: &str) -> Result<Vec<PublishedRow>, StoreError> {
+        let mut st = self
+            .conn
+            .prepare("SELECT main_seq, entry_json FROM published_ledger WHERE project = ?1 ORDER BY rowid")?;
+        let rows = st.query_map([project], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (main_seq, j) = r?;
+            out.push(PublishedRow { main_seq, entry: serde_json::from_str(&j)? });
+        }
+        Ok(out)
+    }
+
+    /// Distinct published project names, sorted.
+    pub fn published_projects(&self) -> Result<Vec<String>, StoreError> {
+        let mut st = self.conn.prepare("SELECT DISTINCT project FROM published_ledger ORDER BY project")?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// One transaction. Each row extends its `(project, ruleset)` chain (`prev_hash` = last stored
+    /// hash, `GENESIS_HASH` when empty) or the whole call fails with `ChainBroken`; `project: None`
+    /// is `ChainBroken` too. A duplicate `(project, main_seq)` is a constraint error; nothing is written.
+    pub fn append_published(&mut self, rows: &[PublishedRow]) -> Result<(), StoreError> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for row in rows {
+            let e = &row.entry;
+            let project = e.project.as_deref().ok_or(StoreError::ChainBroken)?;
+            let last: Option<(i64, String)> = tx
+                .query_row(
+                    "SELECT n, hash FROM published_ledger WHERE project = ?1 AND ruleset = ?2 ORDER BY n DESC LIMIT 1",
+                    params![project, e.ruleset],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let (n, prev) = match &last {
+                Some((n, h)) => (n + 1, h.as_str()),
+                None => (1, GENESIS_HASH),
+            };
+            if e.prev_hash != prev {
+                return Err(StoreError::ChainBroken);
+            }
+            tx.execute(
+                "INSERT INTO published_ledger(project, ruleset, n, main_seq, hash, entry_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![project, e.ruleset, n, row.main_seq, e.hash, serde_json::to_string(e)?],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn meta_get(&self, key: &str) -> Result<Option<i64>, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .optional()?)
+    }
+
+    pub fn meta_set(&mut self, key: &str, value: i64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
     /// Whether a stored `commit` event by the agent exists for `project` with `ts` in `[from_ts, to_ts]`.
     /// The `sha` is deliberately not consulted.
     pub fn has_agent_commit_marker(&self, project: &str, from_ts: i64, to_ts: i64) -> Result<bool, StoreError> {
@@ -477,6 +571,49 @@ mod tests {
         };
         e.hash = tally_scoring::ledger::entry_hash(&e);
         e
+    }
+
+    fn pubentry(project: &str, ruleset: &str, action_id: &str, prev: &str) -> LedgerEntry {
+        let mut e = entry(action_id, prev);
+        e.project = Some(project.into());
+        e.ruleset = ruleset.into();
+        e.hash = tally_scoring::ledger::entry_hash(&e);
+        e
+    }
+    #[test] fn published_chains_are_per_project_and_ruleset_and_start_at_genesis() {
+        let mut s = Store::open_in_memory().unwrap();
+        let a1 = pubentry("o/r", "r1", "a1", GENESIS_HASH);
+        let a2 = pubentry("o/r", "r1", "a2", &a1.hash);
+        let b1 = pubentry("o/r", "r2", "b1", GENESIS_HASH);
+        s.append_published(&[PublishedRow { main_seq: 1, entry: a1.clone() },
+                             PublishedRow { main_seq: 2, entry: a2.clone() },
+                             PublishedRow { main_seq: 3, entry: b1.clone() }]).unwrap();
+        assert_eq!(s.published_rows("o/r").unwrap().len(), 3);
+        assert_eq!(s.published_projects().unwrap(), ["o/r"]);
+    }
+    #[test] fn a_broken_or_duplicate_published_append_writes_nothing() {
+        let mut s = Store::open_in_memory().unwrap();
+        let a1 = pubentry("o/r", "r1", "a1", GENESIS_HASH);
+        s.append_published(&[PublishedRow { main_seq: 1, entry: a1.clone() }]).unwrap();
+        let bad = pubentry("o/r", "r1", "a2", GENESIS_HASH);
+        assert!(matches!(s.append_published(&[PublishedRow { main_seq: 2, entry: bad }]), Err(StoreError::ChainBroken)));
+        let dup = pubentry("o/r", "r1", "a2", &a1.hash);
+        assert!(s.append_published(&[PublishedRow { main_seq: 1, entry: dup }]).is_err());
+        assert_eq!(s.published_rows("o/r").unwrap().len(), 1);
+    }
+    #[test] fn published_rows_cannot_be_updated_or_deleted() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.append_published(&[PublishedRow { main_seq: 1, entry: pubentry("o/r", "r1", "a1", GENESIS_HASH) }]).unwrap();
+        assert!(s.conn.execute("UPDATE published_ledger SET hash = 'x'", []).is_err());
+        assert!(s.conn.execute("DELETE FROM published_ledger", []).is_err());
+    }
+    #[test] fn meta_roundtrip_and_ledger_rows_carry_seq() {
+        let mut s = Store::open_in_memory().unwrap();
+        assert_eq!(s.meta_get("k").unwrap(), None);
+        s.meta_set("k", 7).unwrap(); s.meta_set("k", 8).unwrap();
+        assert_eq!(s.meta_get("k").unwrap(), Some(8));
+        s.append_ledger(&[entry("a1", GENESIS_HASH)], 10, 0, &[]).unwrap();
+        assert_eq!(s.ledger_rows().unwrap()[0].0, 1);
     }
 
     #[test] fn duplicates_are_ignored_and_events_come_back_sorted() {
