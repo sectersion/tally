@@ -145,7 +145,7 @@ impl DashApi {
         DashApi { db, port }
     }
 
-    fn host_ok(&self, host: Option<&str>) -> bool {
+    pub fn host_ok(&self, host: Option<&str>) -> bool {
         let Some(h) = host else { return false };
         h == format!("127.0.0.1:{}", self.port) || h.eq_ignore_ascii_case(&format!("localhost:{}", self.port))
     }

@@ -102,6 +102,24 @@ enum Cmd {
         /// Do one tick, print the result and exit.
         #[arg(long)]
         once: bool,
+        /// Also serve the local dashboard (or set `[run] dashboard = true`).
+        #[arg(long)]
+        dashboard: bool,
+        /// Overrides `run.dashboard_port`.
+        #[arg(long)]
+        dashboard_port: Option<u16>,
+    },
+    /// Serve the local dashboard on 127.0.0.1 until interrupted.
+    ///
+    /// Reads only the local store. There is no authentication: other users of this machine can
+    /// reach it. It shows event kinds, times and numbers only, never text.
+    Dashboard {
+        /// 0 picks a free port.
+        #[arg(long, default_value_t = 7878)]
+        port: u16,
+        /// Do not open the browser (also: TALLY_NO_OPEN).
+        #[arg(long, env = "TALLY_NO_OPEN")]
+        no_open: bool,
     },
     /// Hooks that other tools and shells call.
     ///
@@ -186,6 +204,9 @@ fn main() -> Result<()> {
     if let Cmd::Login { server_id, server } = &cli.cmd {
         return login(&home, server_id, server.as_deref());
     }
+    if let Cmd::Dashboard { port, no_open } = &cli.cmd {
+        return dashboard(&db, *port, *no_open);
+    }
     if let Cmd::Logout { server_id } = &cli.cmd {
         let gone = tally_daemon::credentials::delete_token(&home, server_id).context("updating the token file")?;
         println!("{}", if gone { "logged out" } else { "not logged in" });
@@ -216,7 +237,7 @@ fn main() -> Result<()> {
     let mut store = Store::open(&db)?;
 
     match cli.cmd {
-        Cmd::Run { interval_secs, once } => {
+        Cmd::Run { interval_secs, once, dashboard, dashboard_port } => {
             let mut cfg = config::load(&home)?;
             if let Some(n) = interval_secs {
                 cfg.run.interval_secs = n;
@@ -235,7 +256,19 @@ fn main() -> Result<()> {
                 println!("added {}, duplicates {}, skipped {skipped}, final {total}, provisional {prov}", r.added, r.duplicates);
             } else {
                 ctrlc::set_handler(|| STOP.store(true, Ordering::Relaxed)).context("installing the Ctrl-C handler")?;
-                run_loop(&mut store, &cfg, &home, &STOP)?;
+                let dash = if dashboard || cfg.run.dashboard {
+                    let port = dashboard_port.unwrap_or(cfg.run.dashboard_port);
+                    let s = tally_daemon::serve::DashboardServer::start(db.clone(), port).map_err(|e| anyhow!("dashboard: port {port} is in use; use --dashboard-port 0 ({e})"))?;
+                    println!("Tally dashboard: http://127.0.0.1:{}/", s.addr.port());
+                    Some(s)
+                } else {
+                    None
+                };
+                let r = run_loop(&mut store, &cfg, &home, &STOP);
+                if let Some(s) = dash {
+                    s.stop();
+                }
+                r?;
                 println!("stopped");
             }
         }
@@ -245,7 +278,7 @@ fn main() -> Result<()> {
             println!("added {}, duplicates {}", s.added, s.duplicates);
         }
         Cmd::HeartbeatConfig => unreachable!("handled before the store opens"),
-        Cmd::Hook { .. } | Cmd::VerifyPublished { .. } | Cmd::Login { .. } | Cmd::Logout { .. } => {
+        Cmd::Hook { .. } | Cmd::VerifyPublished { .. } | Cmd::Login { .. } | Cmd::Logout { .. } | Cmd::Dashboard { .. } => {
             unreachable!("handled before the store is opened")
         }
         Cmd::Project { cmd: ProjectCmd::Add { path, name } } => {
@@ -377,6 +410,35 @@ fn main() -> Result<()> {
         },
     }
     Ok(())
+}
+
+/// Serves the dashboard until Ctrl-C. A missing database is fine: the page shows onboarding.
+fn dashboard(db: &std::path::Path, port: u16, no_open: bool) -> Result<()> {
+    if db.exists() {
+        Store::open(db)?; // runs the schema and index migration once; the server itself is read-only
+    }
+    let s = tally_daemon::serve::DashboardServer::start(db.to_path_buf(), port)
+        .map_err(|e| anyhow!("port {port} is in use; run tally dashboard --port 0 to pick a free one ({e})"))?;
+    let url = format!("http://127.0.0.1:{}/", s.addr.port());
+    println!("Tally dashboard: {url}");
+    if !no_open {
+        let _ = open_browser(&url); // the URL is printed either way
+    }
+    ctrlc::set_handler(|| STOP.store(true, Ordering::Relaxed)).context("installing the Ctrl-C handler")?;
+    while !STOP.load(Ordering::Relaxed) {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    s.stop();
+    Ok(())
+}
+
+fn open_browser(url: &str) -> std::io::Result<std::process::Child> {
+    #[cfg(windows)]
+    return std::process::Command::new("cmd").args(["/c", "start", "", url]).spawn();
+    #[cfg(target_os = "macos")]
+    return std::process::Command::new("open").arg(url).spawn();
+    #[cfg(not(any(windows, target_os = "macos")))]
+    return std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
 /// Stores the token from stdin, then checks it against `[sync] server` if one is configured.

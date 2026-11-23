@@ -1,6 +1,7 @@
 pub mod adapters;
 pub mod analytics;
 pub mod api;
+pub mod assets;
 pub mod claude_code;
 pub mod config;
 pub mod credentials;
@@ -20,6 +21,7 @@ pub mod published;
 pub mod repair;
 pub mod replay;
 pub mod run;
+pub mod serve;
 pub mod snapshot;
 pub mod source;
 pub mod status;
