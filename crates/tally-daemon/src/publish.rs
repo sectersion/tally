@@ -121,6 +121,14 @@ pub fn publish_once(
         host.sync_down()?;
         let mut count = 0;
         let mut files = Vec::new();
+        // A remote ledger we have no local chain for is someone else's history.
+        for (name, pfiles) in &group {
+            for f in host.ledger_files(name)? {
+                if !pfiles.iter().any(|(p, _)| *p == f) {
+                    return Err(PublishFail::RemoteDiverged { project: name.clone(), file: f });
+                }
+            }
+        }
         for (name, pfiles) in group {
             for (path, text) in pfiles {
                 if path.ends_with("/badge.json") {
@@ -257,20 +265,14 @@ mod tests {
         assert_eq!(s.published_rows("owner/repo").unwrap().len(), 2);
         let (bare, url) = bare_remote();
         assert!(publish_once(&mut s, &cfg(&url), home.path(), false).unwrap().pushed);
-        let files = |u: &str| {
-            let c = clone(u);
-            git(&c.path().join("c"), &["ls-files"])
-        };
         let (bare2, url2) = bare_remote();
         let home2 = tempfile::tempdir().unwrap();
         publish_once(&mut named_store(), &cfg(&url2), home2.path(), false).unwrap();
-        assert_eq!(files(&url), files(&url2));
+        // names and blob hashes
+        assert_eq!(git(bare.path(), &["ls-tree", "-r", "tally-data"]), git(bare2.path(), &["ls-tree", "-r", "tally-data"]));
         assert_eq!(commits(bare.path()), 1);
-        drop(bare2);
     }
-    #[cfg(unix)]
     #[test] fn a_push_rejected_after_the_commit_recovers_on_the_next_run() {
-        use std::os::unix::fs::PermissionsExt;
         if skip_without_git() { return; }
         let (bare, url) = bare_remote();
         let home = tempfile::tempdir().unwrap();
@@ -278,7 +280,11 @@ mod tests {
         let hook = bare.path().join("hooks/pre-receive");
         std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
         std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         assert!(matches!(
             publish_once(&mut s, &cfg(&url), home.path(), false),
             Err(PublishFail::Hosting(HostingError::Git { .. }))
@@ -300,6 +306,43 @@ mod tests {
         finalize(&mut b).unwrap();
         assert!(matches!(
             publish_once(&mut b, &cfg(&url), home_b.path(), false),
+            Err(PublishFail::RemoteDiverged { .. })
+        ));
+        assert_eq!(git(bare.path(), &["rev-parse", "tally-data"]), head);
+    }
+    #[test] fn a_remote_ledger_file_with_no_local_chain_is_refused() {
+        if skip_without_git() { return; }
+        let (bare, url) = bare_remote();
+        let home = tempfile::tempdir().unwrap();
+        let mut s = named_store();
+        publish_once(&mut s, &cfg(&url), home.path(), false).unwrap();
+        // someone else pushes a chain for a ruleset we have no rows for
+        let c = clone(&url);
+        let root = c.path().join("c");
+        std::fs::copy(root.join(ledger_name(&s)), root.join("owner/repo/ledger-other.json")).unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["-c", "user.name=x", "-c", "user.email=x@x", "commit", "-q", "-m", "other"]);
+        git(&root, &["push", "-q", "origin", "tally-data"]);
+        let head = git(bare.path(), &["rev-parse", "tally-data"]);
+        assert!(matches!(
+            publish_once(&mut s, &cfg(&url), home.path(), false),
+            Err(PublishFail::RemoteDiverged { file, .. }) if file == "owner/repo/ledger-other.json"
+        ));
+        assert_eq!(git(bare.path(), &["rev-parse", "tally-data"]), head);
+    }
+    #[test] fn a_remote_chain_longer_than_the_local_one_is_refused() {
+        if skip_without_git() { return; }
+        let (bare, url) = bare_remote();
+        let (home_a, home_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let mut a = named_store();
+        a.append_events(&[edit("z", 2_000_000)]).unwrap();
+        a.set_watermark("src", 9_000_000).unwrap();
+        finalize(&mut a).unwrap();
+        publish_once(&mut a, &cfg(&url), home_a.path(), false).unwrap();
+        let head = git(bare.path(), &["rev-parse", "tally-data"]);
+        // same first two claims, so the hashes agree but the remote has one more
+        assert!(matches!(
+            publish_once(&mut named_store(), &cfg(&url), home_b.path(), false),
             Err(PublishFail::RemoteDiverged { .. })
         ));
         assert_eq!(git(bare.path(), &["rev-parse", "tally-data"]), head);

@@ -28,8 +28,12 @@ impl Hosting {
 
     fn scrub(&self, s: &str) -> String {
         let mut out = s.replace(&self.remote, "<remote>");
-        if let Some(ui) = self.remote.split_once("://").and_then(|(_, r)| r.split_once('@')).map(|(u, _)| u) {
-            out = out.replace(ui, "<redacted>");
+        // userinfo is everything before the LAST '@' of the authority (passwords may contain '@')
+        if let Some((_, rest)) = self.remote.split_once("://") {
+            let authority = rest.split('/').next().unwrap_or("");
+            if let Some((ui, _)) = authority.rsplit_once('@') {
+                out = out.replace(ui, "<redacted>");
+            }
         }
         out.trim().to_string()
     }
@@ -39,7 +43,8 @@ impl Hosting {
             .current_dir(&self.dir)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GCM_INTERACTIVE", "never")
-            .args(["-c", "user.name=tally", "-c", "user.email=tally@localhost", "-c", "commit.gpgsign=false"])
+            .env("LC_ALL", "C") // stderr is matched below; keep it English
+            .args(["-c", "core.autocrlf=false", "-c", "user.name=tally", "-c", "user.email=tally@localhost", "-c", "commit.gpgsign=false"])
             .args(args)
             .output()
             .map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { HostingError::GitMissing } else { e.into() })?;
@@ -78,6 +83,19 @@ impl Hosting {
         Ok(())
     }
 
+    /// Relative paths of `<dir>/ledger-*.json` files already in the clone.
+    pub fn ledger_files(&self, dir: &str) -> Result<Vec<String>, HostingError> {
+        let Ok(rd) = std::fs::read_dir(self.dir.join(dir)) else { return Ok(Vec::new()) };
+        let mut out = Vec::new();
+        for e in rd {
+            let n = e?.file_name().to_string_lossy().into_owned();
+            if n.starts_with("ledger-") && n.ends_with(".json") {
+                out.push(format!("{dir}/{n}"));
+            }
+        }
+        Ok(out)
+    }
+
     pub fn read(&self, rel: &str) -> Result<Option<String>, HostingError> {
         match std::fs::read_to_string(self.dir.join(rel)) {
             Ok(s) => Ok(Some(s)),
@@ -102,5 +120,17 @@ impl Hosting {
         self.git(&["commit", "-m", message])?;
         self.git(&["push", "origin", &self.branch])?;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrub_hides_the_url_and_the_whole_userinfo() {
+        let h = Hosting::new(Path::new("h"), "https://user:p@ss@example.invalid/x.git", "b");
+        let out = h.scrub("fatal: unable to access 'https://user:p@ss@example.invalid/x.git/' as user:p@ss");
+        assert!(!out.contains("p@ss") && !out.contains("ss@") && !out.contains("user"), "{out}");
     }
 }
