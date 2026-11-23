@@ -1,5 +1,6 @@
 //! SQLite store. Keeps only what an `Event` holds (hashes and numbers); no event text.
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use std::time::Duration;
 use std::collections::BTreeMap;
 use std::path::Path;
 use tally_scoring::{Event, LedgerEntry, GENESIS_HASH};
@@ -39,9 +40,18 @@ CREATE TRIGGER IF NOT EXISTS ledger_no_delete BEFORE DELETE ON ledger
 BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;
 ";
 
+fn read_finalized(conn: &Connection) -> Result<i64, StoreError> {
+    let v: Option<i64> = conn
+        .query_row("SELECT value FROM meta WHERE key = 'finalized_through'", [], |r| r.get(0))
+        .optional()?;
+    Ok(v.unwrap_or(i64::MIN))
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Store, StoreError> {
-        Self::init(Connection::open(path)?)
+        let conn = Connection::open(path)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        Self::init(conn)
     }
 
     pub fn open_in_memory() -> Result<Store, StoreError> {
@@ -56,8 +66,8 @@ impl Store {
     /// One transaction. Already-stored ids are duplicates (checked first, even if late);
     /// otherwise `ts <= finalized_through` fails the whole batch with `LateEvent`.
     pub fn append_events(&mut self, events: &[Event]) -> Result<AppendSummary, StoreError> {
-        let fin = self.finalized_through()?;
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let fin = read_finalized(&tx)?;
         let (mut added, mut duplicates) = (0, 0);
         for e in events {
             let seen: Option<i64> =
@@ -95,7 +105,7 @@ impl Store {
     /// therefore keep its watermark below the span's start until it emits the closed span.
     /// The stored value only moves forward.
     pub fn set_watermark(&mut self, source: &str, ts: i64) -> Result<(), StoreError> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT INTO watermarks(source, ts) VALUES (?1, ?2)
              ON CONFLICT(source) DO UPDATE SET ts = MAX(ts, excluded.ts)",
@@ -112,15 +122,11 @@ impl Store {
 
     /// `i64::MIN` until the first `append_ledger`.
     pub fn finalized_through(&self) -> Result<i64, StoreError> {
-        let v: Option<i64> = self
-            .conn
-            .query_row("SELECT value FROM meta WHERE key = 'finalized_through'", [], |r| r.get(0))
-            .optional()?;
-        Ok(v.unwrap_or(i64::MIN))
+        read_finalized(&self.conn)
     }
 
     pub fn register_project(&mut self, local_id: &str, root: &str, public_name: Option<&str>) -> Result<(), StoreError> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT INTO projects(local_id, root, public_name) VALUES (?1, ?2, ?3)
              ON CONFLICT(local_id) DO UPDATE SET root = excluded.root, public_name = excluded.public_name",
@@ -143,7 +149,7 @@ impl Store {
     /// (`GENESIS_HASH` when empty). `finalized_through` only moves forward; an empty
     /// `entries` still moves it.
     pub fn append_ledger(&mut self, entries: &[LedgerEntry], finalized_through: i64) -> Result<(), StoreError> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let last: Option<String> = tx
             .query_row("SELECT hash FROM ledger ORDER BY seq DESC LIMIT 1", [], |r| r.get(0))
             .optional()?;
@@ -238,6 +244,15 @@ mod tests {
         s.append_ledger(&[entry("a1", GENESIS_HASH)], 10).unwrap();
         assert!(s.conn.execute("UPDATE ledger SET hash = 'x'", []).is_err());
         assert!(s.conn.execute("DELETE FROM ledger", []).is_err());
+    }
+    #[test] fn two_handles_on_one_file_see_each_others_writes() {
+        let dir = tempfile::tempdir().unwrap(); let p = dir.path().join("tally.db");
+        let mut a = Store::open(&p).unwrap();
+        let mut b = Store::open(&p).unwrap();
+        b.append_ledger(&[entry("a1", GENESIS_HASH)], 1000).unwrap();
+        assert!(matches!(a.append_events(&[ev("late", 1000)]),
+            Err(StoreError::LateEvent { ts: 1000, finalized_through: 1000, .. })));
+        assert_eq!(a.ledger().unwrap().len(), 1);
     }
     #[test] fn data_survives_reopen_and_projects_are_named() {
         let dir = tempfile::tempdir().unwrap(); let p = dir.path().join("tally.db");
