@@ -79,3 +79,247 @@ fn chain_helpers_are_valid_chains() {
     assert!(tally_scoring::verify_chain(&chain_of_ruleset(3, "2026.01-9"), GENESIS_HASH).is_ok());
     assert_eq!(chain_of_with_project(1, "a/b")[0].project.as_deref(), Some("a/b"));
 }
+
+// ---- sync (Task 6) ----
+use std::collections::BTreeMap;
+use tally_daemon::finalize::{finalize, FinalizeError};
+use tally_daemon::store::Store;
+use tally_daemon::sync::{sync_all, sync_chain, SyncError};
+use tally_scoring::{Event, Kind};
+
+fn api(f: &FakeServer) -> Api {
+    Api::new(&f.url, "tok")
+}
+
+#[test]
+fn uploads_everything_in_bounded_batches_and_a_rerun_sends_nothing() {
+    let f = FakeServer::start("tok");
+    let local = chain_of(1201);
+    let r = sync_chain(&api(&f), "srv_1", "owner/repo", R, &local).unwrap();
+    assert_eq!((r.uploaded, r.server_count), (1201, 1201));
+    assert_eq!(f.chain("srv_1", R), local);
+    assert_eq!(upload_sizes(&f), [500, 500, 201]);
+    assert_eq!(sync_chain(&api(&f), "srv_1", "owner/repo", R, &local).unwrap().uploaded, 0);
+}
+
+#[test]
+fn a_batch_stored_but_unacknowledged_is_not_resent() {
+    let f = FakeServer::start("tok");
+    let local = chain_of(700);
+    f.store_then_drop_next_upload();
+    assert!(matches!(sync_chain(&api(&f), "srv_1", "p", R, &local), Err(SyncError::Api(ApiError::Network(_)))));
+    assert_eq!(f.chain("srv_1", R).len(), 500);
+    let r = sync_chain(&api(&f), "srv_1", "p", R, &local).unwrap();
+    assert_eq!(r.uploaded, 200);
+    assert_eq!(upload_sizes(&f), [500, 200]);
+    assert_eq!(f.chain("srv_1", R), local);
+}
+
+#[test]
+fn a_server_head_inside_the_local_chain_resumes_after_it() {
+    let f = FakeServer::start("tok");
+    let local = chain_of(10);
+    f.set_chain("srv_1", R, local[..7].to_vec());
+    assert_eq!(sync_chain(&api(&f), "srv_1", "p", R, &local).unwrap().uploaded, 3);
+}
+
+#[test]
+fn an_oversized_batch_is_halved_until_it_fits() {
+    let f = FakeServer::start("tok");
+    let local = chain_of(10);
+    f.max_batch(3);
+    assert_eq!(sync_chain(&api(&f), "srv_1", "owner/repo", R, &local).unwrap().uploaded, 10);
+    assert_eq!(f.chain("srv_1", R), local);
+}
+
+#[test]
+fn a_single_entry_too_large_is_returned_as_the_error() {
+    let f = FakeServer::start("tok");
+    f.max_batch(0);
+    assert!(matches!(sync_chain(&api(&f), "srv_1", "p", R, &chain_of(2)), Err(SyncError::Api(ApiError::TooLarge))));
+}
+
+#[test]
+fn a_server_head_this_device_never_wrote_stops_the_project() {
+    let f = FakeServer::start("tok");
+    let local = chain_of(5);
+    f.set_chain("srv_1", R, chain_of_with_project(3, "someone/else"));
+    assert!(matches!(sync_chain(&api(&f), "srv_1", "p", R, &local), Err(SyncError::ForeignHead { server_count: 3, .. })));
+    assert_eq!(upload_sizes(&f), Vec::<usize>::new());
+}
+
+// The fake (like server/src/ledger.ts) accepts any overlap whose hashes match, so "another
+// device appended a prefix" is not a 409. A 409 needs a prev_hash the server no longer has;
+// this test rolls the server chain back between our GET and our POST.
+#[test]
+fn a_409_race_refetches_the_head_and_finishes() {
+    let f = FakeServer::start("tok");
+    let local = chain_of(6);
+    f.set_chain("srv_1", R, local[..3].to_vec());
+    let back = local[..1].to_vec();
+    f.on_next_upload(move |s| {
+        s.chains.insert(("srv_1".into(), R.into()), back);
+    });
+    let r = sync_chain(&api(&f), "srv_1", "owner/repo", R, &local).unwrap();
+    assert_eq!((r.uploaded, r.server_count), (5, 6));
+    assert_eq!(f.chain("srv_1", R), local);
+    assert_eq!(upload_sizes(&f), [3, 5]); // the stale POST (409), then the resumed one
+}
+
+#[test]
+fn a_409_that_reveals_a_foreign_head_stops() {
+    let f = FakeServer::start("tok");
+    let local = chain_of(6);
+    f.set_chain("srv_1", R, local[..2].to_vec());
+    let mut fork = local[..2].to_vec();
+    fork[1].ts += 1;
+    fork[1].hash = tally_scoring::ledger::entry_hash(&fork[1]);
+    f.on_next_upload(move |s| {
+        s.chains.insert(("srv_1".into(), R.into()), fork);
+    });
+    assert!(matches!(sync_chain(&api(&f), "srv_1", "p", R, &local), Err(SyncError::ForeignHead { server_count: 2, .. })));
+    assert_eq!(upload_sizes(&f), [4]); // one rejected POST, none after the refetch
+}
+
+#[test]
+fn a_422_is_surfaced_with_its_index_and_not_retried() {
+    let f = FakeServer::start("tok");
+    let mut local = chain_of(3);
+    local[1].verified_s += 1; // hash no longer matches
+    assert!(matches!(sync_chain(&api(&f), "srv_1", "p", R, &local), Err(SyncError::Api(ApiError::Rejected { index: 1, .. }))));
+    assert_eq!(upload_sizes(&f), [3]);
+}
+
+#[test]
+fn an_older_ruleset_chain_is_appended_but_an_unknown_one_is_refused() {
+    let f = FakeServer::start("tok");
+    let old = chain_of_ruleset(5, "old-0");
+    f.set_chain("srv_1", "old-0", old[..3].to_vec());
+    f.set_current_ruleset(R);
+    assert_eq!(sync_chain(&api(&f), "srv_1", "owner/repo", "old-0", &old).unwrap().uploaded, 2);
+    assert_eq!(f.chain("srv_1", "old-0"), old);
+    let never = chain_of_ruleset(2, "older-0");
+    assert!(matches!(sync_chain(&api(&f), "srv_1", "owner/repo", "older-0", &never),
+        Err(SyncError::Api(ApiError::Rejected { reason, .. })) if reason == "unknown_ruleset"));
+    assert_eq!(upload_sizes(&f), [2, 2]);
+}
+
+fn prompt(id: &str, ts: i64, project: &str) -> Event {
+    Event {
+        v: 1,
+        id: id.into(),
+        ts,
+        source: "test".into(),
+        project: Some(project.into()),
+        session: None,
+        kind: Kind::Prompt { chars: 200, relevance_pm: 600, novelty_bytes: 100 },
+    }
+}
+
+/// Finalized, published projects `p1` = owner/repo (srv_1) and `p2` = owner/other (srv_2).
+fn two_project_store(path: Option<&std::path::Path>) -> Store {
+    let mut s = match path {
+        Some(p) => Store::open(p).unwrap(),
+        None => Store::open_in_memory().unwrap(),
+    };
+    s.register_project("p1", "C:/r", Some("owner/repo")).unwrap();
+    s.register_project("p2", "C:/o", Some("owner/other")).unwrap();
+    s.set_server_id("p1", "srv_1").unwrap();
+    s.set_server_id("p2", "srv_2").unwrap();
+    s.append_events(&[prompt("a", 0, "p1"), prompt("b", 100_000, "p2")]).unwrap();
+    s.set_watermark("src", 1_000_000).unwrap();
+    finalize(&mut s).unwrap();
+    s
+}
+
+fn tokens() -> BTreeMap<String, String> {
+    BTreeMap::from([("srv_1".into(), "tok".into()), ("srv_2".into(), "tok2".into())])
+}
+
+#[test]
+fn a_revoked_token_stops_only_its_project() {
+    let f = FakeServer::start("tok");
+    f.add_project("srv_2", "owner/other", "tok2");
+    f.revoke("srv_1");
+    let mut s = two_project_store(None);
+    let out = sync_all(&mut s, &f.url, &tokens());
+    assert_eq!(out.len(), 2);
+    assert!(out.iter().any(|r| matches!(r, Err(SyncError::Api(ApiError::Unauthorized)))));
+    let ok = out.iter().find_map(|r| r.as_ref().ok()).unwrap();
+    assert_eq!((ok.project.as_str(), ok.uploaded), ("owner/other", 1));
+    assert_eq!(f.requests().iter().filter(|r| r.path.contains("srv_1")).count(), 1);
+    assert_eq!(f.chain("srv_2", R).len(), 1);
+}
+
+#[test]
+fn a_linked_project_without_a_token_is_reported_and_others_continue() {
+    let f = FakeServer::start("tok");
+    f.add_project("srv_2", "owner/other", "tok2");
+    let mut s = two_project_store(None);
+    let mut t = tokens();
+    t.remove("srv_2");
+    let out = sync_all(&mut s, &f.url, &t);
+    assert!(out.iter().any(|r| matches!(r, Err(SyncError::NotLoggedIn { project }) if project == "owner/other")));
+    assert!(out.iter().any(|r| matches!(r, Ok(c) if c.project == "owner/repo" && c.uploaded == 1)));
+    let again = sync_all(&mut s, &f.url, &t);
+    assert!(again.iter().any(|r| matches!(r, Ok(c) if c.uploaded == 0)));
+}
+
+#[test]
+fn sync_all_uploads_nothing_when_the_ledger_diverges() {
+    let f = FakeServer::start("tok");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.db");
+    let mut s = two_project_store(Some(&path));
+    // what a different build would have written: other features, correct hash
+    let mut e = s.ledger().unwrap().remove(0);
+    let key = e.features.keys().next().expect("prompt claims carry features").clone();
+    *e.features.get_mut(&key).unwrap() += 1;
+    e.hash = tally_scoring::ledger::entry_hash(&e);
+    let c = rusqlite::Connection::open(&path).unwrap();
+    let names: Vec<String> = c
+        .prepare("SELECT name FROM sqlite_master WHERE type='trigger'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    for n in names {
+        c.execute(&format!("DROP TRIGGER {n}"), []).unwrap();
+    }
+    c.execute(
+        "UPDATE ledger SET hash = ?1, entry_json = ?2 WHERE seq = 1",
+        rusqlite::params![e.hash, serde_json::to_string(&e).unwrap()],
+    )
+    .unwrap();
+    drop(c);
+    let out = sync_all(&mut s, &f.url, &tokens());
+    assert!(matches!(&out[..], [Err(SyncError::Derivation(FinalizeError::Divergence { .. }))]), "{out:?}");
+    assert!(f.requests().is_empty());
+}
+
+#[test]
+fn two_server_ids_for_one_public_name_is_refused() {
+    let f = FakeServer::start("tok");
+    let mut s = Store::open_in_memory().unwrap();
+    s.register_project("id1", "C:/a", Some("owner/repo")).unwrap();
+    s.register_project("id2", "C:/b", Some("owner/repo")).unwrap();
+    s.set_server_id("id1", "srv_1").unwrap();
+    s.set_server_id("id2", "srv_2").unwrap();
+    s.append_events(&[prompt("a", 0, "id1")]).unwrap();
+    s.set_watermark("src", 1_000_000).unwrap();
+    finalize(&mut s).unwrap();
+    let out = sync_all(&mut s, &f.url, &tokens());
+    assert!(matches!(&out[..], [Err(SyncError::ConflictingLink { project })] if project == "owner/repo"), "{out:?}");
+    assert!(f.requests().is_empty());
+}
+
+#[test]
+fn sync_errors_never_contain_the_token() {
+    let f = FakeServer::start("tok");
+    f.revoke("srv_1");
+    let mut s = two_project_store(None);
+    let t = BTreeMap::from([("srv_1".into(), "tok_SECRET".into()), ("srv_2".into(), "tok2".into())]);
+    let out = sync_all(&mut s, &f.url, &t);
+    assert!(out.iter().all(|r| !format!("{r:?}").contains("tok_SECRET")));
+}

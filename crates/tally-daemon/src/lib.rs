@@ -16,6 +16,7 @@ pub mod run;
 pub mod source;
 pub mod status;
 pub mod store;
+pub mod sync;
 pub mod testrun;
 #[cfg(test)]
 pub(crate) mod test_support;
