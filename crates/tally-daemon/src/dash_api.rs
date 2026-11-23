@@ -126,6 +126,8 @@ impl<'a> Query<'a> {
     }
     fn edges(&self) -> Result<Vec<i64>, String> {
         let raw = self.get("edges").ok_or("missing edges")?;
+        // URLSearchParams writes the commas as %2C
+        let raw = raw.replace("%2C", ",").replace("%2c", ",");
         let e: Vec<i64> = raw.split(',').map(|x| x.parse::<i64>().map_err(|_| "edges must be comma separated integers".to_string())).collect::<Result<_, _>>()?;
         if !(2..=367).contains(&e.len()) {
             return Err("edges must have 2 to 367 entries".into());

@@ -84,6 +84,7 @@ fn analytics_routes_return_the_analytics_types() {
     assert_eq!(h["data"]["totals"]["claims"], 5);
     assert_eq!(h["data"]["no_presence"]["claims"], 1);
     assert_eq!(h["data"]["edges"].as_array().unwrap().len(), 2);
+    assert_eq!(ok(&api, "/api/hours", &edges.replace(',', "%2C"))["data"]["totals"]["claims"], 5);
     let r = ok(&api, "/api/replay", Q);
     let kinds: Vec<&str> = r["data"]["items"].as_array().unwrap().iter().map(|i| i["kind"].as_str().unwrap()).collect();
     assert!(kinds.contains(&"fix") && kinds.contains(&"skipped"), "{kinds:?}");
@@ -101,7 +102,7 @@ fn bad_parameters_are_400_with_a_reason() {
         ("/api/hours", "edges=5,3".to_string(), "edges"),
         ("/api/hours", format!("edges={many}"), "edges"),
         ("/api/hours", "edges=1, 2".to_string(), "edges"),
-        ("/api/hours", "edges=1%2C2".to_string(), "edges"),
+        ("/api/hours", "edges=1%2C%202".to_string(), "edges"),
         ("/api/replay", format!("{Q}&after=nocolon"), "after"),
     ];
     for (path, q, word) in cases {
