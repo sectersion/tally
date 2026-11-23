@@ -44,6 +44,8 @@ mod tests {
     #[test]
     fn normalize_handles_windows_and_trailing_separators() {
         assert_eq!(normalize_path(r"\?\C:\Users\o\tally\"), "C:/Users/o/tally");
+        assert_eq!(normalize_path(r"\\?\C:\Users\o\tally\"), "C:/Users/o/tally");
+        assert_eq!(normalize_path(r"C:\Users\o\tally\"), "C:/Users/o/tally");
         assert_eq!(normalize_path(r"C:\Users\o\tally"), "C:/Users/o/tally");
         assert_eq!(normalize_path("/home/o/tally/"), "/home/o/tally");
         assert_eq!(normalize_path("/"), "/");
