@@ -1,5 +1,6 @@
 import type { BunRequest, Server, SQL } from "bun";
 import { hashToken, newToken, requireToken } from "./auth.ts";
+import { badgeResponse } from "./badge.ts";
 import { type Config, MAX_BATCH, MAX_BODY_BYTES } from "./config";
 import {
   createDeviceCode,
@@ -74,6 +75,7 @@ type Deps = {
   ruleset?: string;
   limiter?: Limiter;
   deviceLimiter?: Limiter;
+  badgeLimiter?: Limiter;
   cfg: Config;
   /** GitHub calls; tests stub it. */
   fetchFn?: typeof fetch;
@@ -135,6 +137,7 @@ export function createServer(deps: Deps) {
   const ruleset = deps.ruleset ?? rulesetVersion();
   const limiter = deps.limiter ?? createLimiter();
   const deviceLimiter = deps.deviceLimiter ?? createLimiter(10, 10); // /v1/device/code: 10 per minute per ip
+  const badgeLimiter = deps.badgeLimiter ?? createLimiter(600, 600); // badge:<ip>, 600 per minute
   const limit = (key: string) => {
     if (!limiter.take(key)) throw new HttpError(429, { error: "rate_limited" });
   };
@@ -607,7 +610,13 @@ export function createServer(deps: Deps) {
           const form = await formOf(req);
           requireCsrf(cfg, req, s, form);
           const p = await ownedProject(s.userId, req.params.owner, req.params.name);
-          await sql`update projects set public = ${form.get("public") === "on"} where id = ${p.id}`;
+          const next = form.get("public") === "on";
+          // A flip changes what badges and pages show, so it bumps change_seq (the badge etag).
+          await sql.begin(async (tx) => {
+            const r = await tx`update projects set public = ${next}
+              where id = ${p.id} and public is distinct from ${next} returning id`;
+            if (r.length) await bumpChange(tx, p.id);
+          });
           return redirect(`/p/${p.public_name}/settings`);
         }),
         GET: handle("/p/:owner/:name/settings", async (req) => {
@@ -694,6 +703,21 @@ export function createServer(deps: Deps) {
               (await dispatch(tx, id, event, payload)) ? { ok: true } : { ignored: true },
             );
           });
+        }),
+      },
+      // Public names contain a slash and Bun does not split a ".svg" suffix off a param: match it here.
+      "/badge/:owner/:file": {
+        GET: handle("/badge/:owner/:file", async (req, server) => {
+          if (!badgeLimiter.take(`badge:${ip(server, req)}`))
+            throw new HttpError(429, { error: "rate_limited" });
+          const m = /^(.+)\.(svg|json)$/.exec(req.params.file);
+          if (!m) return notFound();
+          return badgeResponse(
+            sql,
+            `${req.params.owner}/${m[1]}`,
+            m[2] as "svg" | "json",
+            req.headers.get("if-none-match"),
+          );
         }),
       },
       "/v1/projects/:id/summary": {
