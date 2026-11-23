@@ -115,6 +115,7 @@ impl Session {
                         })),
                         BashKind::Commit => None,
                     };
+                    // Id has no block index: two Bash blocks in one entry would collide (FORMAT.md: one block per entry).
                     if let Some((suffix, kind)) = kind {
                         out.push(ev(&tm.uuid, suffix, tm.ts, kind));
                     }
@@ -134,11 +135,13 @@ impl Session {
         }
     }
 
-    /// Closes a turn whose last entry is older than OPEN_SPAN_MAX_MS, at `last_seen_ts`.
+    /// Closes a turn whose last entry is older than OPEN_SPAN_MAX_MS, at `last_seen_ts`, and drops (no event)
+    /// pending Bash tool uses older than that which never got a result (Claude Code killed mid-tool).
     pub fn expire(&mut self, now_ms: i64, session: &str, project: Option<String>, out: &mut Vec<Event>) {
         if self.open_turn.is_some() && now_ms - self.last_seen_ts > OPEN_SPAN_MAX_MS {
             self.close(self.last_seen_ts, session, &project, out);
         }
+        self.pending.retain(|_, p| p.0.ts >= now_ms - OPEN_SPAN_MAX_MS);
     }
 
     /// Highest watermark this session allows: min(open turn ts, oldest pending tool_use ts) - 1, or i64::MAX.
@@ -174,36 +177,23 @@ fn is_env_assign(tok: &str) -> bool {
     })
 }
 
+/// Segment starts (after wrappers) with `git` and any later token is exactly `commit`. Matching any later token
+/// survives `git -C "my dir" commit` and option arguments; `git log --grep commit` is a false positive (safe).
 fn is_git_commit(seg: &str) -> bool {
-    let mut s = seg.trim();
+    let toks: Vec<&str> = seg
+        .split_whitespace()
+        .map(|t| t.trim_start_matches(['(', '"', '\'']).trim_end_matches([')', '"', '\'']))
+        .filter(|t| !t.is_empty())
+        .collect();
+    let mut t = &toks[..];
     loop {
-        let before = s;
-        s = s.trim_start_matches(['(', '"', '\'', ' ', '\t']);
-        if let Some(r) = s.strip_prefix("bash -c ").or_else(|| s.strip_prefix("sh -c ")) {
-            s = r;
-        }
-        if let Some((tok, rest)) = s.split_once(char::is_whitespace) {
-            if is_env_assign(tok) {
-                s = rest;
-            }
-        }
-        if s == before {
-            break;
+        match t {
+            [w, f, rest @ ..] if matches!(*w, "bash" | "sh" | "zsh") && f.starts_with('-') && f.contains('c') => t = rest,
+            [w, rest @ ..] if matches!(*w, "env" | "sudo" | "time" | "command") || is_env_assign(w) => t = rest,
+            _ => break,
         }
     }
-    let toks: Vec<&str> = s.split_whitespace().map(|t| t.trim_end_matches([')', '"', '\''])).collect();
-    if toks.first() != Some(&"git") {
-        return false;
-    }
-    let mut i = 1;
-    while let Some(t) = toks.get(i) {
-        match *t {
-            "-C" | "-c" => i += 2,
-            t if t.starts_with('-') => i += 1,
-            t => return t == "commit",
-        }
-    }
-    false
+    matches!(t, ["git", rest @ ..] if rest.contains(&"commit"))
 }
 
 /// Lowercase hex SHA-256 of the command string.
@@ -330,6 +320,20 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_tool_use_without_a_result_expires() {
+        let (mut s, v) = (Session::default(), Vocab::default());
+        let mut out = vec![];
+        let ctx = Ctx { project: None, vocab: &v };
+        s.feed(tool("a1", 2_000, "t1", "Bash", Some("git commit -m x"), None), &ctx, &mut out);
+        s.expire(2_000 + OPEN_SPAN_MAX_MS, "s", None, &mut out);
+        assert_eq!(s.limit(), 1_999);
+        s.expire(2_000 + OPEN_SPAN_MAX_MS + 1, "s", None, &mut out);
+        assert_eq!(s.limit(), i64::MAX);
+        s.feed(result("r1", 2_000 + OPEN_SPAN_MAX_MS + 2, "t1", false, "ok"), &ctx, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
     fn bash_kind_cases() {
         for c in [
             "(git commit)",
@@ -342,6 +346,13 @@ mod tests {
             "(git commit -m x)",
             "sh -c 'cd x && git commit -m y'",
             "  git -c user.name=a commit  ",
+            "bash  -c \"git commit\"",
+            "bash -lc 'git commit -m x'",
+            "sh -ec \"git add . && git commit -m x\"",
+            "env X=1 git commit",
+            "sudo git commit",
+            "git -C \"my dir\" commit -m x",
+            "git --git-dir x commit",
         ] {
             assert_eq!(bash_kind(c), Some(BashKind::Commit), "{c}");
         }
