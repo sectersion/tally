@@ -24,11 +24,11 @@ From plan 06 (`docs/superpowers/plans/2026-11-23-06-server-core.md`):
   - The trigger function `tally_append_only()`.
 - `server/src/auth.ts`: `newToken()` (`"tly_" + base64url(32 bytes)`), `hashToken(token)` (hex SHA-256), and `requireToken(sql, req, projectId): Promise<{ tokenId: number }>` (`401` unknown or revoked, `403` wrong project).
 - `server/src/errors.ts`: `HttpError`, `json(status, body)`, `readJson(req)`, `parse(schema, value)`.
-- `server/src/ledger.ts`: `appendEntries(sql, projectId, body)` (one `sql.begin` transaction that locks the chain row) and `verifiedSeconds(...)`. The badge function `badge(seconds)` follows C8 with blue color, and its message is `floor(verified_s / 360) / 10` hours, formatted with one decimal: floor to a tenth, never above verified time (ruling 9).
+- `server/src/ledger.ts`: `appendEntries(sql, projectId, body, ruleset?)` and `getHead(sql, projectId, ruleset?)` (plan 06's amended signatures: a trailing optional ruleset parameter, default the current `rulesetVersion()`; this plan calls both with the default). `appendEntries` runs in one `sql.begin` transaction that locks the chain row. Also `verifiedSeconds(...)`. The badge function `badge(seconds)` follows C8 with blue color, and its message is `floor(verified_s / 360) / 10` hours, formatted with one decimal: floor to a tenth, never above verified time (ruling 9).
 - `server/src/ratelimit.ts`: an in-memory token bucket. This plan reuses it with new keys; it does not write a second limiter.
 - `server/src/log.ts`: `log(level, msg, fields)`, with redaction of named fields.
 - `server/test/helpers.ts`: `seed(sql, publicName?)` returns `{ projectId, token, publicName }`, and `start(sql)` returns `{ url, stop }`.
-- Spec §6, as amended by plan 06: an entry's `project` is the **public name**, and the hash covers it. A project's public name therefore can never change once entries exist.
+- Spec §6, as amended by plan 05 (Step 4b; plan 06 only verifies the amendment): an entry's `project` is the **public name**, and the hash covers it. A project's public name therefore can never change once entries exist.
 
 From plan 07: `tally login` reads a token from stdin, and the user gives `tally project link <path> --server-id <id>` from the web UI. This plan supplies that id on the project settings page, and adds the device flow (Task 4) that `tally login --browser` (plan 12) uses, alongside plan 07's `tally login`, without changing plan 07's storage.
 
@@ -845,7 +845,7 @@ test("fragment escapes like the page", ...);
 
 ## Done when
 
-- A new user signs in with Hack Club Auth, sets a handle, creates `handle/name` (or `owner/repo` after connecting GitHub), installs the App, links the repo, and runs `tally login` through the device flow. A push to the repo appears on the project page with the server's receive time and the verified seconds since the previous push, without a reload.
+- A new user signs in with Hack Club Auth, sets a handle, creates `handle/name` (or `owner/repo` after connecting GitHub), installs the App, links the repo, and runs `tally login --browser` (plan 12) or plain `tally login` (plan 07, token flow), both using this plan's device-code flow. A push to the repo appears on the project page with the server's receive time and the verified seconds since the previous push, without a reload.
 - The badge at `/badge/<name>.svg` shows the same verified hours as plan 06's `/v1/projects/:id/badge.json`, and unverified time appears only as a separate "not counted" line on the page.
 - Every Review Focus item has a passing test, and the privacy test passes.
 - `docs/spikes/hack-club-auth.md`, `docs/spikes/github-app.md` and `docs/spikes/unified-projects-db.md` record sources and unknowns, and `docs/cost.md` has the server envelope.

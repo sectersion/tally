@@ -222,7 +222,8 @@ crates/tally-daemon/
   - `pub struct PresenceSource<P: Platform>` with `new(p: P) -> Self`, implementing `Source`: `id()` is `PRESENCE_SOURCE`; `poll` loads the `Tracker` from state, calls `idle_ms`, `step(now_ms, idle)`, saves the tracker, turns each closed span into `Event { v:1, id:"presence:idle:<start>", ts:start, source:"presence", project:None, session:None, kind: Kind::Idle{end_ts} }`, stores `Step.coverage` for `take_coverage`, returns `Poll { events, watermark: Some(step.watermark) }`. `Failed` from the platform: return `Poll { events: vec![], watermark: None }` and do not step (the next good sample sees the gap). `Unsupported`: `Err(SourceError)` (type from plan 03) with text `presence is not supported on this platform`.
   - `pub fn default_platform() -> impl Platform`: `WindowsPlatform` on Windows, `UnsupportedPlatform` (always `Unsupported`) elsewhere.
 - `presence_win.rs` (`#[cfg(windows)]`): `WindowsPlatform::idle_ms`: `GetLastInputInfo` into `LASTINPUTINFO { cbSize: size_of, dwTime: 0 }`; idle = `(GetTickCount64() as u32).wrapping_sub(dwTime) as u64` (the 32-bit tick wraps every 49 days). Cargo: `[target.'cfg(windows)'.dependencies] windows-sys = { version = "0.59", features = ["Win32_System_SystemInformation", "Win32_UI_Input_KeyboardAndMouse"] }` (check the feature containing `GetLastInputInfo` and `GetTickCount64` with `cargo doc` if the build says an item is missing). Note in a doc comment: `GetLastInputInfo` sees only the current session, so the daemon must run in the user's session, not as a service.
-- Config (plan 03 loader): table `[presence]` with `enabled` (default `true` on Windows, `false` elsewhere) and `require` (default equal to `enabled`). `tally run` calls `store.set_presence_required(cfg.require)` at start. If `require` is true and the platform is unsupported, `tally run` exits with an error naming the key.
+- Config (plan 03 loader): table `[presence]` with `enabled` (default `true` on Windows, `false` elsewhere) and `require` (default equal to `enabled`). `tally run` calls `store.set_presence_required(cfg.presence.require)` at start. If `cfg.presence.require` is true and the platform is unsupported, `tally run` exits with an error naming the key.
+- Registration (plan 03's `run::sources(cfg, home, store)`): when `cfg.presence.enabled`, push `Box::new(PresenceSource::new(default_platform()))` onto the source list (plan 12 extends `default_platform()` only; it does not touch this registration).
 
 - [ ] **Step 1: Write failing tests** (`FakePlatform { samples: VecDeque<Result<u64, PlatformError>> }`):
 
@@ -236,6 +237,7 @@ crates/tally-daemon/
 #[test] fn failed_sample_gives_no_watermark_and_no_coverage() { /* Failed: Poll{events:[],watermark:None}, take_coverage empty */ }
 #[test] fn unsupported_platform_is_an_error_not_silence() { /* UnsupportedPlatform: poll returns Err with the message */ }
 #[cfg(windows)] #[test] fn windows_reports_a_small_idle_value() { /* WindowsPlatform.idle_ms() is Ok(_) */ }
+#[test] fn sources_registers_presence_only_when_enabled() { /* run::sources with [presence] enabled = true: list contains id "presence"; enabled = false: it does not */ }
 ```
 
 - [ ] **Step 2:** `cargo test -p tally-daemon presence`. Expected: FAIL.
@@ -247,7 +249,7 @@ crates/tally-daemon/
 
 ### Task 5: Git source (commits, user vs agent)
 
-**Files:** Create `crates/tally-daemon/src/git.rs`; modify `lib.rs`, `store.rs` (add `has_agent_commit_marker`; `projects()` and `repos_to_poll()` are defined once, in Task 6), `run.rs` (register the source), `Cargo.toml` (no new dependency).
+**Files:** Create `crates/tally-daemon/src/git.rs`; modify `lib.rs`, `store.rs` (add `has_agent_commit_marker`; `projects()` and `repos_to_poll()` are defined once, in Task 6; the `GitSource` registration in `run::sources` is also done in Task 6), `Cargo.toml` (no new dependency).
 
 **Input from plan 03 (README ruling 1, no change requested):** the Claude adapter emits, for every agent Bash call whose command starts with `git commit`, `Event { id: "claude:<session>:<uuid>:commit", ts: <tool_use time>, source: "claude-code", project: Some(..), kind: Commit { sha: "claude:<tool_use id>", by: Agent, lines_changed: 0 } }`. This plan matches it only by `by = agent`, project and time window; the `sha` value is never read. Ordering is guaranteed by the `claude-code` watermark, not by a lag (rule 2 below).
 
@@ -310,13 +312,13 @@ crates/tally-daemon/
 
 ### Task 6: Project matching across worktrees and clones, UNC fix
 
-**Files:** Modify `crates/tally-daemon/src/project.rs`, `store.rs`, `main.rs` (stderr note only).
+**Files:** Modify `crates/tally-daemon/src/project.rs`, `store.rs`, `run.rs` (register `GitSource`), `main.rs` (stderr note only).
 
 **Interfaces:**
 - `normalize_path`: a verbatim UNC prefix (`\?\UNC\` or `\?\UNC\`) becomes `//` followed by the rest, so `\?\UNC\srv\share\d\` and `\srv\share\d` both give `//srv/share/d`. Other verbatim prefixes behave as before. (Behaviour change: ids of projects on network shares, registered with the old code, change; there are none in any ledger yet.)
 - `pub struct RepoIdentity { pub common_dir: Option<String>, pub remote: Option<String> }` and `pub fn repo_identity(root: &Path) -> RepoIdentity`: runs `git -C <root> rev-parse --path-format=absolute --git-common-dir` (normalized with `normalize_path`) and `git -C <root> config --get remote.origin.url` (normalized by `normalize_remote`). Any failure, including git missing, gives `None` for that field, never an error.
 - `pub fn normalize_remote(url: &str) -> String`: lowercases; strips credentials, a `scheme://`, a trailing `.git` and trailing `/`; turns `git@host:owner/repo` into `host/owner/repo`. So `https://github.com/Sectersion/tally.git` and `git@github.com:sectersion/tally` both give `github.com/sectersion/tally`.
-- `Store`: `projects` table gets nullable columns `common_dir`, `remote` (added by `ALTER TABLE` when `PRAGMA table_info(projects)` lacks them); `set_project_identity(&mut self, local_id: &str, id: &RepoIdentity)`; `projects(&self) -> Result<Vec<ProjectRow>, StoreError>` (`local_id, root, public_name, common_dir, remote`, in insertion order); `repos_to_poll(&self) -> Result<Vec<(String, String)>, StoreError>`: one `(local_id, root)` per distinct `common_dir` (the earliest registered; every project with no `common_dir` is its own group). The runner builds the `GitSource` repo list from this.
+- `Store`: `projects` table gets nullable columns `common_dir`, `remote` (added by `ALTER TABLE` when `PRAGMA table_info(projects)` lacks them); `set_project_identity(&mut self, local_id: &str, id: &RepoIdentity)`; `projects(&self) -> Result<Vec<ProjectRow>, StoreError>` (`local_id, root, public_name, common_dir, remote`, in insertion order); `repos_to_poll(&self) -> Result<Vec<(String, String)>, StoreError>`: one `(local_id, root)` per distinct `common_dir` (the earliest registered; every project with no `common_dir` is its own group). The runner builds the `GitSource` repo list from this: in plan 03's `run::sources(cfg, home, store)`, push `Box::new(GitSource::new(repos, Box::new(StoreLookup { store: <own connection to the db file under home>, claude_enabled: cfg.claude_code.enabled })))` with `repos` from `store.repos_to_poll()` mapped to `RepoRef`. This is the only place `GitSource` is registered (Task 5 defines the type).
 - `register_git_project(store, path, public_name)`: after registering, compute `repo_identity` and store it. If `public_name` is `None` and the project has no name, adopt the public name of another registered project with the same `common_dir`, else the same non-null `remote`. An explicit name always wins. Adoption happens only at registration time and is never applied to claims already ledgered (finalize maps names when chaining; earlier entries keep what they were chained with), so register a worktree before the daemon first records in it.
 - `tally project add` prints the local id on stdout as before, and when a name was adopted prints `matched <name> via common dir` or `via remote` on stderr.
 

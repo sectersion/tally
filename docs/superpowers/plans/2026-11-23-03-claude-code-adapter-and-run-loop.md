@@ -264,7 +264,7 @@ Events are appended before state is persisted, so a crash in between only causes
 #[serde(deny_unknown_fields, default)]
 pub struct Config { pub run: RunConfig, pub claude_code: ClaudeCodeConfig }
 #[derive(serde::Deserialize, Debug, PartialEq)] #[serde(deny_unknown_fields, default)]
-pub struct RunConfig { pub interval_secs: u64 }                                                  // default 15
+pub struct RunConfig { pub interval_secs: u64, pub dashboard: bool, pub dashboard_port: u16 }    // default 15, false, 7777 (plan 11 reads the last two)
 #[derive(serde::Deserialize, Debug, PartialEq)] #[serde(deny_unknown_fields, default)]
 pub struct ClaudeCodeConfig { pub enabled: bool, pub projects_dir: Option<std::path::PathBuf> }  // default true, None
 #[derive(thiserror::Error, Debug)]
@@ -284,6 +284,11 @@ pub fn load(home: &std::path::Path) -> Result<Config, ConfigError>;  // <home>/c
     let d = tempfile::tempdir().unwrap();
     let c = load(d.path()).unwrap();
     assert_eq!((c.run.interval_secs, c.claude_code.enabled, c.claude_code.projects_dir), (15, true, None));
+    assert_eq!((c.run.dashboard, c.run.dashboard_port), (false, 7777));
+}
+#[test] fn dashboard_settings_parse() {
+    // config.toml "[run]\ndashboard = true\ndashboard_port = 8123\n" -> run.dashboard == true, run.dashboard_port == 8123,
+    // interval_secs still 15 (no unknown-field error)
 }
 #[test] fn partial_tables_keep_other_defaults() {
     let d = tempfile::tempdir().unwrap();
@@ -626,6 +631,9 @@ pub struct Session {
     /// (tool_use ts, file_path) of agent Edit/Write/MultiEdit/NotebookEdit calls since the last drain. Memory only.
     /// Plan 08 drains it into `Source::take_agent_writes` for its heartbeat agent-write filter (README ruling 7);
     /// until then `ClaudeCode::poll` clears it after each poll.
+    /// Shape is fixed here: `(ts, raw path)`, and so is `Entry::ToolUse.file_path`. Plan 08 Task 19 turns these into hashed
+    /// `take_agent_writes()` output (`(heartbeat::file_hash(project_id, rel), ts)`, mapped inside `ClaudeCode::poll`) and
+    /// updates the `agent_writes` test below in the same commit. Until then `poll` just clears them each poll.
     pub agent_writes: Vec<(i64, String)>,
 }
 pub struct Ctx<'a> { pub project: Option<String>, pub vocab: &'a Vocab }
@@ -650,7 +658,7 @@ pub fn cmd_hash(command: &str) -> String;              // lowercase hex SHA-256
 - `TurnEnd`: if a turn is open, `agent_busy { end_ts: meta.ts }` at the open turn's ts, id `claude:<s>:<open uuid>:agent_busy`; clear it. No open turn (task-notification turns): nothing.
 - `ToolUse` with `name` in `Edit`, `Write`, `MultiEdit`, `NotebookEdit` and `Some(file_path)`: push `(meta.ts, file_path)` to `agent_writes`; no event.
 - Every entry updates `last_seen_ts = max(last_seen_ts, meta.ts)`.
-- `bash_kind`: trim, then `Commit` if it starts with `git commit`; `Test` if it starts with one of `cargo test`, `cargo nextest`, `npm test`, `npm run test`, `pnpm test`, `yarn test`, `bun test`, `pytest`, `python -m pytest`, `go test`, `dotnet test`, `make test`; else `None`. (Chained commands such as `cd x && cargo test` are not matched; noted under "Not in this plan".)
+- `bash_kind`: trim, then `Commit` if, after splitting on `&&`, `||`, `;`, `|` and newlines, any segment starts with `git commit` (so `git add . && git commit -m x` is a commit; Claude chains these often, and a missed marker would let plan 04 record the real commit as a USER commit). A quoted `echo "git commit"` is not split-safe and may count as a commit: a false positive only makes a commit agent-owned, the safe direction. Otherwise `Test` if it starts with one of `cargo test`, `cargo nextest`, `npm test`, `npm run test`, `pnpm test`, `yarn test`, `bun test`, `pytest`, `python -m pytest`, `go test`, `dotnet test`, `make test`; else `None`. (Chained commands such as `cd x && cargo test` are not matched; noted under "Not in this plan".)
 
 - [ ] **Step 1: Write the failing tests** in `session.rs`, feeding `Entry` values built by a helper `meta(uuid, ts)` (session `"s"`):
 
@@ -677,6 +685,8 @@ pub fn cmd_hash(command: &str) -> String;              // lowercase hex SHA-256
        ToolResult t1 is_error:true -> TestRun { cmd_hash: cmd_hash("cargo test -p x"), exit_code: 1, initiator: Agent } at ts 2_000;
        ToolUse "git commit -m x" at 3_000 id "t2" -> limit() == 2_999 while pending (plan 04's git source gates on this
        watermark, README ruling 1); ToolResult ok -> Commit { by: Agent, sha: "claude:t2", lines_changed: 0 } at ts 3_000;
+       bash_kind("git add . && git commit -m x") == Some(Commit); bash_kind("echo \"git commit\"") == None (its segment starts
+       with echo) and a quoted false positive, if any, is acceptable (agent-owned is the safe direction);
        ToolUse "ls" -> nothing pending; no event contains the command text (serde_json::to_string(&out) has no "cargo") */
 }
 #[test] fn agent_file_edits_are_recorded_for_plan_08() {

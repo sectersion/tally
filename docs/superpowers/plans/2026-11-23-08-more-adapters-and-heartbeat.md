@@ -66,7 +66,7 @@ crates/tally-daemon/
   src/source.rs                       (plan 03) Health, default methods take_health, take_agent_writes
   src/run.rs                          (plan 03) persist take_health / take_agent_writes; register sources in sources()
   src/store.rs                        adapter_health and agent_writes tables
-  src/claude_code/line.rs, session.rs (plan 03) Claude Code agent writes (Task 19)
+  src/claude_code/mod.rs              (plan 03) poll hashes Session.agent_writes, take_agent_writes (Task 19)
   src/adapters/mod.rs                 Parsed, ParseReport, Adapter trait, discovery helpers
   src/adapters/common.rs              FileCursor poll wrapper shared by file adapters, ids, time parsing, file_watermark
   src/adapters/codex.rs               Codex CLI parser + Source
@@ -557,16 +557,15 @@ Rules, in order, per heartbeat:
 Claude Code is the main harness. Its Edit, Write, MultiEdit and NotebookEdit tool calls make the editor send heartbeats for the touched file; without this task they become `user_edit` claims and agent activity moves the badge (README ruling 7).
 
 **Files:**
-- Modify: `crates/tally-daemon/src/claude_code/line.rs` (plan 03), `crates/tally-daemon/src/claude_code/session.rs` (plan 03), `crates/tally-daemon/src/claude_code/mod.rs` (plan 03)
+- Modify: `crates/tally-daemon/src/claude_code/mod.rs` (plan 03). Nothing in `line.rs` or `session.rs` changes.
 
 **Interfaces:**
-- `line.rs`: `Entry::ToolUse` gains `file_path: Option<String>` = `input.file_path` when it is a string (`input.notebook_path` for `NotebookEdit` if the Task 6 spike of plan 03 recorded that key; check `FORMAT.md`), for every tool name. Memory only, like `command`.
-- `session.rs`: `pub const AGENT_WRITE_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];`. `Session::feed` takes a new `writes: &mut Vec<(String, i64)>` argument: for a `ToolUse` whose `name` is in `AGENT_WRITE_TOOLS` with `Some(path)`, and `ctx` has a project root, push `(heartbeat::file_hash(project_id, rel), meta.ts)` where `rel` is `path` relative to the root (`project::normalize_path`, `/` separators; a path outside the root pushes nothing). `Ctx` gains `root: Option<&Path>`. The path is dropped here; no event is emitted. The write is recorded at the `tool_use` time (before the file changes), which the backward `AGENT_WRITE_WINDOW_MS` covers.
-- `mod.rs`: `ClaudeCode` keeps `agent_writes: Vec<(String, i64)>`, filled during `poll` (warm-up writes are discarded with the warm-up events), and implements `fn take_agent_writes(&mut self) -> Vec<(String, i64)> { std::mem::take(&mut self.agent_writes) }`. No store call.
+- Plan 03 already parses `Entry::ToolUse.file_path` (`input.file_path`, or `notebook_path` for `NotebookEdit`) and fills `Session.agent_writes: Vec<(i64, String)>` as `(ts, raw path)` for `Edit`/`Write`/`MultiEdit`/`NotebookEdit`, at `tool_use` time (before the file changes, which the backward `AGENT_WRITE_WINDOW_MS` covers). Do not add `file_path` again and do not change the `Session::feed` signature.
+- `mod.rs`: `ClaudeCode::poll`, which in plan 03 only clears each session's `agent_writes`, instead maps every entry to `(heartbeat::file_hash(project_id, rel), ts)` and appends it to a new `ClaudeCode.agent_writes: Vec<(String, i64)>`. `project_id` and the root come from the session cwd via `project_for_dir`; `rel` is the raw path made project-relative (`project::normalize_path`, `/` separators); a path outside the root is dropped. The raw path never leaves `poll` and no event is emitted. Warm-up writes are discarded with the warm-up events. `ClaudeCode` implements `fn take_agent_writes(&mut self) -> Vec<(String, i64)> { std::mem::take(&mut self.agent_writes) }`. No store call.
 
-- [ ] **Step 1: Write the failing tests:** `line.rs` `tool_use_carries_file_path` (an `Edit` tool_use with `input.file_path` gives `file_path: Some(..)`; a `Bash` one gives `None`); `session.rs` `edit_tools_report_agent_writes_as_hashes` (Edit, Write, MultiEdit, NotebookEdit under root `C:/tallyproj` give four writes at their `ts`, each equal to `heartbeat::file_hash("p", "src/a.rs")` for `C:/tallyproj/src/a.rs`; `Read` gives none; a path outside the root gives none; `serde_json` of the writes and events contains no `"src/a.rs"`); `tests/claude_code.rs` `claude_edit_suppresses_the_matching_heartbeat` (a fixture session with one `Edit` tool_use at T; `ClaudeCode::poll` then `take_agent_writes` fed to `map_heartbeats` with a heartbeat for the same file at T + 2 s gives `dropped_agent == 1` and no `user_edit`).
+- [ ] **Step 1: Write the failing tests:** plan 03's `agent_file_edits_are_recorded_for_plan_08` test (`session.rs`, currently asserts `agent_writes == [(4_000, "src/a.rs")]`) is updated in this same commit to assert the hashed form, i.e. it moves to `mod.rs` as `poll_maps_agent_writes_to_hashes` and checks the output of `poll` + `take_agent_writes()` (Edit, Write, MultiEdit, NotebookEdit under root `C:/tallyproj` give four `take_agent_writes()` entries at their `ts`, each equal to `heartbeat::file_hash("p", "src/a.rs")` for `C:/tallyproj/src/a.rs`; `Read` gives none; a path outside the root gives none; a second `take_agent_writes()` is empty; `serde_json` of the writes and events contains no `"src/a.rs"`); and `tests/claude_code.rs` `claude_edit_suppresses_the_matching_heartbeat` (a fixture session with one `Edit` tool_use at T; `ClaudeCode::poll` then `take_agent_writes` fed to `map_heartbeats` with a heartbeat for the same file at T + 2 s gives `dropped_agent == 1` and no `user_edit`).
 - [ ] **Step 2:** `cargo test -p tally-daemon claude_code`. Expected: FAIL.
-- [ ] **Step 3:** Implement. Update plan 03's existing `Session::feed` call sites and tests for the new argument.
+- [ ] **Step 3:** Implement the `ClaudeCode::poll` mapping and `take_agent_writes`, and update plan 03's `agent_file_edits_are_recorded_for_plan_08` as described in Step 1.
 - [ ] **Step 4:** `cargo test -p tally-daemon`. Expected: PASS.
 - [ ] **Step 5:** Commit `feat(daemon): claude code edits count as agent writes for the heartbeat filter`.
 
