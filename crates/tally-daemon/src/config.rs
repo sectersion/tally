@@ -10,6 +10,22 @@ pub struct Config {
     pub presence: PresenceConfig,
     pub publish: crate::publish::PublishConfig,
     pub sync: SyncConfig,
+    pub heartbeat: HeartbeatConfig,
+}
+
+/// `token_file: None` means `<home>/heartbeat.token`.
+#[derive(serde::Deserialize, Debug, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct HeartbeatConfig {
+    pub enabled: bool,
+    pub port: u16,
+    pub token_file: Option<PathBuf>,
+}
+
+impl Default for HeartbeatConfig {
+    fn default() -> Self {
+        Self { enabled: false, port: 25930, token_file: None }
+    }
 }
 
 /// No token key by design: tokens live in `device_tokens`, never in the config.

@@ -1,5 +1,7 @@
 //! WakaTime-compatible heartbeat protocol types, auth and file hash.
 //! Wire format is UNVERIFIED, see tests/fixtures/heartbeat/NOTES.md.
+pub mod server;
+
 use base64::Engine;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
