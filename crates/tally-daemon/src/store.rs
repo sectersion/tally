@@ -35,6 +35,7 @@ CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
 CREATE TABLE IF NOT EXISTS watermarks(source TEXT PRIMARY KEY, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS projects(local_id TEXT PRIMARY KEY, root TEXT NOT NULL, public_name TEXT);
 CREATE TABLE IF NOT EXISTS ledger(seq INTEGER PRIMARY KEY, hash TEXT NOT NULL, entry_json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS source_state(source TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(source, key));
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
 CREATE TRIGGER IF NOT EXISTS ledger_no_update BEFORE UPDATE ON ledger
 BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;
@@ -53,6 +54,8 @@ impl Store {
     pub fn open(path: &Path) -> Result<Store, StoreError> {
         let conn = Connection::open(path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
+        conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
+        conn.execute_batch("PRAGMA synchronous = NORMAL;")?;
         Self::init(conn)
     }
 
@@ -113,6 +116,27 @@ impl Store {
              ON CONFLICT(source) DO UPDATE SET ts = MAX(ts, excluded.ts)",
             params![source, ts],
         )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// All state keys for one source.
+    pub fn get_state(&self, source: &str) -> Result<BTreeMap<String, String>, StoreError> {
+        let mut st = self.conn.prepare("SELECT key, value FROM source_state WHERE source = ?1")?;
+        let rows = st.query_map([source], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// One transaction; upserts every pair, keys not in `values` are kept.
+    pub fn set_state(&mut self, source: &str, values: &BTreeMap<String, String>) -> Result<(), StoreError> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (k, v) in values {
+            tx.execute(
+                "INSERT INTO source_state(source, key, value) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(source, key) DO UPDATE SET value = excluded.value",
+                params![source, k, v],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -281,6 +305,22 @@ mod tests {
         // events newer than the horizon never conflict
         a.append_ledger(&[], 1000, 2).unwrap();
         assert_eq!(a.finalized_through().unwrap(), 1000);
+    }
+    #[test] fn source_state_roundtrips_per_source_and_upserts() {
+        let mut s = Store::open_in_memory().unwrap();
+        let m = |kv: &[(&str, &str)]| kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<BTreeMap<_, _>>();
+        s.set_state("a", &m(&[("f1", "10"), ("f2", "20")])).unwrap();
+        s.set_state("b", &m(&[("f1", "99")])).unwrap();
+        s.set_state("a", &m(&[("f1", "11")])).unwrap();
+        assert_eq!(s.get_state("a").unwrap(), m(&[("f1", "11"), ("f2", "20")]));
+        assert_eq!(s.get_state("b").unwrap(), m(&[("f1", "99")]));
+        assert!(s.get_state("none").unwrap().is_empty());
+    }
+    #[test] fn file_store_uses_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(&dir.path().join("tally.db")).unwrap();
+        let mode: String = s.conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        assert_eq!(mode, "wal");
     }
     #[test] fn data_survives_reopen_and_projects_are_named() {
         let dir = tempfile::tempdir().unwrap(); let p = dir.path().join("tally.db");

@@ -35,6 +35,18 @@ impl Vocab {
         v
     }
 
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.len() >= VOCAB_MAX
+    }
+
     pub fn extend(&mut self, text: &str) {
         for t in tokens(text) {
             if self.0.len() >= VOCAB_MAX {
@@ -98,6 +110,15 @@ mod tests {
         let (rel, nov) = prompt_features(&tail[..200], &Vocab::from_texts([tail.as_str()]), &tail);
         assert!(nov < NOVELTY_MIN);
         assert_eq!(rel, 0);
+    }
+    #[test]
+    fn vocab_len_and_is_full() {
+        let mut v = Vocab::default();
+        assert!(v.is_empty() && !v.is_full());
+        v.extend("alpha beta_x gamma");
+        assert_eq!(v.len(), 3);
+        v.extend(&(0..VOCAB_MAX).map(|i| format!("w_{i} ")).collect::<String>());
+        assert!(v.is_full() && v.len() == VOCAB_MAX);
     }
     #[test]
     fn non_ascii_and_digit_prefixes_do_not_panic() {

@@ -104,6 +104,30 @@ fn a_bad_event_line_names_its_line_number() {
 }
 
 #[test]
+fn run_once_with_an_empty_projects_dir_finalizes_and_exits() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let empty = tempfile::tempdir().unwrap();
+    std::fs::write(home.join("config.toml"), format!("[claude_code]\nprojects_dir = '{}'\n", empty.path().display())).unwrap();
+    let o = tally(&home, &["run", "--once"]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(out(&o), "added 0, duplicates 0, final 0, provisional 0");
+    assert!(home.join("tally.db").exists());
+}
+
+#[test]
+fn run_refuses_a_bad_config() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("config.toml"), "[run]\nbogus = 1\n").unwrap();
+    let o = tally(&home, &["run", "--once"]);
+    assert!(!o.status.success());
+    assert!(err(&o).contains("unknown field"), "{}", err(&o));
+}
+
+#[test]
 fn verify_reports_a_tampered_ledger_entry_by_index() {
     let t = tempfile::tempdir().unwrap();
     let home = t.path().join("home");
