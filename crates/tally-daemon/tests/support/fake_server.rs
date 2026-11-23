@@ -249,3 +249,44 @@ fn head_hash(c: &[LedgerEntry]) -> String {
 fn head(c: &[LedgerEntry]) -> Value {
     json!({"head_hash": head_hash(c), "count": c.len()})
 }
+
+pub fn chain_of_with_project(n: usize, name: &str) -> Vec<LedgerEntry> {
+    let claims: Vec<tally_scoring::Claim> = (0..n)
+        .map(|i| tally_scoring::Claim {
+            action_id: format!("a{i}"),
+            ts: 1_000 + i as i64,
+            project: Some(name.into()),
+            kind: "prompt".into(),
+            verified_s: 10,
+            unverified_s: 0,
+            reasons: vec![],
+            features: Default::default(),
+        })
+        .collect();
+    tally_scoring::chain(&claims, GENESIS_HASH)
+}
+
+pub fn chain_of(n: usize) -> Vec<LedgerEntry> {
+    chain_of_with_project(n, "owner/repo")
+}
+
+pub fn chain_of_ruleset(n: usize, r: &str) -> Vec<LedgerEntry> {
+    let mut c = chain_of(n);
+    let mut prev = GENESIS_HASH.to_string();
+    for e in &mut c {
+        e.ruleset = r.into();
+        e.prev_hash = prev;
+        e.hash = tally_scoring::ledger::entry_hash(e);
+        prev = e.hash.clone();
+    }
+    c
+}
+
+/// Entry count of each `POST .../entries` body, in request order.
+pub fn upload_sizes(f: &FakeServer) -> Vec<usize> {
+    f.requests()
+        .iter()
+        .filter(|r| r.method == "POST" && r.path.ends_with("/entries"))
+        .map(|r| serde_json::from_str::<Value>(&r.body).unwrap()["entries"].as_array().unwrap().len())
+        .collect()
+}
