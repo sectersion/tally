@@ -175,6 +175,77 @@ fn verify_reports_a_tampered_ledger_entry_by_index() {
     assert_eq!(out(&o), "FAIL at entry 0: bad_hash");
 }
 
+/// Home with the lunch scenario finalized under a project named owner/repo.
+fn named_home(t: &Path) -> std::path::PathBuf {
+    let home = t.join("home");
+    let repo = t.join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let o = tally(&home, &["project", "add", repo.to_str().unwrap(), "--name", "owner/repo"]);
+    assert!(o.status.success(), "{}", err(&o));
+    let id = out(&o);
+    let mut evs = [ev("1", 0, prompt()), ev("2", 60, Kind::Idle { end_ts: 1_860_000 }), ev("3", 1900, prompt())];
+    for e in &mut evs {
+        e.project = Some(id.clone());
+    }
+    let file = t.join("events.jsonl");
+    write_events(&file, &evs);
+    assert!(tally(&home, &["ingest", file.to_str().unwrap(), "--watermark", "3000000"]).status.success());
+    assert!(tally(&home, &["finalize"]).status.success());
+    home
+}
+
+#[test]
+fn publish_dry_run_prints_the_plan_and_changes_nothing() {
+    let t = tempfile::tempdir().unwrap();
+    let home = named_home(t.path());
+    let before = out(&tally(&home, &["status"]));
+    let o = tally(&home, &["publish", "--dry-run"]);
+    assert!(o.status.success(), "{}", err(&o));
+    let s = out(&o);
+    assert!(s.contains("project owner/repo: 2 new entries"), "{s}");
+    assert!(s.contains("\"message\":\"0.1 h\""), "{s}");
+    assert!(s.contains("would write owner/repo/badge.json") && s.contains("dry run"), "{s}");
+    assert_eq!(out(&tally(&home, &["status"])), before);
+    assert_eq!(out(&tally(&home, &["publish", "--dry-run"])), s);
+}
+
+#[test]
+fn publish_with_no_named_projects_says_so() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    write_events(&t.path().join("e.jsonl"), &[ev("1", 0, prompt())]);
+    assert!(tally(&home, &["ingest", t.path().join("e.jsonl").to_str().unwrap()]).status.success());
+    assert_eq!(out(&tally(&home, &["publish", "--dry-run"])), "no named projects; nothing to publish");
+}
+
+#[test]
+fn publish_refuses_a_config_with_an_unknown_key() {
+    let t = tempfile::tempdir().unwrap();
+    let home = named_home(t.path());
+    std::fs::write(home.join("config.toml"), "[publish]\nbogus = 1\n").unwrap();
+    let o = tally(&home, &["publish", "--dry-run"]);
+    assert!(!o.status.success());
+    assert!(err(&o).contains("bogus"), "{}", err(&o));
+}
+
+#[test]
+fn publish_pushes_once_then_has_nothing_to_push() {
+    if Command::new("git").arg("--version").output().is_err() {
+        return;
+    }
+    let t = tempfile::tempdir().unwrap();
+    let home = named_home(t.path());
+    let bare = t.path().join("bare.git");
+    assert!(Command::new("git").args(["init", "-q", "--bare", "-b", "tally-data"]).arg(&bare).output().unwrap().status.success());
+    std::fs::write(home.join("config.toml"), format!("[publish]\nremote = '{}'\n", bare.display())).unwrap();
+    let o = tally(&home, &["publish"]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(out(&o).contains("wrote owner/repo/badge.json") && out(&o).ends_with("pushed"), "{}", out(&o));
+    let o = tally(&home, &["publish"]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(out(&o).ends_with("nothing to push"), "{}", out(&o));
+}
+
 fn status_events(home: &Path) -> String {
     let s = out(&tally(home, &["status"]));
     s.lines().find(|l| l.starts_with("events:")).unwrap().to_string()

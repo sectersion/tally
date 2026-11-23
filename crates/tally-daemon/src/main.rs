@@ -46,6 +46,12 @@ enum Cmd {
         cmd: ProjectCmd,
     },
     Finalize,
+    /// Write per-project chains and badges to the data branch and push (`publish.enabled` is ignored).
+    Publish {
+        /// Show what would be written; store nothing and push nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     Status,
     Verify,
     /// Check downloaded published chain files; needs no home or database. Exits 1 if any fail.
@@ -183,6 +189,11 @@ fn main() -> Result<()> {
         Cmd::Finalize => {
             let s = finalize(&mut store)?;
             println!("appended {}, skipped {}, final {}, provisional {}", s.appended, s.skipped, s.final_total, s.provisional);
+        }
+        Cmd::Publish { dry_run } => {
+            let cfg = config::load(&home)?;
+            let r = tally_daemon::publish::publish_once(&mut store, &cfg.publish, &home, dry_run)?;
+            print!("{}", r.render_text(dry_run));
         }
         Cmd::Status => {
             let s = status(&store)?;

@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use tally_scoring::LedgerEntry;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields, default)]
 pub struct PublishConfig {
     pub enabled: bool,
     pub remote: Option<String>,
@@ -56,6 +57,29 @@ pub struct ProjectReport {
 pub struct PublishReport {
     pub projects: Vec<ProjectReport>,
     pub pushed: bool,
+}
+
+impl PublishReport {
+    /// One block per project, then the outcome line. `dry_run` also shows the badge bytes.
+    pub fn render_text(&self, dry_run: bool) -> String {
+        if self.projects.is_empty() {
+            return "no named projects; nothing to publish\n".into();
+        }
+        let verb = if dry_run { "would write" } else { "wrote" };
+        let mut s = String::new();
+        for p in &self.projects {
+            s += &format!("project {}: {} new entries, {} total, {}\n", p.name, p.new_entries, p.total_entries,
+                published::hours_message(p.verified_s));
+            for f in &p.files {
+                s += &format!("  {verb} {f}\n");
+            }
+            if dry_run {
+                s += &format!("  badge: {}\n", badge_json(p.verified_s).trim_end());
+            }
+        }
+        s += if dry_run { "dry run: nothing written, nothing pushed\n" } else if self.pushed { "pushed\n" } else { "nothing to push\n" };
+        s
+    }
 }
 
 /// Files for one project: stored rows plus `extra`, one ledger per ruleset and the badge.
