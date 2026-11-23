@@ -2,6 +2,8 @@ pub mod claude_code;
 pub mod config;
 pub mod finalize;
 pub mod git;
+pub mod hosting;
+pub mod publish;
 pub mod ingest;
 pub mod presence;
 #[cfg(windows)]
