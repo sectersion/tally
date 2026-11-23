@@ -177,7 +177,12 @@ test("rate limited per ip", async () => {
   try {
     const u = `http://localhost:${s.port}/badge/x/y.svg`;
     expect((await fetch(u)).status).toBe(404);
-    expect((await fetch(u)).status).toBe(429);
+    const r = await fetch(u);
+    expect(r.status).toBe(429);
+    expect(r.headers.get("content-type")).toBe("image/svg+xml; charset=utf-8");
+    expect(r.headers.get("cache-control")).toBe("no-store");
+    expect(r.headers.get("retry-after")).toBe("60");
+    expect(await r.text()).toContain("rate limited");
   } finally {
     s.stop(true);
   }
@@ -191,4 +196,13 @@ test("renderSvg escapes both strings and sizes by character count", () => {
   expect((s.match(/<rect/g) ?? []).length).toBe(2);
   expect((s.match(/<text/g) ?? []).length).toBe(2);
   expect(s).toContain(`width="${Math.ceil(7 * 6.5 + 20) + Math.ceil(9 * 6.5 + 20)}"`);
+});
+
+test("if-none-match: weak, listed and * all match; others get 200", async () => {
+  const p = await project();
+  const etag = (await get(`/badge/${p.name}.svg`)).headers.get("etag") ?? "";
+  for (const inm of [`W/${etag}`, `"x", ${etag}`, "*", `"x",W/${etag} , "y"`])
+    expect((await get(`/badge/${p.name}.svg`, { "if-none-match": inm })).status).toBe(304);
+  for (const inm of [`"x"`, `"x", "y"`, `${etag.slice(0, -1)}9"`])
+    expect((await get(`/badge/${p.name}.svg`, { "if-none-match": inm })).status).toBe(200);
 });

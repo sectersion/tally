@@ -1,6 +1,6 @@
 import type { BunRequest, Server, SQL } from "bun";
 import { hashToken, newToken, requireToken } from "./auth.ts";
-import { badgeResponse } from "./badge.ts";
+import { badgeResponse, rateLimited } from "./badge.ts";
 import { type Config, MAX_BATCH, MAX_BODY_BYTES } from "./config";
 import {
   createDeviceCode,
@@ -708,10 +708,10 @@ export function createServer(deps: Deps) {
       // Public names contain a slash and Bun does not split a ".svg" suffix off a param: match it here.
       "/badge/:owner/:file": {
         GET: handle("/badge/:owner/:file", async (req, server) => {
-          if (!badgeLimiter.take(`badge:${ip(server, req)}`))
-            throw new HttpError(429, { error: "rate_limited" });
           const m = /^(.+)\.(svg|json)$/.exec(req.params.file);
           if (!m) return notFound();
+          if (!badgeLimiter.take(`badge:${ip(server, req)}`))
+            return rateLimited(m[2] as "svg" | "json");
           return badgeResponse(
             sql,
             `${req.params.owner}/${m[1]}`,
