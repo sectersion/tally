@@ -22,6 +22,8 @@ pub enum FinalizeError {
     Store(#[from] StoreError),
     #[error("ledger diverges from re-scored claims at index {index} (action {action_id})")]
     Divergence { index: usize, action_id: String },
+    #[error("ledger was written under ruleset {ledger} but this build scores with {current}; finalize will not append across a ruleset change")]
+    RulesetChanged { ledger: String, current: String },
 }
 
 /// A claim is final iff `ts + INTERRUPT_FOLLOW_MS <= horizon`. The stored ledger must be a
@@ -106,6 +108,12 @@ fn prepare(store: &Store) -> Result<Prepared, FinalizeError> {
     let kept: Vec<usize> = (0..claims.len()).filter(|&i| !skipped.contains(&claims[i].action_id)).collect();
 
     let ledger = store.ledger()?;
+    if let Some(last) = ledger.last().filter(|e| e.ruleset != tally_scoring::RULESET_VERSION) {
+        return Err(FinalizeError::RulesetChanged {
+            ledger: last.ruleset.clone(),
+            current: tally_scoring::RULESET_VERSION.to_string(),
+        });
+    }
     for (index, e) in ledger.iter().enumerate() {
         let same = kept.get(index).map(|&i| &claims[i]).is_some_and(|c| {
             (&c.action_id, c.ts, c.verified_s, c.unverified_s) == (&e.action_id, e.ts, e.verified_s, e.unverified_s)
@@ -159,6 +167,23 @@ mod tests {
     use crate::test_support::{edit, prompt};
     use tally_scoring::{Event, Kind, GENESIS_HASH};
 
+    fn old_ruleset_entry() -> LedgerEntry {
+        let mut e = LedgerEntry { v: 1, ruleset: "old-0".into(), action_id: "a".into(), ts: 1, project: None,
+            kind: "k".into(), verified_s: 1, unverified_s: 0, reasons: vec![], features: Default::default(),
+            prev_hash: GENESIS_HASH.into(), hash: String::new() };
+        e.hash = tally_scoring::ledger::entry_hash(&e);
+        e
+    }
+    #[test] fn finalize_refuses_to_append_across_a_ruleset_change() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.append_ledger(&[old_ruleset_entry()], 5, 0, &[]).unwrap();
+        s.append_events(&[prompt("a", 10, 600)]).unwrap();
+        s.set_watermark("src", 10_000_000).unwrap();
+        assert!(matches!(finalize(&mut s),
+            Err(FinalizeError::RulesetChanged { ledger, .. }) if ledger == "old-0"));
+        assert_eq!(s.ledger().unwrap().len(), 1);
+        assert_eq!(s.finalized_through().unwrap(), 5);
+    }
     #[test] fn final_prefix_boundary_is_exact() {
         let mut s = Store::open_in_memory().unwrap();
         s.append_events(&[prompt("a", 0, 600), edit("b", 100_000)]).unwrap();
