@@ -81,6 +81,18 @@ fn project_add_rejects_a_directory_outside_git_and_prints_the_id_inside_one() {
 }
 
 #[test]
+fn read_only_commands_need_an_existing_database_and_create_nothing() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    for cmd in ["status", "verify", "finalize"] {
+        let o = tally(&home, &[cmd]);
+        assert!(!o.status.success(), "{cmd}");
+        assert!(err(&o).contains("no database"), "{cmd}: {}", err(&o));
+        assert!(!home.join("tally.db").exists(), "{cmd}");
+    }
+}
+
+#[test]
 fn a_bad_event_line_names_its_line_number() {
     let t = tempfile::tempdir().unwrap();
     let file = t.path().join("bad.jsonl");

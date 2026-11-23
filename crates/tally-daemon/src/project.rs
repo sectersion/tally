@@ -12,11 +12,14 @@ pub enum ProjectError {
     Store(#[from] StoreError),
 }
 
-/// Registers the git repository containing `path`; returns its local project id.
+/// Registers the git repository containing `path` (relative paths resolve against the cwd);
+/// stores the canonical, normalized root and returns its local project id.
+/// `public_name = None` keeps an existing name.
 pub fn register_git_project(store: &mut Store, path: &Path, public_name: Option<&str>) -> Result<String, ProjectError> {
-    let root = find_git_root(path).ok_or(ProjectError::NotGit)?;
-    let id = project_id(&root)?;
-    store.register_project(&id, &root.to_string_lossy(), public_name)?;
+    let root = find_git_root(&std::fs::canonicalize(path)?).ok_or(ProjectError::NotGit)?;
+    let root = normalize_path(&root.to_string_lossy());
+    let id = project_id_from_normalized(&root);
+    store.register_project(&id, &root, public_name)?;
     Ok(id)
 }
 
@@ -87,6 +90,32 @@ mod tests {
         let w = tempfile::tempdir().unwrap();
         std::fs::write(w.path().join(".git"), "gitdir: elsewhere").unwrap();
         assert_eq!(find_git_root(w.path()).unwrap(), w.path());
+    }
+    /// Guards the process-wide cwd for tests that change it.
+    static CWD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn registering_dot_from_a_subdirectory_stores_the_canonical_repo_root() {
+        let t = tempfile::tempdir().unwrap();
+        let repo = t.path().join("repo");
+        let sub = repo.join("a").join("b");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        let mut s = Store::open_in_memory().unwrap();
+
+        let r = {
+            let _g = CWD.lock().unwrap_or_else(|e| e.into_inner());
+            let old = std::env::current_dir().unwrap();
+            std::env::set_current_dir(&sub).unwrap();
+            let r = register_git_project(&mut s, Path::new("."), None);
+            std::env::set_current_dir(old).unwrap();
+            r
+        };
+        let id = r.unwrap();
+        assert_eq!(id, project_id(&repo).unwrap());
+        let root: String = s.conn.query_row("SELECT root FROM projects WHERE local_id = ?1", [&id], |r| r.get(0)).unwrap();
+        assert_eq!(root, normalize_path(&std::fs::canonicalize(&repo).unwrap().to_string_lossy()));
+        assert!(Path::new(&root).is_absolute(), "{root}");
     }
     #[test]
     fn no_git_root_in_plain_directory() {

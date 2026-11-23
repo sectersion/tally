@@ -1,7 +1,7 @@
 //! Moves claims whose interrupt window has closed under the horizon into the ledger.
 use crate::store::{Store, StoreError};
 use tally_scoring::ruleset::INTERRUPT_FOLLOW_MS;
-use tally_scoring::{chain, score, GENESIS_HASH};
+use tally_scoring::{chain, score, LedgerEntry, GENESIS_HASH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FinalizeSummary {
@@ -23,13 +23,49 @@ pub enum FinalizeError {
 /// A claim is final iff `ts + INTERRUPT_FOLLOW_MS <= horizon`. The stored ledger must be a
 /// prefix of the re-scored claims, compared by `(action_id, ts, verified_s, unverified_s)`;
 /// `project` is not compared, so naming a project later does not diverge the past.
+///
+/// The horizon can go down when a new, slower source registers. Claims already ledgered are
+/// never withdrawn and `finalized_through` never moves back; later claims wait for the new
+/// horizon. If another writer adds an event at or below the horizon while this runs (a new
+/// source with no watermark yet), the append is refused with `Conflict` and everything is
+/// re-read; up to 3 attempts in total on `Conflict` or `ChainBroken`.
 pub fn finalize(store: &mut Store) -> Result<FinalizeSummary, FinalizeError> {
+    retry(|| {
+        let p = prepare(store)?;
+        commit(store, p)
+    })
+}
+
+const ATTEMPTS: usize = 3;
+
+fn retry<T>(mut attempt: impl FnMut() -> Result<T, FinalizeError>) -> Result<T, FinalizeError> {
+    let mut n = 1;
+    loop {
+        match attempt() {
+            Err(FinalizeError::Store(StoreError::Conflict | StoreError::ChainBroken)) if n < ATTEMPTS => n += 1,
+            r => return r,
+        }
+    }
+}
+
+struct Prepared {
+    horizon: Option<i64>,
+    /// Events with `ts <= horizon` that were scored.
+    scored_events: usize,
+    entries: Vec<LedgerEntry>,
+    summary: FinalizeSummary,
+}
+
+fn prepare(store: &Store) -> Result<Prepared, FinalizeError> {
     // Read order matters: horizon first. Every event with ts <= h was committed before the
     // watermark reached h, so events read after the horizon are a superset of what h covers,
     // and claims final under h depend only on events <= h. Reading events first could score
-    // a snapshot missing an event that a newer horizon already covers.
+    // a snapshot missing an event that a newer horizon already covers. A source with no
+    // watermark yet is outside that argument; `append_ledger`'s count check covers it.
     let horizon = store.horizon()?;
-    let mut claims = score(&store.events()?);
+    let events = store.events()?;
+    let scored_events = horizon.map_or(0, |h| events.iter().filter(|e| e.ts <= h).count());
+    let mut claims = score(&events);
     let names = store.project_names()?;
     for c in &mut claims {
         if let Some(name) = c.project.as_ref().and_then(|p| names.get(p)) {
@@ -52,15 +88,20 @@ pub fn finalize(store: &mut Store) -> Result<FinalizeSummary, FinalizeError> {
 
     let new = claims.get(ledger.len()..final_count).unwrap_or(&[]);
     let entries = chain(new, ledger.last().map_or(GENESIS_HASH, |e| e.hash.as_str()));
-    if let Some(h) = horizon {
-        store.append_ledger(&entries, h)?;
-    }
     let final_total = ledger.len() + entries.len();
-    Ok(FinalizeSummary {
+    let summary = FinalizeSummary {
         appended: entries.len(),
         final_total,
         provisional: claims.len().saturating_sub(final_total),
-    })
+    };
+    Ok(Prepared { horizon, scored_events, entries, summary })
+}
+
+fn commit(store: &mut Store, p: Prepared) -> Result<FinalizeSummary, FinalizeError> {
+    if let Some(h) = p.horizon {
+        store.append_ledger(&p.entries, h, p.scored_events)?;
+    }
+    Ok(p.summary)
 }
 
 #[cfg(test)]
@@ -156,5 +197,38 @@ mod tests {
         assert_eq!((r.appended, r.final_total), (1, 2));
         let p: Vec<_> = s.ledger().unwrap().into_iter().map(|e| e.project).collect();
         assert_eq!(p, [Some("p1".into()), Some("owner/repo".into())]);
+    }
+    #[test] fn an_event_from_a_new_source_mid_finalize_is_retried_and_matches_one_shot() {
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("tally.db");
+        let mut a = Store::open(&path).unwrap();
+        let mut b = Store::open(&path).unwrap();
+        a.append_events(&[prompt("a", 0, 600), edit("b", 100_000)]).unwrap();
+        a.set_watermark("src", 1_000_000).unwrap();
+        // the new source has no watermark yet, so it does not hold the horizon back
+        let late = prompt("c", 50_000, 600);
+        let mut calls = 0;
+        let r = retry(|| {
+            calls += 1;
+            let p = prepare(&a)?;
+            if calls == 1 { b.append_events(std::slice::from_ref(&late)).unwrap(); }
+            commit(&mut a, p)
+        }).unwrap();
+        assert_eq!(calls, 2);
+        let mut one = Store::open_in_memory().unwrap();
+        one.append_events(&[prompt("a", 0, 600), edit("b", 100_000), late]).unwrap();
+        one.set_watermark("src", 1_000_000).unwrap();
+        assert_eq!(r, finalize(&mut one).unwrap());
+        assert_eq!(a.ledger().unwrap(), one.ledger().unwrap());
+        assert_eq!(finalize(&mut a).unwrap().appended, 0);    // no Divergence afterwards
+    }
+    #[test] fn retry_gives_up_after_three_attempts_and_only_on_conflict_or_chain_broken() {
+        let mut calls = 0;
+        let r: Result<(), _> = retry(|| { calls += 1; Err(FinalizeError::Store(StoreError::Conflict)) });
+        assert!(matches!(r, Err(FinalizeError::Store(StoreError::Conflict))));
+        assert_eq!(calls, 3);
+        calls = 0;
+        let r: Result<(), _> = retry(|| { calls += 1; Err(FinalizeError::Divergence { index: 0, action_id: "x".into() }) });
+        assert!(r.is_err());
+        assert_eq!(calls, 1);
     }
 }

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use tally_daemon::finalize::finalize;
@@ -20,11 +20,19 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Read one JSON event per line from FILE into the store.
+    ///
+    /// Then sets the source's watermark: `--watermark`, else the newest event timestamp in
+    /// the file. That default is correct only for a complete, time-ordered file. Sources that
+    /// write closed spans (`idle`, `agent_busy`) whose start is earlier than events already
+    /// written must pass `--watermark` explicitly.
     Ingest {
         file: PathBuf,
         #[arg(long, default_value = "ingest")]
         source: String,
-        /// Defaults to the newest event timestamp in the file.
+        /// Promise that this source sends no more events at or before this ms timestamp.
+        /// Default: the newest event timestamp in the file, correct only for a complete,
+        /// time-ordered file; sources that write closed spans with earlier start timestamps
+        /// must pass it explicitly.
         #[arg(long)]
         watermark: Option<i64>,
     },
@@ -52,8 +60,13 @@ fn main() -> Result<()> {
         Some(h) => h,
         None => dirs::data_local_dir().ok_or_else(|| anyhow!("no local data directory; pass --home"))?.join("tally"),
     };
-    std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
-    let mut store = Store::open(&home.join("tally.db"))?;
+    let db = home.join("tally.db");
+    if matches!(cli.cmd, Cmd::Ingest { .. } | Cmd::Project { .. }) {
+        std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
+    } else if !db.exists() {
+        bail!("no database at {}; run `tally ingest` or `tally project add` first", db.display());
+    }
+    let mut store = Store::open(&db)?;
 
     match cli.cmd {
         Cmd::Ingest { file, source, watermark } => {

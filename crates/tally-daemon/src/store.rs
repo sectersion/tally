@@ -15,6 +15,8 @@ pub enum StoreError {
     LateEvent { id: String, ts: i64, finalized_through: i64 },
     #[error("ledger chain broken: first entry does not extend the stored chain")]
     ChainBroken,
+    #[error("events at or before the finalize horizon changed while finalizing; retry")]
+    Conflict,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,7 +131,8 @@ impl Store {
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT INTO projects(local_id, root, public_name) VALUES (?1, ?2, ?3)
-             ON CONFLICT(local_id) DO UPDATE SET root = excluded.root, public_name = excluded.public_name",
+             ON CONFLICT(local_id) DO UPDATE SET root = excluded.root,
+             public_name = COALESCE(excluded.public_name, projects.public_name)",
             params![local_id, root, public_name],
         )?;
         tx.commit()?;
@@ -147,9 +150,20 @@ impl Store {
 
     /// One transaction. `entries[0].prev_hash` must equal the last stored hash
     /// (`GENESIS_HASH` when empty). `finalized_through` only moves forward; an empty
-    /// `entries` still moves it.
-    pub fn append_ledger(&mut self, entries: &[LedgerEntry], finalized_through: i64) -> Result<(), StoreError> {
+    /// `entries` still moves it. `scored_events` is how many events with `ts <= finalized_through`
+    /// the caller scored; if the stored count differs, another writer added one meanwhile and
+    /// nothing is written (`Conflict`). Events are never deleted, so equal counts mean equal sets.
+    pub fn append_ledger(
+        &mut self,
+        entries: &[LedgerEntry],
+        finalized_through: i64,
+        scored_events: usize,
+    ) -> Result<(), StoreError> {
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let stored: i64 = tx.query_row("SELECT COUNT(*) FROM events WHERE ts <= ?1", [finalized_through], |r| r.get(0))?;
+        if usize::try_from(stored).ok() != Some(scored_events) {
+            return Err(StoreError::Conflict);
+        }
         let last: Option<String> = tx
             .query_row("SELECT hash FROM ledger ORDER BY seq DESC LIMIT 1", [], |r| r.get(0))
             .optional()?;
@@ -214,7 +228,7 @@ mod tests {
     #[test] fn late_events_reject_the_whole_batch_but_duplicates_pass() {
         let mut s = Store::open_in_memory().unwrap();
         s.append_events(&[ev("old", 500)]).unwrap();
-        s.append_ledger(&[], 1000).unwrap();
+        s.append_ledger(&[], 1000, 1).unwrap();
         assert!(matches!(s.append_events(&[ev("ok", 1001), ev("late", 1000)]),
             Err(StoreError::LateEvent { ts: 1000, finalized_through: 1000, .. })));
         assert_eq!(s.events().unwrap().len(), 1);
@@ -233,15 +247,15 @@ mod tests {
         let mut s = Store::open_in_memory().unwrap();
         let e1 = entry("a1", GENESIS_HASH);
         let e2 = entry("a2", &e1.hash);
-        s.append_ledger(&[e1.clone(), e2.clone()], 10).unwrap();
+        s.append_ledger(&[e1.clone(), e2.clone()], 10, 0).unwrap();
         assert_eq!(s.ledger().unwrap(), vec![e1, e2]);
-        assert!(matches!(s.append_ledger(&[entry("a3", GENESIS_HASH)], 20), Err(StoreError::ChainBroken)));
+        assert!(matches!(s.append_ledger(&[entry("a3", GENESIS_HASH)], 20, 0), Err(StoreError::ChainBroken)));
         assert_eq!(s.ledger().unwrap().len(), 2);
         assert_eq!(s.finalized_through().unwrap(), 10);
     }
     #[test] fn ledger_rows_cannot_be_updated_or_deleted() {
         let mut s = Store::open_in_memory().unwrap();
-        s.append_ledger(&[entry("a1", GENESIS_HASH)], 10).unwrap();
+        s.append_ledger(&[entry("a1", GENESIS_HASH)], 10, 0).unwrap();
         assert!(s.conn.execute("UPDATE ledger SET hash = 'x'", []).is_err());
         assert!(s.conn.execute("DELETE FROM ledger", []).is_err());
     }
@@ -249,20 +263,37 @@ mod tests {
         let dir = tempfile::tempdir().unwrap(); let p = dir.path().join("tally.db");
         let mut a = Store::open(&p).unwrap();
         let mut b = Store::open(&p).unwrap();
-        b.append_ledger(&[entry("a1", GENESIS_HASH)], 1000).unwrap();
+        b.append_ledger(&[entry("a1", GENESIS_HASH)], 1000, 0).unwrap();
         assert!(matches!(a.append_events(&[ev("late", 1000)]),
             Err(StoreError::LateEvent { ts: 1000, finalized_through: 1000, .. })));
         assert_eq!(a.ledger().unwrap().len(), 1);
+    }
+    #[test] fn an_event_ingested_under_the_horizon_mid_finalize_is_a_conflict() {
+        let dir = tempfile::tempdir().unwrap(); let p = dir.path().join("tally.db");
+        let mut a = Store::open(&p).unwrap();
+        let mut b = Store::open(&p).unwrap();
+        a.append_events(&[ev("x", 10)]).unwrap();
+        let scored = a.events().unwrap().iter().filter(|e| e.ts <= 1000).count();
+        b.append_events(&[ev("new_source", 500), ev("newer", 2000)]).unwrap();
+        assert!(matches!(a.append_ledger(&[entry("a1", GENESIS_HASH)], 1000, scored), Err(StoreError::Conflict)));
+        assert!(a.ledger().unwrap().is_empty());
+        assert_eq!(a.finalized_through().unwrap(), i64::MIN);
+        // events newer than the horizon never conflict
+        a.append_ledger(&[], 1000, 2).unwrap();
+        assert_eq!(a.finalized_through().unwrap(), 1000);
     }
     #[test] fn data_survives_reopen_and_projects_are_named() {
         let dir = tempfile::tempdir().unwrap(); let p = dir.path().join("tally.db");
         { let mut s = Store::open(&p).unwrap();
           s.append_events(&[ev("a", 1)]).unwrap();
           s.register_project("id1", "C:/r", Some("owner/repo")).unwrap();
-          s.register_project("id2", "C:/q", None).unwrap(); }
-        let s = Store::open(&p).unwrap();
+          s.register_project("id2", "C:/q", None).unwrap();
+          s.register_project("id1", "C:/r", None).unwrap(); }
+        let mut s = Store::open(&p).unwrap();
         assert_eq!(s.events().unwrap().len(), 1);
         assert_eq!(s.project_names().unwrap().get("id1").map(String::as_str), Some("owner/repo"));
         assert_eq!(s.project_names().unwrap().len(), 1);
+        s.register_project("id1", "C:/r", Some("owner/renamed")).unwrap();
+        assert_eq!(s.project_names().unwrap().get("id1").map(String::as_str), Some("owner/renamed"));
     }
 }
