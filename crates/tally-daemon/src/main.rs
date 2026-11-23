@@ -52,6 +52,20 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Store a project's device token (read from stdin) in the data dir; the token is never printed.
+    ///
+    /// With `--server`, also writes `[sync] enabled = true` into config.toml unless it already has a `[sync]` table.
+    Login {
+        #[arg(long)]
+        server_id: String,
+        #[arg(long)]
+        server: Option<String>,
+    },
+    /// Remove a project's device token.
+    Logout {
+        #[arg(long)]
+        server_id: String,
+    },
     Status,
     Verify,
     /// Check downloaded published chain files; needs no home or database. Exits 1 if any fail.
@@ -148,6 +162,14 @@ fn main() -> Result<()> {
     if let Cmd::Hook { cmd: HookCmd::TestRun { args } } = &cli.cmd {
         std::process::exit(test_run(&home, &db, args));
     }
+    if let Cmd::Login { server_id, server } = &cli.cmd {
+        return login(&home, server_id, server.as_deref());
+    }
+    if let Cmd::Logout { server_id } = &cli.cmd {
+        let gone = tally_daemon::credentials::delete_token(&home, server_id).context("updating the token file")?;
+        println!("{}", if gone { "logged out" } else { "not logged in" });
+        return Ok(());
+    }
     if matches!(cli.cmd, Cmd::Ingest { .. } | Cmd::Project { .. } | Cmd::Run { .. }) {
         std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
     } else if !db.exists() {
@@ -184,7 +206,9 @@ fn main() -> Result<()> {
             let s = ingest_ndjson(&mut store, &text, &source, watermark)?;
             println!("added {}, duplicates {}", s.added, s.duplicates);
         }
-        Cmd::Hook { .. } | Cmd::VerifyPublished { .. } => unreachable!("handled before the store is opened"),
+        Cmd::Hook { .. } | Cmd::VerifyPublished { .. } | Cmd::Login { .. } | Cmd::Logout { .. } => {
+            unreachable!("handled before the store is opened")
+        }
         Cmd::Project { cmd: ProjectCmd::Add { path, name } } => {
             if let Some(n) = name.as_deref().filter(|n| !tally_daemon::published::valid_public_name(n)) {
                 bail!("invalid project name {n:?}; use owner/repo (letters, digits, '.', '_', '-')");
@@ -231,6 +255,36 @@ fn main() -> Result<()> {
             Err(e) => return Err(e.into()),
         },
     }
+    Ok(())
+}
+
+/// Stores the token from stdin. No network call here (the server is checked by the sync loop).
+fn login(home: &std::path::Path, server_id: &str, server: Option<&str>) -> Result<()> {
+    if !tally_daemon::project::valid_server_id(server_id) {
+        bail!("invalid server id; use 1 to 64 letters, digits, '_' or '-'");
+    }
+    std::fs::create_dir_all(home).with_context(|| format!("creating {}", home.display()))?;
+    // Validate the config (and any existing [sync] server) before storing a secret.
+    config::load(home)?;
+    eprint!("paste device token: ");
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).context("reading the token")?;
+    tally_daemon::credentials::save_token(home, server_id, &line).map_err(|e| anyhow!("token not stored: {e}"))?;
+    if let Some(url) = server {
+        let p = home.join("config.toml");
+        let existing = std::fs::read_to_string(&p).unwrap_or_default();
+        if existing.lines().any(|l| l.trim() == "[sync]") {
+            println!("edit [sync] in {}", p.display());
+        } else {
+            let text = format!("{existing}{}[sync]\nenabled = true\nserver = {}\n", if existing.is_empty() || existing.ends_with('\n') { "" } else { "\n" }, toml::Value::String(url.to_string()));
+            std::fs::write(&p, &text).with_context(|| format!("writing {}", p.display()))?;
+            if let Err(e) = config::load(home) {
+                std::fs::write(&p, &existing)?; // restore: the url was not acceptable
+                bail!("{e}");
+            }
+        }
+    }
+    println!("logged in");
     Ok(())
 }
 

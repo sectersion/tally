@@ -9,6 +9,15 @@ pub struct Config {
     pub claude_code: ClaudeCodeConfig,
     pub presence: PresenceConfig,
     pub publish: crate::publish::PublishConfig,
+    pub sync: SyncConfig,
+}
+
+/// No token key by design: tokens live in `device_tokens`, never in the config.
+#[derive(serde::Deserialize, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct SyncConfig {
+    pub enabled: bool,
+    pub server: Option<String>,
 }
 
 /// `require: None` means "same as `enabled`".
@@ -89,6 +98,8 @@ pub enum ConfigError {
         path: String,
         source: toml::de::Error,
     },
+    #[error("{path}: {msg}")]
+    Invalid { path: String, msg: String },
 }
 
 pub fn load(home: &Path) -> Result<Config, ConfigError> {
@@ -99,7 +110,19 @@ pub fn load(home: &Path) -> Result<Config, ConfigError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
         Err(source) => return Err(ConfigError::Io { path, source }),
     };
-    toml::from_str(&text).map_err(|source| ConfigError::Parse { path, source })
+    let mut cfg: Config = toml::from_str(&text).map_err(|source| ConfigError::Parse { path: path.clone(), source })?;
+    if let Some(s) = cfg.sync.server.as_mut() {
+        // the host must end after the loopback name, so http://localhost.evil.example is refused
+        let local = ["http://127.0.0.1", "http://localhost"]
+            .iter()
+            .any(|p| s.strip_prefix(p).is_some_and(|r| r.is_empty() || r.starts_with([':', '/'])));
+        let ok = s.starts_with("https://") || local;
+        if !ok {
+            return Err(ConfigError::Invalid { path, msg: "sync.server must start with https:// (http:// only for 127.0.0.1 or localhost)".into() });
+        }
+        *s = s.trim_end_matches('/').to_string();
+    }
+    Ok(cfg)
 }
 
 #[cfg(test)]
@@ -154,6 +177,23 @@ mod tests {
             (c.run.dashboard, c.run.dashboard_port, c.run.interval_secs),
             (true, 8123, 15)
         );
+    }
+
+    #[test]
+    fn sync_section_parses_and_rejects_plain_http_and_unknown_keys() {
+        let d = tempfile::tempdir().unwrap();
+        write(&d, "[sync]\nenabled = true\nserver = \"https://t.example/\"\n");
+        let c = load(d.path()).unwrap();
+        assert_eq!((c.sync.enabled, c.sync.server.as_deref()), (true, Some("https://t.example")));
+        write(&d, "[sync]\nserver = \"http://t.example\"\n");
+        assert!(load(d.path()).unwrap_err().to_string().contains("sync.server"));
+        write(&d, "[sync]\nserver = \"http://localhost.evil.example\"\n");
+        assert!(load(d.path()).is_err());
+        write(&d, "[sync]\nserver = \"http://127.0.0.1:8787\"\n");
+        assert!(load(d.path()).is_ok());
+        write(&d, "[sync]\ntoken = \"x\"\n");
+        assert!(load(d.path()).unwrap_err().to_string().contains("unknown"));
+        assert_eq!(Config::default().sync, SyncConfig { enabled: false, server: None });
     }
 
     #[test]

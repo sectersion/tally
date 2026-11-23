@@ -24,12 +24,17 @@ pub fn register_git_project(store: &mut Store, path: &Path, public_name: Option<
 /// Registers the repository (name kept) and stores the server's project id for it; returns the local id.
 /// The id goes into a URL path, so it is checked before anything else.
 pub fn link_git_project(store: &mut Store, path: &Path, server_id: &str) -> Result<String, ProjectError> {
-    if !(1..=64).contains(&server_id.len()) || !server_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+    if !valid_server_id(server_id) {
         return Err(ProjectError::BadServerId);
     }
     let id = register_git_project(store, path, None)?;
     store.set_server_id(&id, server_id)?;
     Ok(id)
+}
+
+/// 1 to 64 chars of `[A-Za-z0-9_-]`: safe in a URL path and in the token file.
+pub fn valid_server_id(s: &str) -> bool {
+    (1..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 /// `(adopted name, "common dir" or "remote")`.

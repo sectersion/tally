@@ -345,3 +345,23 @@ fn project_add_rejects_a_name_that_is_not_owner_slash_repo() {
     assert!(!o.status.success());
     assert!(err(&o).contains("invalid project name"), "{}", err(&o));
 }
+
+#[test]
+fn login_stores_the_token_and_never_prints_it() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let t = tempfile::tempdir().unwrap();
+    let mut c = Command::new(env!("CARGO_BIN_EXE_tally"))
+        .arg("--home").arg(t.path()).args(["login", "--server-id", "srv_1"])
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    c.stdin.take().unwrap().write_all(b"tok_secret\n").unwrap();
+    let o = c.wait_with_output().unwrap();
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(out(&o), "logged in");
+    assert!(!out(&o).contains("tok_secret") && !err(&o).contains("tok_secret"));
+    assert_eq!(std::fs::read_to_string(t.path().join("device_tokens")).unwrap(), "srv_1 tok_secret\n");
+
+    let o = tally(t.path(), &["logout", "--server-id", "srv_1"]);
+    assert_eq!(out(&o), "logged out");
+    assert_eq!(out(&tally(t.path(), &["logout", "--server-id", "srv_1"])), "not logged in");
+}
