@@ -8,6 +8,7 @@ import fixture from "./fixtures/chain.json";
 // | N          | claimed by              |
 // | 1          | wasm and schema tests   |
 // | 2..7, -alt | Task 6 (upload)         |
+// | 3-2099     | Task 6 (upload)         |
 // | 8          | Task 7                  |
 // | 9          | Task 8                  |
 // | 10..16     | Task 9 (any)            |
