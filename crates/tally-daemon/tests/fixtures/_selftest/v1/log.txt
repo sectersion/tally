@@ -1,0 +1,3 @@
+1000,prompt
+2500,edit
+4000,prompt

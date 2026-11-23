@@ -12,6 +12,20 @@
 //! - Event ids must be derived from the log, never random, so a re-read is idempotent.
 use std::collections::BTreeMap;
 
+/// Adapter health for `tally doctor`; drained from a source with `take_health` and persisted by the runner.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Health {
+    pub files_found: usize,
+    pub records: usize,
+    pub skipped: usize,
+    pub errors: usize,
+    /// "unknown" when the log format is not recognized.
+    pub format: String,
+    pub last_event_ts: Option<i64>,
+    /// Source-specific counters, e.g. heartbeat accepted/dropped_agent.
+    pub counters: Vec<(String, u64)>,
+}
+
 pub struct Poll {
     pub events: Vec<tally_scoring::Event>,
     pub watermark: Option<i64>,
@@ -55,6 +69,16 @@ pub trait Source {
     fn take_coverage(&mut self) -> Vec<crate::store::Interval> {
         Vec::new()
     }
+    /// Drains the health of the last poll. `None` = unchanged. The runner persists it.
+    fn take_health(&mut self) -> Option<Health> {
+        None
+    }
+    /// Drains agent file writes seen by the last poll as `(file_hash, ts)`. Never an event.
+    fn take_agent_writes(&mut self) -> Vec<(String, i64)> {
+        Vec::new()
+    }
+    /// Receives every agent write drained from all sources in this tick (after all polls).
+    fn see_agent_writes(&mut self, _writes: &[(String, i64)]) {}
 }
 
 pub fn now_ms() -> i64 {
@@ -62,4 +86,26 @@ pub fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Fake;
+    impl Source for Fake {
+        fn id(&self) -> &str {
+            "fake"
+        }
+        fn poll(&mut self, _: i64, _: &mut dyn SourceState) -> Result<Poll, SourceError> {
+            Ok(Poll { events: vec![], watermark: None })
+        }
+    }
+
+    #[test]
+    fn default_take_methods_are_empty() {
+        let mut f = Fake;
+        assert_eq!(f.take_health(), None);
+        assert!(f.take_agent_writes().is_empty());
+    }
 }

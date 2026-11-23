@@ -1,1 +1,8 @@
 crates/tally-daemon/tests/fixtures/** -text
+crates/tally-daemon/tests/fixtures/_selftest/** text eol=lf
+crates/tally-daemon/tests/fixtures/codex/** text eol=lf
+crates/tally-daemon/tests/fixtures/aider/** text eol=lf
+crates/tally-daemon/tests/fixtures/gemini-cli/** text eol=lf
+crates/tally-daemon/tests/fixtures/copilot/** text eol=lf
+crates/tally-daemon/tests/fixtures/cursor/** text eol=lf
+crates/tally-daemon/tests/fixtures/heartbeat/** text eol=lf

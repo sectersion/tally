@@ -1,0 +1,37 @@
+[
+  {
+    "chars": 10,
+    "id": "e1",
+    "kind": "prompt",
+    "novelty_bytes": 10,
+    "project": "proj",
+    "relevance_pm": 500,
+    "session": null,
+    "source": "mini",
+    "t": 0,
+    "v": 1
+  },
+  {
+    "file_hash": "f",
+    "id": "e2",
+    "kind": "user_edit",
+    "lines_changed": 1,
+    "project": "proj",
+    "session": null,
+    "source": "mini",
+    "t": 1500,
+    "v": 1
+  },
+  {
+    "chars": 10,
+    "id": "e3",
+    "kind": "prompt",
+    "novelty_bytes": 10,
+    "project": "proj",
+    "relevance_pm": 500,
+    "session": null,
+    "source": "mini",
+    "t": 3000,
+    "v": 1
+  }
+]

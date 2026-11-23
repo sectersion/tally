@@ -24,8 +24,16 @@ pub struct TickReport {
 
 pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut [TickHook], now_ms: i64) -> TickReport {
     let mut r = TickReport::default();
-    for src in sources.iter_mut() {
+    let mut tick_writes: Vec<(String, i64)> = vec![];
+    // The heartbeat source polls last so it sees this tick's agent writes (stable sort keeps the rest in order).
+    sources.sort_by_key(|s| s.id() == "heartbeat");
+    let mut told = vec![0; sources.len()]; // how many of tick_writes each source has seen
+    for (i, src) in sources.iter_mut().enumerate() {
         let id = src.id().to_string();
+        if !tick_writes.is_empty() {
+            src.see_agent_writes(&tick_writes);
+            told[i] = tick_writes.len();
+        }
         let mut st = match store.get_state(&id) {
             Ok(st) => st,
             Err(e) => {
@@ -33,7 +41,14 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
                 continue;
             }
         };
-        let p = match src.poll(now_ms, &mut st) {
+        let polled = src.poll(now_ms, &mut st);
+        // Health is persisted after every poll, Ok or Err; a failure here changes nothing else.
+        if let Some(h) = src.take_health() {
+            if let Err(e) = store.put_health(&id, &h, now_ms) {
+                r.errors.push(format!("source {id}: {e}"));
+            }
+        }
+        let p = match polled {
             Ok(p) => p,
             Err(e) => {
                 r.errors.push(format!("source {id}: {e}"));
@@ -46,6 +61,12 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
         // still count as duplicates, not as dropped.
         // ponytail: one retry per late event (O(late x batch)); filter by finalized_through + id lookup if batches of late events get big.
         let coverage = src.take_coverage();
+        let writes = src.take_agent_writes();
+        // Best-effort: the events already drained must still be stored.
+        if let Err(e) = store.put_agent_writes(&writes) {
+            r.errors.push(format!("source {id}: {e}"));
+        }
+        tick_writes.extend(writes);
         let (mut events, mut dropped) = (p.events, 0);
         let appended = loop {
             match store.append_events(&events) {
@@ -84,6 +105,11 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
             r.errors.push(format!("source {id}: {e}"));
         }
     }
+    for (src, n) in sources.iter_mut().zip(told) {
+        if n < tick_writes.len() {
+            src.see_agent_writes(&tick_writes[n..]);
+        }
+    }
     match finalize(store) {
         Ok(f) => r.finalized = Some(f),
         Err(e) => r.errors.push(e.to_string()),
@@ -113,6 +139,14 @@ pub fn sources(cfg: &Config, home: &Path, store: &mut Store) -> Result<Vec<Box<d
             v.push(Box::new(crate::claude_code::ClaudeCode::new(dir)));
         }
     }
+    if cfg.heartbeat.enabled {
+        let seed = store.agent_writes_since(now_ms() - crate::heartbeat::SEED_WINDOW_MS).unwrap_or_default();
+        let token_file = cfg.heartbeat.token_file.clone().unwrap_or_else(|| home.join("heartbeat.token"));
+        match crate::heartbeat::HeartbeatSource::start(cfg.heartbeat.port, &token_file, seed) {
+            Ok(h) => v.push(Box::new(h)),
+            Err(e) => eprintln!("heartbeat source disabled: {e}"),
+        }
+    }
     // The git source is always on (no `[git]` config); with no registered repos it polls nothing.
     // It reads agent markers through its own connection to the db file under `home`.
     match (store.repos_to_poll(), Store::open(&home.join("tally.db"))) {
@@ -137,6 +171,9 @@ pub fn sources(cfg: &Config, home: &Path, store: &mut Store) -> Result<Vec<Box<d
     }
     if !cc.enabled {
         disabled.push("claude-code");
+    }
+    if !cfg.heartbeat.enabled {
+        disabled.push("heartbeat");
     }
     // Fatal: a stale presence_required would over-credit all session.
     store.set_run_config(cfg.presence.required(), &disabled)?;
@@ -234,6 +271,29 @@ mod tests {
         assert_eq!(s.get_state("good").unwrap()["polls"], "1");
         assert_eq!(s.horizon().unwrap(), Some(500_000));
         assert_eq!(r.finalized.unwrap().final_total, 1);
+    }
+    #[test]
+    fn runner_persists_take_health() {
+        use crate::source::Health;
+        struct H(Vec<Option<Health>>);
+        impl Source for H {
+            fn id(&self) -> &str {
+                "h"
+            }
+            fn poll(&mut self, _: i64, _: &mut dyn SourceState) -> Result<Poll, SourceError> {
+                Ok(Poll { events: vec![], watermark: None })
+            }
+            fn take_health(&mut self) -> Option<Health> {
+                self.0.remove(0)
+            }
+        }
+        let mut s = Store::open_in_memory().unwrap();
+        let h = Health { records: 3, format: "v1".into(), ..Default::default() };
+        let mut srcs: Vec<Box<dyn Source>> = vec![Box::new(H(vec![Some(h.clone()), None]))];
+        run_once(&mut s, &mut srcs, &mut [], 10);
+        assert_eq!(s.get_health().unwrap(), [("h".to_string(), h.clone(), 10)]);
+        run_once(&mut s, &mut srcs, &mut [], 20);
+        assert_eq!(s.get_health().unwrap(), [("h".to_string(), h, 10)]);
     }
     #[test]
     fn no_watermark_leaves_the_horizon_alone() {
@@ -379,5 +439,86 @@ mod tests {
         let mut s = Store::open(&d.path().join("tally.db")).unwrap();
         s.conn.execute_batch("CREATE TRIGGER no_meta BEFORE INSERT ON meta BEGIN SELECT RAISE(ABORT, 'no'); END;").unwrap();
         assert!(sources(&Config::default(), d.path(), &mut s).is_err());
+    }
+
+    struct WriterSrc(Vec<(String, i64)>);
+    impl Source for WriterSrc {
+        fn id(&self) -> &str {
+            "writer"
+        }
+        fn poll(&mut self, _: i64, _: &mut dyn SourceState) -> Result<Poll, SourceError> {
+            Ok(Poll { events: vec![], watermark: None })
+        }
+        fn take_agent_writes(&mut self) -> Vec<(String, i64)> {
+            std::mem::take(&mut self.0)
+        }
+    }
+    struct Listener(std::rc::Rc<std::cell::RefCell<Vec<(String, i64)>>>);
+    impl Source for Listener {
+        fn id(&self) -> &str {
+            "listener"
+        }
+        fn poll(&mut self, _: i64, _: &mut dyn SourceState) -> Result<Poll, SourceError> {
+            Ok(Poll { events: vec![], watermark: None })
+        }
+        fn see_agent_writes(&mut self, w: &[(String, i64)]) {
+            self.0.borrow_mut().extend_from_slice(w);
+        }
+    }
+
+    #[test]
+    fn runner_persists_agent_writes_and_forwards_them() {
+        let mut s = Store::open_in_memory().unwrap();
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+        let mut srcs: Vec<Box<dyn Source>> = vec![Box::new(WriterSrc(vec![("h".into(), 5)])), Box::new(Listener(seen.clone()))];
+        let r = run_once(&mut s, &mut srcs, &mut [], 1_000);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(s.agent_writes_since(0).unwrap(), vec![("h".to_string(), 5)]);
+        assert_eq!(*seen.borrow(), vec![("h".to_string(), 5)]);
+        assert!(s.agent_writes_since(6).unwrap().is_empty());
+    }
+
+    #[test]
+    fn agent_writes_reach_the_heartbeat_source_in_the_same_tick() {
+        struct Hb(std::rc::Rc<std::cell::RefCell<Vec<(String, i64)>>>, Vec<(String, i64)>);
+        impl Source for Hb {
+            fn id(&self) -> &str {
+                "heartbeat"
+            }
+            fn poll(&mut self, _: i64, _: &mut dyn SourceState) -> Result<Poll, SourceError> {
+                *self.0.borrow_mut() = self.1.clone(); // what it knew at poll time
+                Ok(Poll { events: vec![], watermark: None })
+            }
+            fn see_agent_writes(&mut self, w: &[(String, i64)]) {
+                self.1.extend_from_slice(w);
+            }
+        }
+        let mut s = Store::open_in_memory().unwrap();
+        let at_poll = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+        let mut srcs: Vec<Box<dyn Source>> = vec![Box::new(Hb(at_poll.clone(), vec![])), Box::new(WriterSrc(vec![("h".into(), 5)]))];
+        run_once(&mut s, &mut srcs, &mut [], 1_000);
+        assert_eq!(*at_poll.borrow(), vec![("h".to_string(), 5)]);
+    }
+
+    #[test]
+    fn a_failed_agent_write_store_still_appends_events() {
+        struct W;
+        impl Source for W {
+            fn id(&self) -> &str {
+                "w"
+            }
+            fn poll(&mut self, _: i64, _: &mut dyn SourceState) -> Result<Poll, SourceError> {
+                Ok(Poll { events: vec![prompt("a", 0, 600)], watermark: None })
+            }
+            fn take_agent_writes(&mut self) -> Vec<(String, i64)> {
+                vec![("h".into(), 5)]
+            }
+        }
+        let mut s = Store::open_in_memory().unwrap();
+        s.conn.execute("DROP TABLE agent_writes", []).unwrap();
+        let mut srcs: Vec<Box<dyn Source>> = vec![Box::new(W)];
+        let r = run_once(&mut s, &mut srcs, &mut [], 0);
+        assert_eq!(r.added, 1);
+        assert!(r.errors.iter().any(|e| e.starts_with("source w:")), "{:?}", r.errors);
     }
 }
