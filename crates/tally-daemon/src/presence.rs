@@ -3,6 +3,8 @@ use crate::source::SourceState;
 use crate::store::Interval;
 use tally_scoring::ruleset::IDLE_SAMPLE_MIN_MS;
 
+/// Watermark name of the presence source; `finalize` needs it when presence is required.
+pub const PRESENCE_SOURCE: &str = "presence";
 /// Two samples further apart than this are a gap (sleep, daemon stopped, stalled poll).
 pub const COVERAGE_MAX_GAP_MS: i64 = 60_000;
 /// Tolerance for timer granularity when deciding that input resumed.

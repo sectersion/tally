@@ -150,6 +150,11 @@ impl Store {
         Ok(())
     }
 
+    /// One source's watermark; `None` if it never set one.
+    pub fn watermark(&self, source: &str) -> Result<Option<i64>, StoreError> {
+        Ok(self.conn.query_row("SELECT ts FROM watermarks WHERE source = ?1", [source], |r| r.get(0)).optional()?)
+    }
+
     /// Minimum watermark over all sources; `None` if there are none.
     pub fn horizon(&self) -> Result<Option<i64>, StoreError> {
         Ok(self.conn.query_row("SELECT MIN(ts) FROM watermarks", [], |r| r.get(0))?)
