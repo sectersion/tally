@@ -13,7 +13,7 @@ name = "tally"
 path = "src/main.rs"
 
 [dependencies]
-tally-scoring = { path = "../tally-scoring" }
+tally-scoring = { path = "../tally-scoring", features = ["text"] }
 sha2 = "0.10"
 hex = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
