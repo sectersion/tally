@@ -39,6 +39,8 @@ export class Api {
   }
 }
 
+export type ApiLike = Pick<Api, "status" | "bugs" | "prompts" | "hours" | "sessions" | "replay">;
+
 export type PollOpts<T> = {
   intervalMs?: number;
   maxBackoffMs?: number;
