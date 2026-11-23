@@ -181,7 +181,14 @@ pub fn map_heartbeats(
             stats.outside_project += 1;
             continue;
         };
-        let Some(rel) = rel_under(&crate::project::normalize_path(&root.to_string_lossy()), &ent) else {
+        let root_n = crate::project::normalize_path(&root.to_string_lossy());
+        // project_for_dir canonicalizes (symlinks, Windows 8.3 names), so retry with the canonical dir when the raw path misses the root.
+        let rel = rel_under(&root_n, &ent).or_else(|| {
+            let canon = std::fs::canonicalize(dir).ok()?;
+            let name = ent.rsplit_once('/')?.1;
+            rel_under(&root_n, &format!("{}/{name}", crate::project::normalize_path(&canon.to_string_lossy())))
+        });
+        let Some(rel) = rel else {
             stats.outside_project += 1;
             continue;
         };
