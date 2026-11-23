@@ -1,6 +1,8 @@
 pub mod finalize;
 pub mod ingest;
 pub mod project;
+pub mod run;
+pub mod source;
 pub mod status;
 pub mod store;
 #[cfg(test)]
