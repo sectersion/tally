@@ -1,6 +1,8 @@
 import type { SQL } from "bun";
 import { createServer } from "../src/app.ts";
 import { createProjectToken } from "../src/auth.ts";
+import { testConfig } from "../src/config.ts";
+import type { Limiter, Limits } from "../src/ratelimit.ts";
 import type { LedgerEntry } from "../src/schema.ts";
 import fixture from "./fixtures/chain.json";
 
@@ -16,7 +18,9 @@ import fixture from "./fixtures/chain.json";
 // | 12         | entries: mixed rulesets |
 // | 13         | entries: mid-chain resume |
 // | 14-big     | entries: 3e9 verified_s |
-// | 15, 16     | free                    |
+// | 15         | projects: change_seq bump |
+// | 16         | projects: hours vs chains |
+// | 17, 18     | live: upload, second process |
 
 export const chains = fixture as unknown as Record<string, LedgerEntry[]>;
 
@@ -27,7 +31,7 @@ export async function seed(sql: SQL, publicName = `t/${crypto.randomUUID()}`) {
 
 export const seedFixture = (sql: SQL, name: string) => seed(sql, name);
 
-export function start(sql: SQL) {
-  const s = createServer({ sql, port: 0 });
+export function start(sql: SQL, limiter?: Limiter, limits?: Partial<Limits>) {
+  const s = createServer({ cfg: testConfig(), sql, port: 0, limiter, limits });
   return { url: `http://localhost:${s.port}`, stop: () => s.stop(true) };
 }

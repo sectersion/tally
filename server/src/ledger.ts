@@ -1,5 +1,6 @@
 import type { SQL } from "bun";
 import { HttpError } from "./errors.ts";
+import { bumpChange } from "./projects.ts";
 import type { LedgerEntry } from "./schema.ts";
 import { rulesetVersion, verifyChain } from "./wasm.ts";
 
@@ -28,12 +29,15 @@ export async function verifiedSeconds(sql: SQL, projectId: string): Promise<numb
   return r ? Number(r.s) : null;
 }
 
-/** shields.io endpoint JSON. Floors to a tenth of an hour so the badge never exceeds verified time. */
+/** "12.3 h": floors to a tenth of an hour so it never exceeds verified time. */
+export const formatHours = (seconds: number) => `${(Math.floor(seconds / 360) / 10).toFixed(1)} h`;
+
+/** shields.io endpoint JSON. */
 export function badge(seconds: number) {
   return {
     schemaVersion: 1,
     label: "tracked with Tally",
-    message: `${(Math.floor(seconds / 360) / 10).toFixed(1)} h`,
+    message: formatHours(seconds),
     color: "blue",
   };
 }
@@ -121,6 +125,7 @@ export async function appendEntries(
     const [u] =
       await tx`update chains set head_hash = ${last.hash}, count = ${count + fresh.length},
         verified_s = verified_s + ${added} where id = ${ch.id} returning head_hash, count`;
+    await bumpChange(tx, projectId);
     return { head_hash: u.head_hash, count: Number(u.count) };
   });
 }

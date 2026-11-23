@@ -39,9 +39,15 @@ export async function requireToken(
   const m = /^Bearer (\S+)$/.exec(req.headers.get("authorization") ?? "");
   const unauthorized = new HttpError(401, { error: "unauthorized" });
   if (!m) throw unauthorized;
-  const [row] =
-    await sql`select id, project_id, revoked_at from device_tokens where token_hash = ${hashToken(m[1] as string)}`;
+  const [row] = await sql`select t.id, t.project_id, t.user_id, t.revoked_at, p.owner_id
+      from device_tokens t left join projects p on p.id = ${projectId}
+      where t.token_hash = ${hashToken(m[1] as string)}`;
   if (!row || row.revoked_at) throw unauthorized;
-  if (row.project_id !== projectId) throw new HttpError(403, { error: "forbidden" });
+  // A project token is bound to its project; a user token (no project) to the projects its user owns.
+  const ok =
+    row.project_id === null
+      ? row.user_id !== null && row.user_id === row.owner_id
+      : row.project_id === projectId;
+  if (!ok) throw new HttpError(403, { error: "forbidden" });
   return { tokenId: Number(row.id) };
 }

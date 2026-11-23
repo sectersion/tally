@@ -1,0 +1,10 @@
+{
+  "headers": {
+    "content-type": "application/json",
+    "user-agent": "GitHub-Hookshot/invented",
+    "x-github-event": "repository",
+    "x-github-delivery": "00000000-0000-4000-8000-000000000004",
+    "x-hub-signature-256": "sha256=713df78298d6a6531b81fd5f87979756f7ff955f32a846fdc7d5edee95c24782"
+  },
+  "body": "{\"action\":\"renamed\",\"repository\":{\"id\":1001,\"full_name\":\"octo/renamed\",\"name\":\"renamed\",\"owner\":{\"login\":\"octo\"}},\"changes\":{\"repository\":{\"name\":{\"from\":\"scratch\"}}},\"installation\":{\"id\":5001},\"sender\":{\"login\":\"octo\",\"id\":42}}"
+}

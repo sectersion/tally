@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { MAX_BODY_BYTES } from "../src/config";
 import { HttpError, json, parse, readJson } from "../src/errors";
-import { CommitBody, UploadBody } from "../src/schema";
+import { CommitBody, DeviceCodeBody, UploadBody } from "../src/schema";
 import fixture from "./fixtures/chain.json";
 
 const GENESIS = "0".repeat(64);
@@ -83,4 +83,10 @@ test("readJson rejects bad json and parses good json", async () => {
   expect(err.status).toBe(400);
   expect(err.body.error).toBe("invalid_json");
   expect(await readJson(post('{"a":1}'))).toEqual({ a: 1 });
+});
+
+test("device names reject control and format characters", () => {
+  expect(DeviceCodeBody.safeParse({ device_name: "Ada's laptop" }).success).toBe(true);
+  for (const bad of ["evil\u202egnp", "zero\u200bwidth", "ctl\u0007x", "new\nline"])
+    expect(DeviceCodeBody.safeParse({ device_name: bad }).success).toBe(false);
 });

@@ -1,0 +1,15 @@
+{
+  "_note": "Built from https://auth.hackclub.com/docs/oidc-guide on 2026-11-23, NOT from a real token. Values are fake placeholders; nonce is not documented so it is absent.",
+  "iss": "https://auth.hackclub.com",
+  "sub": "ident!fakeid123",
+  "aud": "FAKE_CLIENT_ID",
+  "exp": 1700000000,
+  "iat": 1699996400,
+  "name": "Fake Person",
+  "given_name": "Fake",
+  "family_name": "Person",
+  "email": "fake@example.invalid",
+  "email_verified": true,
+  "verification_status": "verified",
+  "ysws_eligible": true
+}

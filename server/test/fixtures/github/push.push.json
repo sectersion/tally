@@ -1,0 +1,10 @@
+{
+  "headers": {
+    "content-type": "application/json",
+    "user-agent": "GitHub-Hookshot/invented",
+    "x-github-event": "push",
+    "x-github-delivery": "00000000-0000-4000-8000-000000000001",
+    "x-hub-signature-256": "sha256=ef1c9934a008209291a2ab908f1a3ac88717c39a276a20a02df087498baea8f6"
+  },
+  "body": "{\"ref\":\"refs/heads/main\",\"before\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"after\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"forced\":false,\"deleted\":false,\"created\":false,\"repository\":{\"id\":1001,\"full_name\":\"octo/scratch\",\"name\":\"scratch\",\"owner\":{\"login\":\"octo\"}},\"installation\":{\"id\":5001},\"sender\":{\"login\":\"octo\",\"id\":42},\"commits\":[{\"id\":\"cccccccccccccccccccccccccccccccccccccccc\",\"timestamp\":\"2026-11-23T10:00:00Z\",\"message\":\"invented first\",\"author\":{\"name\":\"A\",\"email\":\"a@example.com\"}},{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"timestamp\":\"2026-11-23T10:05:00Z\",\"message\":\"invented second\",\"author\":{\"name\":\"A\",\"email\":\"a@example.com\"}}],\"head_commit\":{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"timestamp\":\"2026-11-23T10:05:00Z\",\"message\":\"invented second\",\"author\":{\"name\":\"A\",\"email\":\"a@example.com\"}}}"
+}

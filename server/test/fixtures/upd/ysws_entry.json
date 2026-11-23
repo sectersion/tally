@@ -1,0 +1,17 @@
+{
+  "id": "recAAAAAAAAAAAAAA",
+  "ysws": "Horizons",
+  "approved_at": 1790553600,
+  "code_url": "https://github.com/example-owner/example-repo",
+  "country": "XX",
+  "demo_url": "https://example.com/demo",
+  "description": "REDACTED",
+  "github_username": "example-owner",
+  "hours": 11,
+  "screenshot_url": "https://example.com/screenshot.png",
+  "github_stars": 0,
+  "display_name": "REDACTED",
+  "slack_id": "UXXXXXXXXXX",
+  "archived_demo": "null",
+  "archived_repo": "https://example.com/archive"
+}

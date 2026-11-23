@@ -8,7 +8,9 @@ Read this first. Every later plan assumes what is written here. Written 2026-11-
 |---|---|
 | `2026-11-22-scoring-crate.md` | Done, on `main`. Crate `crates/tally-scoring` (scoring, hash chain, text features, WASM bindings). |
 | `2026-11-22-daemon-core-pipeline.md` | Done, on `main`. Crate `crates/tally-daemon` (SQLite store, `finalize`, `ingest`, `status`, `verify`, `project add`). |
-| Plans 03 to 12 below | Written, not started. |
+| Plans 03 to 07 | Done, on `main` (claude adapter and run loop, presence and git, publish and badge, server core, daemon sync). |
+| Plan 09 | Done, on `main`. `server/` accounts, device-code login, projects, GitHub App linking and webhooks, public pages, badge service, live page. Spikes ran on documented fallbacks only; see `docs/spikes/`. |
+| Plans 08, 10, 11, 12 | Written, not started. |
 
 Design documents: `docs/superpowers/specs/2026-11-22-daemon-roadmap-design.md` (goals, non-goals, finalization, badge approach C), `docs/spec/scoring.md` (ruleset `2026.11-0`), `PITCH.md` (product and threat model).
 

@@ -27,4 +27,16 @@ export const UploadBody = z
   .object({ prev_hash: Hash, entries: z.array(LedgerEntrySchema).min(1) })
   .strict();
 
+// Cc: control characters; Cf: format characters (bidi overrides, zero-width), as for display names.
+export const DeviceCodeBody = z
+  .object({
+    device_name: z
+      .string()
+      .min(1)
+      .max(64)
+      .refine((s) => !/[\p{Cc}\p{Cf}]/u.test(s), "no control or format characters"),
+  })
+  .strict();
+export const DeviceTokenBody = z.object({ device_code: z.string().min(1).max(128) }).strict();
+
 export const CommitBody = z.object({ hash: Hash, ts: z.number().int().nonnegative() }).strict();
