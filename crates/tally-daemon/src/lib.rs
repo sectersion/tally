@@ -17,6 +17,7 @@ mod presence_win;
 pub mod project;
 pub mod published;
 pub mod repair;
+pub mod replay;
 pub mod run;
 pub mod snapshot;
 pub mod source;
