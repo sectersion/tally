@@ -18,6 +18,7 @@ pub struct PresenceConfig {
     pub require: Option<bool>,
 }
 
+#[allow(clippy::derivable_impls)] // default is true on windows, so not derivable there
 impl Default for PresenceConfig {
     fn default() -> Self {
         Self { enabled: cfg!(windows), require: None }
