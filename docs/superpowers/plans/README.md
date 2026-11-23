@@ -115,12 +115,12 @@ JSON over HTTPS, versioned under `/v1`. Auth: `Authorization: Bearer <device-tok
 From the plan 01 and 02 reviews, to be picked up by the plan noted:
 
 - `RULESET_VERSION` bump does not start a new chain → plan 05 (check at finalize; refuse to append across rulesets).
-- `finalize`'s divergence check ignores `kind`, `reasons`, `features` → plan 07 (compare full entries before upload).
+- ~~`finalize`'s divergence check ignores `kind`, `reasons`, `features`~~ → done in plan 07 Task 2 (44f8b62).
 - `status` reads are not in one transaction (display only) → plan 11.
 - WAL journal mode for concurrent daemon + CLI → plan 03 (the run loop makes this real).
 - Spans: a source that registers with a watermark below the finalized point has promised nothing about the past; the count guard handles the race, the first-run behaviour is "events at or before `finalized_through` are rejected" → document in plan 03 source authoring notes.
 - Verbatim UNC (`\\?\UNC\...`) project paths normalize differently from `\\server\share` → plan 04.
-- `score()` divergence recovery path (what a user does after `Divergence`) → plan 07 (`tally repair` design).
+- ~~`score()` divergence recovery path~~ → done in plan 07 Task 9 (`repair.rs`: diagnosis now, epoch design for a follow-up).
 
 ## Non-code workstreams (from PITCH.md; not plans)
 
