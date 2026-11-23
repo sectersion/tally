@@ -99,7 +99,7 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
 /// The sources for this config. Claude Code reads `projects_dir`, default `~/.claude/projects`.
 /// Also records `presence_required` and the config-disabled ids (the finalize horizon skips them), in one transaction, and fills
 /// missing project identities; failures there are reported on stderr, not fatal.
-pub fn sources(cfg: &Config, home: &Path, store: &mut Store) -> Vec<Box<dyn Source>> {
+pub fn sources(cfg: &Config, home: &Path, store: &mut Store) -> Result<Vec<Box<dyn Source>>, StoreError> {
     if let Err(e) = crate::project::backfill_identities(store) {
         eprintln!("project identity backfill failed: {e}");
     }
@@ -138,10 +138,9 @@ pub fn sources(cfg: &Config, home: &Path, store: &mut Store) -> Vec<Box<dyn Sour
     if !cc.enabled {
         disabled.push("claude-code");
     }
-    if let Err(e) = store.set_run_config(cfg.presence.required(), &disabled) {
-        eprintln!("recording run config failed: {e}");
-    }
-    v
+    // Fatal: a stale presence_required would over-credit all session.
+    store.set_run_config(cfg.presence.required(), &disabled)?;
+    Ok(v)
 }
 
 /// The per-tick hooks. Empty until daily publish and sync land.
@@ -155,8 +154,8 @@ pub fn effective_interval(secs: u64) -> u64 {
 }
 
 /// Tick every `cfg.run.interval_secs` until `stop` is set. The current tick always completes.
-pub fn run_loop(store: &mut Store, cfg: &Config, home: &Path, stop: &AtomicBool) {
-    let mut srcs = sources(cfg, home, store);
+pub fn run_loop(store: &mut Store, cfg: &Config, home: &Path, stop: &AtomicBool) -> Result<(), StoreError> {
+    let mut srcs = sources(cfg, home, store)?;
     let mut hks = hooks(cfg, home);
     while !stop.load(Ordering::Relaxed) {
         for e in run_once(store, &mut srcs, &mut hks, now_ms()).errors {
@@ -171,6 +170,7 @@ pub fn run_loop(store: &mut Store, cfg: &Config, home: &Path, stop: &AtomicBool)
             std::thread::sleep(left.min(Duration::from_millis(200)));
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -289,19 +289,19 @@ mod tests {
         cfg.presence.enabled = true;
         s.set_watermark("presence", 5).unwrap();
         s.set_watermark("git", 100).unwrap();
-        let mut ids = |c: &Config| sources(c, d.path(), &mut s).iter().map(|x| x.id().to_string()).collect::<Vec<_>>();
+        let mut ids = |c: &Config| sources(c, d.path(), &mut s).unwrap().iter().map(|x| x.id().to_string()).collect::<Vec<_>>();
         assert_eq!(ids(&cfg), ["presence", "git"]);
         cfg.presence.enabled = false;
         assert_eq!(ids(&cfg), ["git"]);
         // the disabled presence watermark no longer holds the horizon
         assert_eq!(s.horizon().unwrap(), Some(100));
         cfg.presence.enabled = true;
-        sources(&cfg, d.path(), &mut s); // next run start: the stale watermark counts again
+        sources(&cfg, d.path(), &mut s).unwrap(); // next run start: the stale watermark counts again
         assert_eq!(s.horizon().unwrap(), Some(5));
         // a git setup error leaves git out of the sources but its watermark still counts
         s.conn.execute("DROP TABLE projects", []).unwrap();
         cfg.presence.enabled = false;
-        assert_eq!(sources(&cfg, d.path(), &mut s).len(), 0);
+        assert_eq!(sources(&cfg, d.path(), &mut s).unwrap().len(), 0);
         assert_eq!(s.horizon().unwrap(), Some(100));
     }
     #[test]
@@ -339,6 +339,13 @@ mod tests {
         cfg.run.interval_secs = 3600;
         cfg.claude_code.enabled = false;
         cfg.presence.enabled = false;
-        run_loop(&mut s, &cfg, d.path(), &stop);
+        run_loop(&mut s, &cfg, d.path(), &stop).unwrap();
+    }
+    #[test]
+    fn a_run_config_write_failure_is_fatal_for_sources() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = Store::open(&d.path().join("tally.db")).unwrap();
+        s.conn.execute_batch("CREATE TRIGGER no_meta BEFORE INSERT ON meta BEGIN SELECT RAISE(ABORT, 'no'); END;").unwrap();
+        assert!(sources(&Config::default(), d.path(), &mut s).is_err());
     }
 }

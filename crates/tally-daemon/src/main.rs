@@ -131,7 +131,7 @@ fn main() -> Result<()> {
                 bail!("presence.require is true but presence is not supported on this platform; set [presence] require = false in config.toml");
             }
             if once {
-                let mut srcs = sources(&cfg, &home, &mut store);
+                let mut srcs = sources(&cfg, &home, &mut store)?;
                 let r = run_once(&mut store, &mut srcs, &mut hooks(&cfg, &home), now_ms());
                 for e in &r.errors {
                     eprintln!("{e}");
@@ -140,7 +140,7 @@ fn main() -> Result<()> {
                 println!("added {}, duplicates {}, skipped {skipped}, final {total}, provisional {prov}", r.added, r.duplicates);
             } else {
                 ctrlc::set_handler(|| STOP.store(true, Ordering::Relaxed)).context("installing the Ctrl-C handler")?;
-                run_loop(&mut store, &cfg, &home, &STOP);
+                run_loop(&mut store, &cfg, &home, &STOP)?;
                 println!("stopped");
             }
         }
