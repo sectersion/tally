@@ -1,5 +1,24 @@
 use sha2::{Digest, Sha256};
+use crate::store::{Store, StoreError};
 use std::path::{Path, PathBuf};
+
+#[derive(thiserror::Error, Debug)]
+pub enum ProjectError {
+    #[error("not inside a git repository")]
+    NotGit,
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+}
+
+/// Registers the git repository containing `path`; returns its local project id.
+pub fn register_git_project(store: &mut Store, path: &Path, public_name: Option<&str>) -> Result<String, ProjectError> {
+    let root = find_git_root(path).ok_or(ProjectError::NotGit)?;
+    let id = project_id(&root)?;
+    store.register_project(&id, &root.to_string_lossy(), public_name)?;
+    Ok(id)
+}
 
 /// Pure string normalization, identical on every OS (no `std::path`).
 pub fn normalize_path(raw: &str) -> String {

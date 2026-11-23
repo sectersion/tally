@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use tally_daemon::finalize::finalize;
 use tally_daemon::status::{status, verify_ledger, VerifyError};
 use tally_daemon::store::Store;
-use tally_daemon::{find_git_root, project_id};
-use tally_scoring::Event;
+use tally_daemon::ingest::ingest_ndjson;
+use tally_daemon::project::register_git_project;
 
 #[derive(Parser)]
 #[command(name = "tally")]
@@ -58,24 +58,11 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Ingest { file, source, watermark } => {
             let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-            let mut events = Vec::new();
-            for (i, line) in text.lines().enumerate() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                events.push(serde_json::from_str::<Event>(line).with_context(|| format!("line {}", i + 1))?);
-            }
-            let mark = watermark.or_else(|| events.iter().map(|e| e.ts).max());
-            let s = store.append_events(&events)?;
-            if let Some(ms) = mark {
-                store.set_watermark(&source, ms)?;
-            }
+            let s = ingest_ndjson(&mut store, &text, &source, watermark)?;
             println!("added {}, duplicates {}", s.added, s.duplicates);
         }
         Cmd::Project { cmd: ProjectCmd::Add { path, name } } => {
-            let root = find_git_root(&path).ok_or_else(|| anyhow!("not inside a git repository"))?;
-            let id = project_id(&root)?;
-            store.register_project(&id, &root.to_string_lossy(), name.as_deref())?;
+            let id = register_git_project(&mut store, &path, name.as_deref())?;
             println!("{id}");
         }
         Cmd::Finalize => {

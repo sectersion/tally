@@ -40,8 +40,8 @@ fn lunch_scenario_end_to_end() {
 
     let o = tally(&home, &["status"]);
     let s = out(&o);
-    assert!(s.contains("final_claims: 2"), "{s}");
-    assert!(s.contains("verified_s: 660"), "{s}");
+    assert!(s.lines().any(|l| l == "final_claims: 2"), "{s}");
+    assert!(s.lines().any(|l| l == "verified_s: 660"), "{s}");
 
     let o = tally(&home, &["verify"]);
     assert!(o.status.success());
@@ -54,6 +54,8 @@ fn lunch_scenario_end_to_end() {
     let o = tally(&home, &["ingest", late.to_str().unwrap()]);
     assert!(!o.status.success());
     assert!(err(&o).contains("late event"), "{}", err(&o));
+    let s = out(&tally(&home, &["status"]));
+    assert!(s.lines().any(|l| l == "events: 3"), "{s}");
 
     assert_eq!(out(&tally(&home, &["finalize"])), "appended 0, final 2, provisional 0");
 }
@@ -87,4 +89,26 @@ fn a_bad_event_line_names_its_line_number() {
     let o = tally(&t.path().join("home"), &["ingest", file.to_str().unwrap()]);
     assert!(!o.status.success());
     assert!(err(&o).contains("line 2"), "{}", err(&o));
+}
+
+#[test]
+fn verify_reports_a_tampered_ledger_entry_by_index() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let file = t.path().join("events.jsonl");
+    write_events(&file, &[ev("1", 0, prompt()), ev("2", 60, Kind::Idle { end_ts: 1_860_000 }), ev("3", 1900, prompt())]);
+    assert!(tally(&home, &["ingest", file.to_str().unwrap(), "--watermark", "3000000"]).status.success());
+    assert!(tally(&home, &["finalize"]).status.success());
+
+    let conn = rusqlite::Connection::open(home.join("tally.db")).unwrap();
+    conn.execute_batch("DROP TRIGGER ledger_no_update; DROP TRIGGER ledger_no_delete;").unwrap();
+    let json: String = conn.query_row("SELECT entry_json FROM ledger WHERE seq = 1", [], |r| r.get(0)).unwrap();
+    assert!(json.contains("\"verified_s\":120"), "{json}");
+    let changed = json.replace("\"verified_s\":120", "\"verified_s\":121");
+    conn.execute("UPDATE ledger SET entry_json = ?1 WHERE seq = 1", [changed]).unwrap();
+    drop(conn);
+
+    let o = tally(&home, &["verify"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(out(&o), "FAIL at entry 0: bad_hash");
 }

@@ -1,4 +1,5 @@
 pub mod finalize;
+pub mod ingest;
 pub mod project;
 pub mod status;
 pub mod store;
