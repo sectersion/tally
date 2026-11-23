@@ -3,9 +3,9 @@
 //! Source authoring notes:
 //! - A source that first appears with a watermark below `finalized_through` has promised nothing
 //!   about the past. Any event it emits at or before `finalized_through` is rejected by
-//!   `append_events` with `LateEvent`, and the batch is lost. The runner then drops that batch but
-//!   still persists the source's state, so the source does not resend it forever, and prints
-//!   `source <id>: dropped <n> late events`.
+//!   `append_events` with `LateEvent` and is lost. The runner drops only the late events, stores the
+//!   rest of the batch, still persists the source's state (so the source does not resend them
+//!   forever), and prints `source <id>: dropped <n> late events`.
 //! - Sources never call `finalize` and never touch the store; they read and write cursors only
 //!   through `SourceState`. Extra per-source data (coverage, health, agent writes) goes through
 //!   default trait methods that the runner in `run.rs` persists.
@@ -47,7 +47,7 @@ pub trait Source {
     /// A returned watermark must be below the start of every open `agent_busy` span, and below the
     /// timestamp of every line not yet read in full (a partial last line included).
     /// Cursor changes made through `state` are persisted only if `poll` returns `Ok` and the runner
-    /// then succeeds in `append_events` (a late batch is the exception: state is still saved) and
+    /// then succeeds in `append_events` (late events are dropped alone: the rest and the state are still saved) and
     /// in `set_watermark`; on any other store failure nothing is persisted and the next tick retries.
     fn poll(&mut self, now_ms: i64, state: &mut dyn SourceState) -> Result<Poll, SourceError>;
 }

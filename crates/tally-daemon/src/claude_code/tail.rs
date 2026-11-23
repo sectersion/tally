@@ -36,7 +36,7 @@ pub fn read_lines(path: &Path, offset: u64, budget: usize) -> std::io::Result<Ch
             buf.pop();
         }
         if !buf.is_empty() {
-            lines.push(buf.clone());
+            lines.push(std::mem::take(&mut buf));
         }
     }
     Ok(Chunk { lines, start, end, rotated, budget_hit: total > budget })

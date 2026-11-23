@@ -41,6 +41,9 @@ pub struct Ctx<'a> {
 fn event(session: &str, uuid: &str, suffix: &str, ts: i64, project: &Option<String>, kind: Kind) -> Event {
     Event {
         v: 1,
+        // ponytail: the session id is part of the id (Decision 1), so a forked/resumed session that copies
+        // history under a new session id would double count entries newer than finalized_through; ids from
+        // (uuid, kind) alone would dedup them. Maintainer to decide.
         id: format!("claude:{session}:{uuid}:{suffix}"),
         ts,
         source: "claude-code".into(),

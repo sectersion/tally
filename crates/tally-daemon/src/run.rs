@@ -41,13 +41,27 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
             }
         };
         // Events go in before state, so a crash in between only causes a re-read that id dedup absorbs.
-        match store.append_events(&p.events) {
+        // A late event is dropped alone; the rest of the batch is stored (id dedup still applies).
+        // Each retry removes the one event the store named, so known ids at or before finalized_through
+        // still count as duplicates, not as dropped.
+        // ponytail: one retry per late event (O(late x batch)); filter by finalized_through + id lookup if batches of late events get big.
+        let (mut events, mut dropped) = (p.events, 0);
+        let appended = loop {
+            match store.append_events(&events) {
+                Err(StoreError::LateEvent { id: late, .. }) => {
+                    events.retain(|e| e.id != late);
+                    dropped += 1;
+                }
+                res => break res,
+            }
+        };
+        if dropped > 0 {
+            r.errors.push(format!("source {id}: dropped {dropped} late events"));
+        }
+        match appended {
             Ok(s) => {
                 r.added += s.added;
                 r.duplicates += s.duplicates;
-            }
-            Err(StoreError::LateEvent { .. }) => {
-                r.errors.push(format!("source {id}: dropped {} late events", p.events.len()));
             }
             Err(e) => {
                 r.errors.push(format!("source {id}: {e}"));
@@ -93,6 +107,11 @@ pub fn hooks(_cfg: &Config, _home: &Path) -> Vec<TickHook> {
     vec![]
 }
 
+/// Seconds between ticks; 0 would busy-loop, so at least 1.
+pub fn effective_interval(secs: u64) -> u64 {
+    secs.max(1)
+}
+
 /// Tick every `cfg.run.interval_secs` until `stop` is set. The current tick always completes.
 pub fn run_loop(store: &mut Store, cfg: &Config, home: &Path, stop: &AtomicBool) {
     let mut srcs = sources(cfg, home, store);
@@ -101,7 +120,7 @@ pub fn run_loop(store: &mut Store, cfg: &Config, home: &Path, stop: &AtomicBool)
         for e in run_once(store, &mut srcs, &mut hks, now_ms()).errors {
             eprintln!("{e}");
         }
-        let deadline = Instant::now() + Duration::from_secs(cfg.run.interval_secs);
+        let deadline = Instant::now() + Duration::from_secs(effective_interval(cfg.run.interval_secs));
         while !stop.load(Ordering::Relaxed) {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -176,6 +195,30 @@ mod tests {
         assert_eq!(r.errors, ["source new: dropped 1 late events"]);
         assert_eq!(s.get_state("new").unwrap()["polls"], "1");
         assert_eq!(s.events().unwrap().len(), 1);
+    }
+    #[test]
+    fn only_the_late_events_of_a_batch_are_dropped() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.append_events(&[prompt("old", 0, 600)]).unwrap();
+        s.set_watermark("other", 1_000_000).unwrap();
+        crate::finalize::finalize(&mut s).unwrap();
+        let batch = vec![prompt("late", 10, 600), prompt("old", 0, 600), prompt("fresh", 2_000_000, 600)];
+        let mut srcs: Vec<Box<dyn Source>> =
+            vec![Box::new(Fake::new("new", vec![Ok(Poll { events: batch, watermark: Some(3_000_000) })]))];
+        let r = run_once(&mut s, &mut srcs, &mut [], 0);
+        // "old" is a known id at or below finalized_through: a duplicate, not dropped
+        assert_eq!(r.errors, ["source new: dropped 1 late events"]);
+        assert_eq!((r.added, r.duplicates), (1, 1));
+        let ids: Vec<_> = s.events().unwrap().into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, ["old", "fresh"]);
+        assert_eq!(s.get_state("new").unwrap()["polls"], "1");
+        assert_eq!(s.horizon().unwrap(), Some(1_000_000));
+        let w: i64 = s.conn.query_row("SELECT ts FROM watermarks WHERE source='new'", [], |r| r.get(0)).unwrap();
+        assert_eq!(w, 3_000_000);
+    }
+    #[test]
+    fn a_zero_interval_ticks_every_second() {
+        assert_eq!((effective_interval(0), effective_interval(15)), (1, 15));
     }
     #[test]
     fn a_failing_hook_does_not_stop_the_next() {

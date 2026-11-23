@@ -167,11 +167,14 @@ impl Source for ClaudeCode {
         self.files.retain(|k, _| files.iter().any(|(rel, _)| rel == k));
         let (mut events, mut skipped) = (Vec::new(), 0);
         // A file with complete lines left unread (budget hit or read error) holds the watermark below the
-        // newest timestamp it has shown; one that has shown none withholds the watermark for this poll.
+        // newest timestamp it has shown, minus the write slack (unread lines may be a little older), and below
+        // a persisted open turn (`open_ts`, for a file not registered in this process yet); one that has shown
+        // no timestamp withholds the watermark for this poll.
         let mut cap: Option<i64> = Some(i64::MAX);
-        let mut hold = |f: Option<&File>, last_ts: Option<i64>| {
+        let mut hold = |f: Option<&File>, last_ts: Option<i64>, open_ts: Option<i64>| {
             let seen = f.map(|f| f.session.last_seen_ts).filter(|t| *t > 0).or(last_ts);
-            cap = cap.and_then(|c| seen.map(|t| c.min(t - 1)));
+            let open = open_ts.map_or(i64::MAX, |t| t.saturating_sub(1));
+            cap = cap.and_then(|c| seen.map(|t| c.min(t.saturating_sub(1 + WRITE_SLACK_MS)).min(open)));
         };
         for (rel, path) in &files {
             let (off_key, last_key, open_key) = (format!("off:{rel}"), format!("last_ts:{rel}"), format!("open:{rel}"));
@@ -181,7 +184,8 @@ impl Source for ClaudeCode {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("source claude-code: {}: {e}", path.display());
-                    hold(self.files.get(rel), last_ts);
+                    let open_ts = state.get(&open_key).and_then(|o| o.split_once(' ')?.1.parse().ok());
+                    hold(self.files.get(rel), last_ts, open_ts);
                     continue;
                 }
             };
@@ -197,7 +201,8 @@ impl Source for ClaudeCode {
             skipped += self.feed(rel, chunk.lines.iter().map(Vec::as_slice), &mut out);
             let f = self.files.get_mut(rel).expect("registered");
             if chunk.budget_hit {
-                hold(Some(f), last_ts); // and no expiry: the rest of the turn may be in the unread part
+                // The session's own limit() covers its open turn. No expiry: the rest of the turn may be unread.
+                hold(Some(f), last_ts, None);
             } else {
                 f.session.expire(now_ms, &f.sid, f.project.clone(), &mut out);
             }
@@ -314,9 +319,19 @@ mod tests {
             return;
         };
         let p = src.poll(now, &mut st).unwrap();
-        assert_eq!((p.events.len(), p.watermark), (0, Some(parse_rfc3339_ms(&ts(1)).unwrap() - 1)));
+        let at = |i: usize| parse_rfc3339_ms(&ts(i)).unwrap();
+        assert_eq!((p.events.len(), p.watermark), (0, Some(at(1) - 1 - WRITE_SLACK_MS)));
         // a fresh process: no session yet, so last_ts (u1's ts) caps it
         assert_eq!(ClaudeCode::new(d.path().to_path_buf()).poll(now, &mut st).unwrap().watermark, p.watermark);
+        // ... and a persisted open turn older than last_ts - slack caps it lower
+        st.insert("last_ts:p/s.jsonl".into(), at(1000).to_string());
+        st.insert("open:p/s.jsonl".into(), format!("u0 {}", at(0)));
+        assert_eq!(ClaudeCode::new(d.path().to_path_buf()).poll(now, &mut st).unwrap().watermark, Some(at(0) - 1));
+        st.insert("open:p/s.jsonl".into(), "-".into());
+        assert_eq!(
+            ClaudeCode::new(d.path().to_path_buf()).poll(now, &mut st).unwrap().watermark,
+            Some(at(1000) - 1 - WRITE_SLACK_MS)
+        );
         // nothing seen at all: no promise
         st.remove("last_ts:p/s.jsonl");
         assert_eq!(ClaudeCode::new(d.path().to_path_buf()).poll(now, &mut st).unwrap().watermark, None);
