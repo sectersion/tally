@@ -29,6 +29,8 @@ export function createLive(sql: SQL) {
   const subs = new Map<string, Set<(seq: number) => void>>();
   const perIp = new Map<string, number>();
   const streams = new Set<() => void>();
+  // ponytail: after the first LISTEN succeeds, reconnects rely on Bun's internal backoff (not our
+  // 1/2/5/10 s) and its onlisten callback; own the connection with sql.reserve() if that falls short.
   let listening: Promise<SQL.ListenSubscription | null> | null = null;
   let closed = false;
 
@@ -101,7 +103,6 @@ export function createLive(sql: SQL) {
         { error: "too_many_streams" },
         { status: 429, headers: { "retry-after": "30", "cache-control": "no-store" } },
       );
-    perIp.set(ip, (perIp.get(ip) ?? 0) + 1);
     server.timeout(req, 0); // Bun's idle timeout would otherwise cut the stream
     // Last-Event-ID (set by the browser on reconnect) wins over the page-load ?seq=.
     const claimed = req.headers.get("last-event-id") ?? new URL(req.url).searchParams.get("seq");
@@ -138,6 +139,8 @@ export function createLive(sql: SQL) {
       sent = true;
       write(`id: ${seq}\nevent: changed\ndata: ${seq}\n\n`);
     };
+    // Counted only here, right before end() can run: nothing above can leak a slot.
+    perIp.set(ip, (perIp.get(ip) ?? 0) + 1);
     streams.add(end);
     const body = new ReadableStream<Uint8Array>({
       start(c) {

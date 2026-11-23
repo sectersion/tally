@@ -219,6 +219,7 @@ export async function projectFragment(
       "content-type": "text/html; charset=utf-8",
       "content-security-policy": CSP,
       "x-content-type-options": "nosniff",
+      "referrer-policy": "same-origin",
       "cache-control": "no-store",
     },
   });
