@@ -325,7 +325,7 @@ fn sync_errors_never_contain_the_token() {
 }
 
 // ---- ticker (Task 7) ----
-use tally_daemon::sync::{commit_heads, SyncTicker, BACKOFF_MAX_MS};
+use tally_daemon::sync::{commit_heads, SyncTicker, BACKOFF_BASE_MS, BACKOFF_MAX_MS};
 use tally_scoring::ruleset::COMMIT_INTERVAL_MS;
 
 /// Adds `n` finalized, published prompts to owner/repo (p1, linked to srv_1), ids from `from`.
@@ -454,6 +454,34 @@ fn the_run_loop_syncs_only_when_enabled() {
     assert!(r.errors.is_empty(), "{:?}", r.errors);
     assert_eq!(f.chain("srv_1", R), local(&s));
     assert_eq!(f.commits("srv_1"), [(local(&s)[2].hash.clone(), 1_000)]);
+}
+
+#[test]
+fn a_tick_with_only_permanent_errors_resets_the_backoff() {
+    let f = FakeServer::start("tok");
+    let home = logged_in_home();
+    let mut s = linked_store(1);
+    // owner/other is linked and published but has no token: NotLoggedIn on every tick
+    s.register_project("p2", "C:/o", Some("owner/other")).unwrap();
+    s.set_server_id("p2", "srv_2").unwrap();
+    s.append_events(&[prompt("o1", 5_000_000, "p2")]).unwrap();
+    s.set_watermark("src", 7_000_000).unwrap();
+    finalize(&mut s).unwrap();
+    tally_daemon::published::sync(&mut s, true).unwrap();
+    let mut t = SyncTicker::new();
+    f.down(true);
+    let mut now = 0;
+    for _ in 0..2 {
+        assert!(t.tick(&mut s, &f.url, home.path(), now));
+        now += COMMIT_INTERVAL_MS;
+    }
+    f.down(false);
+    assert!(t.tick(&mut s, &f.url, home.path(), now)); // owner/repo syncs, owner/other is NotLoggedIn
+    assert_eq!(f.chain("srv_1", R).len(), 1);
+    f.down(true);
+    now += COMMIT_INTERVAL_MS;
+    assert!(t.tick(&mut s, &f.url, home.path(), now));
+    assert_eq!(t.backoff().next_ms() - now, BACKOFF_BASE_MS); // a fresh outage starts at 30 s again
 }
 
 #[test]

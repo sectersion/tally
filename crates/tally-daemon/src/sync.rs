@@ -216,6 +216,10 @@ impl Backoff {
     pub fn new() -> Self {
         Self::default()
     }
+    /// Earliest time the next attempt may run.
+    pub fn next_ms(&self) -> i64 {
+        self.next_ms
+    }
     pub fn ready(&self, now_ms: i64) -> bool {
         now_ms >= self.next_ms
     }
@@ -279,6 +283,10 @@ impl SyncTicker {
         Self::default()
     }
 
+    pub fn backoff(&self) -> &Backoff {
+        &self.backoff
+    }
+
     /// Returns whether the tick was due (and so ran). Errors go to stderr; never fails.
     pub fn tick(&mut self, store: &mut Store, server: &str, home: &Path, now_ms: i64) -> bool {
         let interval_due = match self.last_tick_ms {
@@ -324,7 +332,8 @@ impl SyncTicker {
             self.backoff.unauthorized(now_ms);
         } else if retry {
             self.backoff.failed(now_ms);
-        } else if lines.is_empty() {
+        } else {
+            // permanent errors (no token, foreign head, ...) do not count as an outage
             self.backoff.ok();
         }
         true
