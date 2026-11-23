@@ -1,0 +1,28 @@
+{
+  "name": "tally-server",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "bun": "1.4.5"
+  },
+  "scripts": {
+    "start": "bun src/main.ts",
+    "migrate": "bun scripts/migrate.ts",
+    "token:create": "bun scripts/token.ts create",
+    "token:revoke": "bun scripts/token.ts revoke",
+    "db:reset": "psql \"$DATABASE_URL\" -c \"drop schema public cascade; create schema public\"",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "wasm": "wasm-pack build ../crates/tally-scoring --target nodejs --out-dir ../../server/wasm --out-name tally_scoring --features wasm",
+    "fixture": "cargo run -q -p tally-scoring --example server_fixture > test/fixtures/chain.json"
+  },
+  "dependencies": {
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.8",
+    "@types/bun": "1.4.5",
+    "typescript": "7.0.2"
+  }
+}

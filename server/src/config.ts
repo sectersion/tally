@@ -1,0 +1,22 @@
+export type LogLevel = "debug" | "info" | "warn" | "error";
+export type Config = { port: number; databaseUrl: string; logLevel: LogLevel };
+
+export const MAX_BODY_BYTES = 1_048_576;
+export const MAX_BATCH = 1000;
+// Traffic budget: a daemon uploads about every 300 s and commits every 300 s, so 120/min per
+// token leaves two orders of magnitude for retries.
+export const RATE_PER_MIN = 120;
+export const RATE_BURST = 30;
+
+const LEVELS: readonly string[] = ["debug", "info", "warn", "error"];
+
+export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
+  const databaseUrl = env.DATABASE_URL;
+  if (!databaseUrl) throw new Error("DATABASE_URL is required");
+  const logLevel = env.LOG_LEVEL ?? "info";
+  if (!LEVELS.includes(logLevel)) throw new Error(`invalid LOG_LEVEL: ${logLevel}`);
+  const port = Number(env.PORT ?? "8080");
+  if (!Number.isInteger(port) || port < 0 || port > 65535)
+    throw new Error(`invalid PORT: ${env.PORT}`);
+  return { port, databaseUrl, logLevel: logLevel as LogLevel };
+}
