@@ -5,11 +5,13 @@ import { createDeviceCode, decide, pendingDevice, pollDeviceToken } from "./devi
 import { HttpError, json, parse, readJson } from "./errors.ts";
 import {
   accessibleRepos,
+  dispatch,
   exchangeCode,
   authorizeUrl as ghAuthorizeUrl,
   linkRepoTx,
   userRepos,
   userToken,
+  verifySignature,
 } from "./github.ts";
 import { authorizeUrl, exchange } from "./hca.ts";
 import {
@@ -514,6 +516,40 @@ export function createServer(deps: Deps) {
           );
         }),
       },
+      "/github/webhook": {
+        // No cookies and no rate limit (GitHub's addresses are shared): the signature is the auth.
+        POST: handle("/github/webhook", async (req) => {
+          const tooBig = () => new HttpError(413, { error: "body_too_large", max: MAX_BODY_BYTES });
+          if (Number(req.headers.get("content-length")) > MAX_BODY_BYTES) throw tooBig();
+          const raw = new Uint8Array(await req.arrayBuffer());
+          if (raw.byteLength > MAX_BODY_BYTES) throw tooBig();
+          if (
+            !verifySignature(cfg.githubWebhookSecret, raw, req.headers.get("x-hub-signature-256"))
+          )
+            throw new HttpError(401, { error: "bad_signature" });
+          const id = req.headers.get("x-github-delivery");
+          const event = req.headers.get("x-github-event");
+          if (!id || !event || id.length > 100 || event.length > 100)
+            throw new HttpError(400, { error: "bad_headers" });
+          let payload: unknown;
+          try {
+            payload = JSON.parse(new TextDecoder().decode(raw));
+          } catch {
+            throw new HttpError(400, { error: "invalid_json" });
+          }
+          // One transaction: a delivery is never recorded without its effects.
+          return sql.begin(async (tx) => {
+            const ins =
+              await tx`insert into webhook_deliveries (delivery_id, event) values (${id}, ${event})
+              on conflict do nothing returning delivery_id`;
+            if (!ins.length) return json(200, { duplicate: true });
+            return json(
+              200,
+              (await dispatch(tx, id, event, payload)) ? { ok: true } : { ignored: true },
+            );
+          });
+        }),
+      },
       "/v1/projects/:id/summary": {
         GET: handle("/v1/projects/:id/summary", async (req, server) => {
           limit(ip(server, req));
@@ -528,7 +564,10 @@ export function createServer(deps: Deps) {
               public_name: p.public_name,
               owner_handle: p.profile_public ? p.handle : null,
               ...(await projectHours(sql, p.id)),
-              last_commit_at: null, // TODO(task 6): newest push_receipts.received_at for the project
+              // Server time of the newest receipt, or null.
+              last_commit_at: (
+                await sql`select max(received_at) as t from push_receipts where project_id = ${p.id}`
+              )[0].t,
             },
             { "cache-control": "public, max-age=60" },
           );

@@ -163,7 +163,7 @@ test("summary: public project gives seconds and handle; private and unowned are 
     owner_handle: u.handle,
     verified_s: 100,
     unverified_s: 50,
-    last_commit_at: null, // TODO(task 6)
+    last_commit_at: null, // no receipts yet; webhook.test.ts covers the value
   });
   await sql`update users set profile_public = false where id = ${u.id}`;
   expect(
