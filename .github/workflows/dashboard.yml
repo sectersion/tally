@@ -21,7 +21,8 @@ jobs:
       - run: bun test src
       - run: bun run build
       - name: dist drift check
-        run: git diff --exit-code -- dist || { echo "dashboard/dist is stale: run bun run build and commit"; exit 1; }
+        run: |
+          git diff --exit-code -- dist || { echo "dashboard/dist is stale, run bun run build and commit"; exit 1; }
       - name: gzip size budget (60,000 bytes for js + css)
         run: |
           n=$(( $(gzip -c dist/main.js | wc -c) + $(gzip -c dist/styles.css | wc -c) ))
