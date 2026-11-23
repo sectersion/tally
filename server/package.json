@@ -10,7 +10,9 @@
     "migrate": "bun scripts/migrate.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "lint": "biome check ."
+    "lint": "biome check .",
+    "wasm": "wasm-pack build ../crates/tally-scoring --target nodejs --out-dir ../../server/wasm --out-name tally_scoring --features wasm",
+    "fixture": "cargo run -q -p tally-scoring --example server_fixture > test/fixtures/chain.json"
   },
   "dependencies": {
     "zod": "4.6.7"

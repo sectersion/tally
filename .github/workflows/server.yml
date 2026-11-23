@@ -28,4 +28,12 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun run lint
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install wasm-pack --locked
+      - run: bun run wasm
+      - name: fixture is fresh
+        run: bun run fixture && git diff --exit-code test/fixtures/chain.json
       - run: bun test

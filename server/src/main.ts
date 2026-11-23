@@ -3,6 +3,13 @@ import { loadConfig } from "./config.ts";
 import { connect, migrate } from "./db.ts";
 import { log } from "./log.ts";
 
+try {
+  await import("./wasm.ts");
+} catch {
+  console.error("server/wasm missing: run bun run wasm");
+  process.exit(1);
+}
+
 const cfg = loadConfig();
 const sql = connect(cfg.databaseUrl);
 const applied = await migrate(sql);
