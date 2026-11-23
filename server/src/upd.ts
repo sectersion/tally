@@ -15,7 +15,8 @@ export function normalizeRepoUrl(url: string): string | null {
   }
   if (
     (u.protocol !== "https:" && u.protocol !== "http:") ||
-    u.hostname.toLowerCase() !== "github.com"
+    u.hostname.toLowerCase() !== "github.com" ||
+    u.port !== ""
   )
     return null;
   const [owner, repo] = u.pathname.split("/").filter(Boolean);
@@ -30,14 +31,30 @@ type Slim = UpdEntry & { repo: string };
 let cache: { at: number; list: Slim[] } | null = null;
 export const resetUpdCache = () => {
   cache = null;
+  inflight = null;
 };
 
-async function load(fetchFn: typeof fetch): Promise<Slim[]> {
-  if (cache && Date.now() - cache.at < TTL_MS) return cache.list;
-  const res = await fetchFn(URL_LIST, { headers: { accept: "application/json" } });
-  if (!res.ok) throw new HttpError(502, { error: "upd_unavailable" });
-  const raw: unknown = await res.json().catch(() => null);
-  if (!Array.isArray(raw)) throw new HttpError(502, { error: "upd_unavailable" });
+const MAX_BYTES = 25 * 1024 * 1024;
+/** Mutable so tests can shorten the timeout. */
+export const updLimits = { timeoutMs: 10_000 };
+let inflight: Promise<Slim[]> | null = null;
+const unavailable = () => new HttpError(502, { error: "upd_unavailable" });
+
+async function fetchList(fetchFn: typeof fetch): Promise<Slim[]> {
+  let raw: unknown;
+  try {
+    const res = await fetchFn(URL_LIST, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(updLimits.timeoutMs),
+    });
+    if (!res.ok || Number(res.headers.get("content-length")) > MAX_BYTES) throw unavailable();
+    const text = await res.text();
+    if (text.length > MAX_BYTES) throw unavailable();
+    raw = JSON.parse(text);
+  } catch {
+    throw unavailable(); // network, timeout, non-JSON and oversize all look the same to callers
+  }
+  if (!Array.isArray(raw)) throw unavailable();
   const list: Slim[] = [];
   for (const e of raw as Record<string, unknown>[]) {
     const repo = typeof e?.code_url === "string" ? normalizeRepoUrl(e.code_url) : null;
@@ -49,8 +66,21 @@ async function load(fetchFn: typeof fetch): Promise<Slim[]> {
       repo,
     });
   }
-  cache = { at: Date.now(), list };
   return list;
+}
+
+/** Concurrent cold misses share one download; a failure is never cached. */
+async function load(fetchFn: typeof fetch): Promise<Slim[]> {
+  if (cache && Date.now() - cache.at < TTL_MS) return cache.list;
+  inflight ??= fetchList(fetchFn)
+    .then((list) => {
+      cache = { at: Date.now(), list };
+      return list;
+    })
+    .finally(() => {
+      inflight = null;
+    });
+  return inflight;
 }
 
 export async function findUpdEntries(

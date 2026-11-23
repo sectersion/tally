@@ -199,8 +199,10 @@ async function unlink(tx: SQL, repoIds: number[], kind: string, detail: string) 
     returning project_id, github_repo_id`;
   for (const r of rows)
     await tx`insert into repo_events (github_repo_id, kind, detail) values (${r.github_repo_id}, ${kind}, ${detail})`;
-  for (const pid of new Set<string>(rows.map((r: { project_id: string }) => r.project_id)))
+  for (const pid of new Set<string>(rows.map((r: { project_id: string }) => r.project_id))) {
+    await tx`update projects set upd_record_id = null where id = ${pid}`; // matched the old repo
     await bumpChange(tx, pid);
+  }
   return rows;
 }
 

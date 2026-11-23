@@ -226,9 +226,13 @@ test("installation deleted unlinks repos, keeps receipts, records repo_events", 
 });
 
 test("installation_repositories removed unlinks the repo", async () => {
-  await linked();
+  const { id } = await linked();
+  await sql`update projects set upd_record_id = 'recSTALE' where id = ${id}`;
   const { res } = await deliver("installation_repositories.removed.json");
   expect(res.status).toBe(200);
+  expect(
+    (await sql`select upd_record_id from projects where id = ${id}`)[0].upd_record_id,
+  ).toBeNull();
   expect(
     (await sql`select 1 from project_repos where github_repo_id = ${REPO} and unlinked_at is null`)
       .length,

@@ -477,7 +477,11 @@ export function createServer(deps: Deps) {
           await sql.begin(async (tx) => {
             const r = await tx`update project_repos set unlinked_at = now()
               where project_id = ${p.id} and unlinked_at is null returning github_repo_id`;
-            if (r.length) await bumpChange(tx, p.id);
+            // A record matched the old repo; it must not outlive the link.
+            if (r.length) {
+              await tx`update projects set upd_record_id = null where id = ${p.id}`;
+              await bumpChange(tx, p.id);
+            }
           });
           return redirect(`/p/${p.public_name}/settings`);
         }),
@@ -507,8 +511,9 @@ export function createServer(deps: Deps) {
           requireCsrf(cfg, req, s, await formOf(req));
           const p = await ownedProject(s.userId, req.params.owner, req.params.name);
           await sql.begin(async (tx) => {
-            await tx`update projects set upd_record_id = null where id = ${p.id}`;
-            await bumpChange(tx, p.id);
+            const r = await tx`update projects set upd_record_id = null
+              where id = ${p.id} and upd_record_id is not null returning id`;
+            if (r.length) await bumpChange(tx, p.id);
           });
           return redirect(`/p/${p.public_name}/settings`);
         }),

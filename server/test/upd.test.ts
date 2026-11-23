@@ -4,7 +4,13 @@ import { testConfig } from "../src/config.ts";
 import { connect } from "../src/db.ts";
 import { createProject } from "../src/projects.ts";
 import { createSession } from "../src/session.ts";
-import { findUpdEntries, normalizeRepoUrl, resetUpdCache, updLabel } from "../src/upd.ts";
+import {
+  findUpdEntries,
+  normalizeRepoUrl,
+  resetUpdCache,
+  updLabel,
+  updLimits,
+} from "../src/upd.ts";
 
 const sql = connect(process.env.DATABASE_URL ?? "");
 const ORIGIN = "http://localhost:8080";
@@ -203,4 +209,86 @@ test("updLabel shows only program and record id", async () => {
     "Unified Projects DB: (record recGONE)",
   );
   expect(await updLabel(null, "octo/mine", fetchFn)).toBeNull();
+});
+
+test("normalizeRepoUrl edge cases", () => {
+  expect(normalizeRepoUrl("http://github.com/o/r")).toBe("o/r");
+  expect(normalizeRepoUrl("https://GITHUB.com/O/R")).toBe("o/r");
+  expect(normalizeRepoUrl("https://github.com:443/o/r")).toBe("o/r");
+  expect(normalizeRepoUrl("https://github.com:8443/o/r")).toBeNull();
+  expect(normalizeRepoUrl("https://github.com/o/r?tab=readme#top")).toBe("o/r");
+  expect(normalizeRepoUrl("https://www.github.com/o/r")).toBeNull();
+  expect(normalizeRepoUrl("https://github.com.evil.com/o/r")).toBeNull();
+  expect(normalizeRepoUrl("https://evil.com/github.com/o/r")).toBeNull();
+  expect(normalizeRepoUrl("https://github.com@evil.com/o/r")).toBeNull();
+  expect(normalizeRepoUrl("https://user:pw@github.com/o/r")).toBe("o/r");
+  expect(normalizeRepoUrl("ftp://github.com/o/r")).toBeNull();
+});
+
+test("fetchFn rejecting, non-JSON, non-2xx, oversize, wrong shape are all 502 from upd-link", async () => {
+  const u = await user();
+  const p = await project(u, "octo/mine");
+  const bodies: (() => Promise<Response>)[] = [
+    () => Promise.reject(new Error("ECONNRESET")),
+    async () => new Response("<html>nope</html>"),
+    async () => new Response("x", { status: 500 }),
+    async () => new Response("[]", { headers: { "content-length": String(26 * 1024 * 1024) } }),
+    async () => Response.json({ not: "an array" }),
+  ];
+  for (const b of bodies) {
+    resetUpdCache();
+    const s2 = createServer({
+      cfg: testConfig(),
+      sql,
+      port: 0,
+      fetchFn: (() => b()) as unknown as typeof fetch,
+    });
+    const r = await fetch(`http://localhost:${s2.port}${p.path}/upd-link`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { cookie: u.cookie, origin: ORIGIN },
+      body: new URLSearchParams({ csrf: u.csrf, record_id: "recMINE" }),
+    });
+    s2.stop(true);
+    expect(r.status).toBe(502);
+    expect(await rec(p.id)).toBeNull();
+  }
+});
+
+test("a hung Ships request is aborted by the timeout (502); a failure is not cached", async () => {
+  updLimits.timeoutMs = 20;
+  let signal: AbortSignal | undefined;
+  const hung = ((_u: unknown, init?: RequestInit) => {
+    signal = init?.signal ?? undefined;
+    return new Promise<Response>((_, rej) => {
+      signal?.addEventListener("abort", () => rej(new Error("aborted")));
+    });
+  }) as typeof fetch;
+  try {
+    await expect(findUpdEntries("o/r", hung)).rejects.toMatchObject({ status: 502 });
+    expect(signal?.aborted).toBe(true);
+  } finally {
+    updLimits.timeoutMs = 10_000;
+  }
+  list = [entry("recA", "https://github.com/o/r")];
+  expect(await findUpdEntries("o/r", fetchFn)).toHaveLength(1);
+});
+
+test("concurrent cold misses download once", async () => {
+  list = [entry("recA", "https://github.com/o/r")];
+  const rs = await Promise.all([1, 2, 3].map(() => findUpdEntries("o/r", fetchFn)));
+  expect(rs.every((r) => r.length === 1)).toBe(true);
+  expect(shipsCalls).toBe(1);
+});
+
+test("unlink-repo clears upd_record_id and bumps; upd-unlink with nothing linked does not bump", async () => {
+  const u = await user();
+  const p = await project(u, "octo/mine");
+  await sql`update projects set upd_record_id = 'recMINE' where id = ${p.id}`;
+  const b0 = await seq(p.id);
+  expect((await post(`${p.path}/unlink-repo`, u, {})).status).toBe(303);
+  expect(await rec(p.id)).toBeNull();
+  expect(await seq(p.id)).toBe(b0 + 1);
+  expect((await post(`${p.path}/upd-unlink`, u, {})).status).toBe(303);
+  expect(await seq(p.id)).toBe(b0 + 1);
 });
