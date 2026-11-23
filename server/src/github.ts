@@ -37,9 +37,11 @@ export async function gh(
         authorization: `Bearer ${token}`,
       },
     });
+    if (res.status === 401) throw new HttpError(401, { error: "github_token_invalid" });
     if (!res.ok) throw new HttpError(502, { error: "github_failed" });
     pages.push(await res.json());
-    next = /<([^>]+)>;\s*rel="next"/.exec(res.headers.get("link") ?? "")?.[1] ?? null;
+    const n = /<([^>]+)>;\s*rel="next"/.exec(res.headers.get("link") ?? "")?.[1] ?? null;
+    next = n?.startsWith(`${API}/`) ? n : null; // never send the token to another origin
   }
   return pages;
 }
@@ -98,6 +100,12 @@ const Repos = z.object({
   repositories: z.array(z.object({ id: z.number().int(), full_name: z.string() })),
 });
 
+function parsed<T>(schema: z.ZodType<T>, v: unknown): T {
+  const r = schema.safeParse(v);
+  if (!r.success) throw new HttpError(502, { error: "github_failed" });
+  return r.data;
+}
+
 /** Every repo the token's user can reach through an installation of the App, fetched live. */
 export async function accessibleRepos(
   token: string,
@@ -105,9 +113,9 @@ export async function accessibleRepos(
 ): Promise<AccessibleRepo[]> {
   const out: AccessibleRepo[] = [];
   for (const page of await gh(token, "/user/installations", fetchFn)) {
-    for (const i of Installs.parse(page).installations) {
+    for (const i of parsed(Installs, page).installations) {
       for (const rp of await gh(token, `/user/installations/${i.id}/repositories`, fetchFn))
-        for (const r of Repos.parse(rp).repositories)
+        for (const r of parsed(Repos, rp).repositories)
           out.push({
             id: r.id,
             full_name: r.full_name,

@@ -22,18 +22,13 @@ const constraint = (e: unknown): string | undefined =>
   (e as { constraint?: string } | null)?.constraint;
 
 /**
- * The first segment must be the user's handle, or the name must equal (case-insensitively) the
- * full_name of a GitHub repo in `repos`, which the caller fetched live for this user.
+ * The handle rule: the first segment must be the user's handle. The GitHub repo rule (name equals
+ * the full_name of a repo the user can reach) lives in createProject, which fetches the list live.
  */
-export async function nameAllowed(
-  sql: SQL,
-  userId: string,
-  name: string,
-  repos: AccessibleRepo[] = [],
-): Promise<boolean> {
+export async function nameAllowed(sql: SQL, userId: string, name: string): Promise<boolean> {
   const [u] = await sql`select handle from users where id = ${userId}`;
   const owner = (name.split("/")[0] ?? "").toLowerCase();
-  return (!!u?.handle && u.handle === owner) || !!repoNamed(repos, name);
+  return !!u?.handle && u.handle === owner;
 }
 
 /** A handle can be set once: renaming would orphan `handle/` project names. */

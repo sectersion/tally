@@ -12,9 +12,13 @@ const ORIGIN = "http://localhost:8080";
 /** Fixed responses by URL path; per-user answers are looked up by bearer token. */
 const routes = new Map<string, unknown>();
 const userRepos = new Map<string, { inst: number; repos: { id: number; full_name: string }[] }>();
+let outbound = 0;
+const dead = new Set<string>(); // tokens GitHub answers 401 for
 const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  outbound++;
   const u = new URL(String(input));
   const tok = new Headers(init?.headers).get("authorization")?.replace("Bearer ", "") ?? "";
+  if (dead.has(tok)) return new Response("bad", { status: 401 });
   const a = userRepos.get(tok);
   if (a && u.pathname === "/user/installations")
     return Response.json({ installations: [{ id: a.inst, account: { login: "octo" } }] });
@@ -170,7 +174,68 @@ test("expired github token redirects to /github/connect", async () => {
   const p = await project(u);
   const r = await post(`${await settingsPath(p.id)}/link-repo`, u, { repo_id: "1" });
   expect(r.status).toBe(303);
+  expect(r.headers.get("location")).toBe(
+    `/github/connect?return_to=${encodeURIComponent(`${await settingsPath(p.id)}/settings`)}`,
+  );
+});
+
+test("callback with a code and no state is discarded: redirect, no fetch, no token row", async () => {
+  const u = await user(false);
+  const before = outbound;
+  const r = await fetch(`${base}/github/callback?code=stray`, {
+    redirect: "manual",
+    headers: { cookie: u.cookie },
+  });
+  expect(r.status).toBe(303);
   expect(r.headers.get("location")).toBe("/github/connect");
+  expect(outbound).toBe(before);
+  const [n] = await sql`select count(*)::int as n from github_user_tokens where user_id = ${u.id}`;
+  expect(n.n).toBe(0);
+});
+
+test("a token GitHub rejects (401) is deleted and the user is sent to reconnect", async () => {
+  const u = await user();
+  const p = await project(u);
+  dead.add(`tok-${u.id}`);
+  const path = `${await settingsPath(p.id)}/settings`;
+  const r = await post(`${await settingsPath(p.id)}/link-repo`, u, { repo_id: "1" });
+  expect(r.status).toBe(303);
+  expect(r.headers.get("location")).toStartWith("/github/connect?return_to=");
+  const [n] = await sql`select count(*)::int as n from github_user_tokens where user_id = ${u.id}`;
+  expect(n.n).toBe(0);
+  // the settings page does the same
+  const u2 = await user();
+  const p2 = await project(u2);
+  dead.add(`tok-${u2.id}`);
+  const g = await fetch(`${base}${await settingsPath(p2.id)}/settings`, {
+    redirect: "manual",
+    headers: { cookie: u2.cookie },
+  });
+  expect(g.status).toBe(303);
+  expect(g.headers.get("location")).toStartWith("/github/connect");
+  expect(path).toContain("/settings");
+});
+
+test("linking a repo already live on this project says so", async () => {
+  const u = await user();
+  const p = await project(u);
+  const repo = { id: rnd(), full_name: `octo/same${rnd()}` };
+  access(u, [repo]);
+  const path = `${await settingsPath(p.id)}/link-repo`;
+  await post(path, u, { repo_id: String(repo.id) });
+  const r = await post(path, u, { repo_id: String(repo.id) });
+  expect(r.status).toBe(409);
+  expect(await r.json()).toMatchObject({ error: "repo already linked to this project" });
+});
+
+test("gh never follows a Link next URL off the GitHub API origin", async () => {
+  const urls: string[] = [];
+  const f = (async (input: RequestInfo | URL) => {
+    urls.push(String(input));
+    return Response.json([1], { headers: { link: '<https://evil.example/x>; rel="next"' } });
+  }) as typeof fetch;
+  expect(await gh("t", "/x", f)).toEqual([[1]]);
+  expect(urls).toHaveLength(1);
 });
 
 test("link without csrf is 403", async () => {

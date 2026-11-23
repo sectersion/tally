@@ -139,6 +139,22 @@ export function createServer(deps: Deps) {
   };
   /** Read the body once per request. */
   const formOf = (req: Request) => req.formData().catch(() => new FormData());
+  /** Runs a call made with the user's stored token; a 401 means it is dead, so drop it and reconnect. */
+  const withGhToken = async <T>(userId: string, returnTo: string, f: () => Promise<T>) => {
+    try {
+      return await f();
+    } catch (e) {
+      if (e instanceof HttpError && e.status === 401 && e.body.error === "github_token_invalid") {
+        await sql`delete from github_user_tokens where user_id = ${userId}`;
+        throw new HttpError(
+          303,
+          { error: "github_required" },
+          `/github/connect?return_to=${encodeURIComponent(returnTo)}`,
+        );
+      }
+      throw e;
+    }
+  };
   /** The project at /p/:owner/:name if the session user owns it; otherwise 404 (never reveals existence). */
   const ownedProject = async (userId: string, owner: string, name: string) => {
     const [p] =
@@ -329,7 +345,7 @@ export function createServer(deps: Deps) {
           requireCsrf(cfg, req, s, form);
           const name = String(form.get("name") ?? "");
           const r = await createProject(sql, s.userId, name, () =>
-            userRepos(sql, s.userId, fetchFn),
+            withGhToken(s.userId, "/settings", () => userRepos(sql, s.userId, fetchFn)),
           );
           return redirect("error" in r ? `/settings?error=${r.error}` : `/p/${name}`);
         }),
@@ -351,11 +367,15 @@ export function createServer(deps: Deps) {
       },
       "/github/callback": {
         GET: handle("/github/callback", async (req, server) => {
-          const s = await requireUser(sql, req);
-          limit(ip(server, req));
           const q = new URL(req.url).searchParams;
           const code = q.get("code");
           const state = q.get("state");
+          // An install-time authorization may arrive with a code but no state of ours. Never
+          // exchange it: discard it and start the normal stateful flow.
+          if (code && !state && !cookieValue(req, GH_OAUTH_COOKIE))
+            return redirect("/github/connect");
+          const s = await requireUser(sql, req);
+          limit(ip(server, req));
           if (!code || !state) throw new HttpError(400, { error: "bad_callback" });
           const bound = cookieValue(req, GH_OAUTH_COOKIE);
           if (!bound || !same(bound, state)) throw new HttpError(400, { error: "bad_state" });
@@ -403,11 +423,19 @@ export function createServer(deps: Deps) {
           requireCsrf(cfg, req, s, form);
           const p = await ownedProject(s.userId, req.params.owner, req.params.name);
           const token = await userToken(sql, s.userId);
-          if (!token) throw new HttpError(303, { error: "github_required" }, "/github/connect");
+          const back = `/p/${p.public_name}/settings`;
+          if (!token)
+            throw new HttpError(
+              303,
+              { error: "github_required" },
+              `/github/connect?return_to=${encodeURIComponent(back)}`,
+            );
           const raw = String(form.get("repo_id") ?? "");
           // Re-fetched from GitHub: the form only names a candidate.
           const repo = /^\d{1,15}$/.test(raw)
-            ? (await accessibleRepos(token, fetchFn)).find((r) => r.id === Number(raw))
+            ? (await withGhToken(s.userId, back, () => accessibleRepos(token, fetchFn))).find(
+                (r) => r.id === Number(raw),
+              )
             : undefined;
           if (!repo) throw new HttpError(403, { error: "forbidden" });
           try {
@@ -416,8 +444,15 @@ export function createServer(deps: Deps) {
               await bumpChange(tx, p.id);
             });
           } catch (e) {
-            if (unique(e))
-              throw new HttpError(409, { error: "repo already linked to another project" });
+            if (unique(e)) {
+              const [mine] = await sql`select 1 as x from project_repos
+                where github_repo_id = ${repo.id} and project_id = ${p.id} and unlinked_at is null`;
+              throw new HttpError(409, {
+                error: mine
+                  ? "repo already linked to this project"
+                  : "repo already linked to another project",
+              });
+            }
             throw e;
           }
           return redirect(`/p/${p.public_name}/settings`);
@@ -462,7 +497,9 @@ export function createServer(deps: Deps) {
           } else if (!(await userToken(sql, s.userId))) {
             repos = `<p><a href="/github/connect?return_to=${encodeURIComponent(`/p/${p.public_name}/settings`)}">Connect GitHub</a> to link a repo (<a href="/github/install">install the App</a> first).</p>`;
           } else {
-            const list = await userRepos(sql, s.userId, fetchFn);
+            const list = await withGhToken(s.userId, `/p/${p.public_name}/settings`, () =>
+              userRepos(sql, s.userId, fetchFn),
+            );
             repos = `<ul>${list
               .map(
                 (r) =>

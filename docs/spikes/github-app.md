@@ -28,7 +28,10 @@ Checked 2026-11-23, public docs only. No GitHub App was created and no real deli
 ## Production App settings
 
 - Webhook URL `https://<host>/github/webhook`, a random secret (`GITHUB_WEBHOOK_SECRET`), SSL verification on.
-- Setup URL `https://<host>/github/setup`; Callback URL `https://<host>/github/callback`; check "Request user authorization (OAuth) during installation". Leave "Expire user authorization tokens" on.
+- Setup URL `https://<host>/github/setup`; Callback URL `https://<host>/github/callback`; **leave "Request user authorization (OAuth) during installation" unchecked**. Leave "Expire user authorization tokens" on.
+  - Documented (https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app, checked 2026-11-23): with that box checked you cannot enter a Setup URL, and users are sent to the Callback URL as part of the authorization flow. Without it, users are redirected to the Setup URL after install (about-the-setup-url page).
+  - Not documented: whether the install-time authorization carries a `state`, and the exact redirect order. Assumed: it does not carry one of ours, so Tally never exchanges a stateless `code`.
+  - Flow: install, then Setup URL, then `/github/connect` (stateful, browser-bound), then `/github/callback`. As a safety net, `/github/callback` with a `code` and no `state` or binding cookie discards the code and redirects to `/github/connect`.
 - Permissions: Contents read-only, Metadata read-only. Events: Push, Repository.
 - No private key is needed or stored: Tally uses user-to-server tokens only.
 - Env: `GITHUB_APP_SLUG`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_WEBHOOK_SECRET`.
@@ -37,7 +40,7 @@ Checked 2026-11-23, public docs only. No GitHub App was created and no real deli
 
 Skipped here because they need a logged-in GitHub account.
 
-1. Create a development GitHub App "Tally (dev)" with the settings above, webhook URL a tunnel to `localhost:8080/github/webhook`, Setup URL `http://localhost:8080/github/setup`, Callback URL `http://localhost:8080/github/callback`.
+1. Create a development GitHub App "Tally (dev)" with the settings above, webhook URL a tunnel to `localhost:8080/github/webhook`, Setup URL `http://localhost:8080/github/setup`, Callback URL `http://localhost:8080/github/callback`, "Request user authorization during installation" unchecked.
 2. Install it on a scratch repo. Push twice, force-push once, rename the repo, transfer it to a second account, remove it from the installation, uninstall. From the App's "Advanced" tab compare each real delivery with the hand-built fixtures (field names, `installation` presence, redelivery GUID, whether `transferred` keeps `repository.id`, the `github_app_authorization` action value) and correct the fixtures if they differ. Replace emails and names before re-signing with `test-secret`.
 3. Answer the three questions above from the real deliveries and update this document.
 4. (Part B step 8) Install the dev App through `/github/install` against a local server and link the scratch repo from the project settings page.
