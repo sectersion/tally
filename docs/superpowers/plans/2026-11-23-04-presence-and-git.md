@@ -251,7 +251,7 @@ crates/tally-daemon/
 
 **Files:** Create `crates/tally-daemon/src/git.rs`; modify `lib.rs`, `store.rs` (add `has_agent_commit_marker`; `projects()` and `repos_to_poll()` are defined once, in Task 6; the `GitSource` registration in `run::sources` is also done in Task 6), `Cargo.toml` (no new dependency).
 
-**Input from plan 03 (README ruling 1, no change requested):** the Claude adapter emits, for every agent Bash call whose command starts with `git commit`, `Event { id: "claude:<session>:<uuid>:commit", ts: <tool_use time>, source: "claude-code", project: Some(..), kind: Commit { sha: "claude:<tool_use id>", by: Agent, lines_changed: 0 } }`. This plan matches it only by `by = agent`, project and time window; the `sha` value is never read. Ordering is guaranteed by the `claude-code` watermark, not by a lag (rule 2 below).
+**Input from plan 03 (README ruling 1, no change requested):** the Claude adapter emits, for every agent Bash call that plan 03's `bash_kind` segment rule classifies as `Commit`, `Event { id: "claude:<session>:<uuid>:commit", ts: <tool_use time>, source: "claude-code", project: Some(..), kind: Commit { sha: "claude:<tool_use id>", by: Agent, lines_changed: 0 } }`. This plan matches it only by `by = agent`, project and time window; the `sha` value is never read. Ordering is guaranteed by the `claude-code` watermark, not by a lag (rule 2 below).
 
 **Interfaces:**
 - Consumes: `Source`, `SourceState`, `SourceError` (plan 03); `repo_identity` from Task 6 is not required here (the runner passes one repository per common dir, see Task 6).

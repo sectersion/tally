@@ -510,7 +510,7 @@ In `tests/dashboard.rs` (drives the real binary, `env!("CARGO_BIN_EXE_tally")`):
 
 - [ ] **Step 2:** Run `cargo test -p tally-daemon`. Expected: FAIL (modules and subcommand missing).
 - [ ] **Step 3:** Implement. Do not add `tokio`. Compute the allowed Host strings from `addr.port()` after binding. Log nothing per request by default (privacy and noise); `--verbose` prints one line per request with method, path and status (no query string).
-- [ ] **Step 3b:** Add `dashboard: bool` (default `false`) and `dashboard_port: u16` (default `7878`) to plan 03's `RunConfig` in plan 03's `config.rs` (the `[run]` table). `RunConfig` has `#[serde(deny_unknown_fields)]`, so without this a `config.toml` containing either key fails to load. Add a test in `config.rs` that `[run] dashboard = true` and `dashboard_port = 9000` parse and that the defaults are `false` and `7878`; the CLI flags override the file.
+- [ ] **Step 3b:** Plan 03 already defines `[run] dashboard` and `dashboard_port` (false, 7878) on `RunConfig`, with its own parse test; read them; CLI flags override. Do not add the fields or a second `config.rs` test here.
 - [ ] **Step 4:** Run `cargo test -p tally-daemon` and `cargo clippy -p tally-daemon --all-targets -- -D warnings`. Expected: PASS, no warnings.
 - [ ] **Step 5:** Measure and record in the commit message: release binary size before and after (`cargo build --release -p tally-daemon`; expectation under 600 KB added) and idle RSS of `tally dashboard` (Windows: `Get-Process tally | Select WorkingSet64`).
 - [ ] **Step 6:** Commit: `feat(daemon): localhost dashboard server and tally dashboard command`.
