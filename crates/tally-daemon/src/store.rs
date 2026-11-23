@@ -293,6 +293,18 @@ impl Store {
         }
         Ok(out)
     }
+
+    /// Whether a stored `commit` event by the agent exists for `project` with `ts` in `[from_ts, to_ts]`.
+    /// The `sha` is deliberately not consulted.
+    pub fn has_agent_commit_marker(&self, project: &str, from_ts: i64, to_ts: i64) -> Result<bool, StoreError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE ts BETWEEN ?2 AND ?3
+             AND json_extract(json, '$.kind') = 'commit' AND json_extract(json, '$.by') = 'agent'
+             AND json_extract(json, '$.project') = ?1)",
+            params![project, from_ts, to_ts],
+            |r| r.get(0),
+        )?)
+    }
 }
 
 #[cfg(test)]
@@ -300,6 +312,22 @@ mod tests {
     use super::*;
     use tally_scoring::event::Kind;
     use tally_scoring::{Event, LedgerEntry, GENESIS_HASH};
+
+    #[test]
+    fn agent_commit_marker_matches_by_agent_project_and_window_only() {
+        let mut s = Store::open_in_memory().unwrap();
+        let c = |id: &str, ts: i64, project: &str, by: tally_scoring::event::Actor| Event {
+            project: Some(project.into()),
+            kind: Kind::Commit { sha: id.into(), by, lines_changed: 0 },
+            ..ev(id, ts)
+        };
+        use tally_scoring::event::Actor;
+        s.append_events(&[c("claude:toolu_1", 1000, "p", Actor::Agent), c("u", 5000, "p", Actor::User)]).unwrap();
+        assert!(s.has_agent_commit_marker("p", 900, 1100).unwrap());
+        assert!(!s.has_agent_commit_marker("p", 1001, 1100).unwrap());
+        assert!(!s.has_agent_commit_marker("q", 900, 1100).unwrap());
+        assert!(!s.has_agent_commit_marker("p", 4900, 5100).unwrap());
+    }
 
     fn ev(id: &str, ts: i64) -> Event {
         Event { v: 1, id: id.into(), ts, source: "test".into(), project: None, session: None, kind: Kind::Interrupt }
