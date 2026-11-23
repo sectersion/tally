@@ -4,9 +4,9 @@ import { MAX_BATCH, MAX_BODY_BYTES } from "../src/config.ts";
 import { connect } from "../src/db.ts";
 import { chains, seed, seedFixture, start } from "./helpers.ts";
 
-// Fixture names are single-use per database, and Task 6 owns only demo-2..7, so some tests share a
-// name. Every test that shares one is correct whether its name is fresh or holds the first three
-// entries: a test that needs that state uploads them itself (a replay is a no-op).
+// Fixture names are single-use per database. Tests that need a fresh chain own their name (demo-10,
+// 12, 13, 14-big); the rest share names and are correct whether the name is fresh or already holds
+// its first three entries: they upload those themselves (a replay is a no-op).
 
 const GENESIS = "0".repeat(64);
 const sql = connect(process.env.DATABASE_URL ?? "");
@@ -45,9 +45,9 @@ const stale = async (r: Response, head_hash: string, count: number) => {
 const at = (name: string, i: number) => chains[name]?.[i]?.hash ?? "";
 
 test("first batch from genesis is stored", async () => {
-  const c = chains["acme/demo-2"] ?? [];
-  const p = await seedFixture(sql, "acme/demo-2");
-  await ok(await post(p, { prev_hash: GENESIS, entries: c.slice(0, 3) }), at("acme/demo-2", 2), 3);
+  const c = chains["acme/demo-10"] ?? [];
+  const p = await seedFixture(sql, "acme/demo-10");
+  await ok(await post(p, { prev_hash: GENESIS, entries: c.slice(0, 3) }), at("acme/demo-10", 2), 3);
   const [row] =
     await sql`select entry::text as e from ledger_entries le join chains ch on ch.id = le.chain_id where ch.project_id = ${p.projectId} and seq = 0`;
   expect(JSON.parse(row.e)).toEqual(c[0]); // stored as received
@@ -165,8 +165,8 @@ test("append to an existing older-ruleset chain succeeds", async () => {
 });
 
 test("mixed rulesets report the first foreign index", async () => {
-  const c = structuredClone(chains["acme/demo-2"] ?? []);
-  const p = await seedFixture(sql, "acme/demo-2");
+  const c = structuredClone(chains["acme/demo-12"] ?? []);
+  const p = await seedFixture(sql, "acme/demo-12");
   if (c[2]) c[2].ruleset = "2099.01-0";
   await broken(await post(p, { prev_hash: GENESIS, entries: c }), 2, "unknown_ruleset");
 });
@@ -218,4 +218,30 @@ test("no token 401, other project's token 403", async () => {
   expect(r.status).toBe(403);
   expect(await r.json()).toEqual({ error: "forbidden" });
   expect(await rows(p)).toBe(0);
+});
+
+test("resume from mid-chain: overlap is verified, only the tail is appended", async () => {
+  const c = chains["acme/demo-13"] ?? [];
+  const p = await seedFixture(sql, "acme/demo-13");
+  await ok(await post(p, { prev_hash: GENESIS, entries: c.slice(0, 4) }), at("acme/demo-13", 3), 4);
+  await ok(await post(p, { prev_hash: c[1]?.hash, entries: c.slice(2) }), at("acme/demo-13", 5), 6);
+  expect(await rows(p)).toBe(6);
+});
+
+test("verified_s beyond SQL integer is stored and summed", async () => {
+  const c = chains["acme/demo-14-big"] ?? [];
+  expect(c.some((e) => e.verified_s === 3_000_000_000)).toBe(true);
+  const p = await seedFixture(sql, "acme/demo-14-big");
+  await ok(await post(p, { prev_hash: GENESIS, entries: c }), at("acme/demo-14-big", 5), 6);
+  const [ch] = await sql`select verified_s from chains where project_id = ${p.projectId}`;
+  expect(Number(ch.verified_s)).toBe(c.reduce((s, e) => s + e.verified_s, 0));
+});
+
+test("invalid_body issue paths are capped", async () => {
+  const p = await seedFixture(sql, "acme/demo-3");
+  const r = await post(p, { prev_hash: GENESIS, entries: [], ["k".repeat(5000)]: 1 });
+  expect(r.status).toBe(400);
+  const text = await r.text();
+  expect(text.length).toBeLessThan(500);
+  expect(text).toContain("k".repeat(60));
 });

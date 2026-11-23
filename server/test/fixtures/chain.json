@@ -671,6 +671,118 @@
       "hash": "5a6299a34826824798f0de28ee534dc688f7714370d43903ab4af362b86ae945"
     }
   ],
+  "acme/demo-14-big": [
+    {
+      "v": 1,
+      "ruleset": "2026.11-0",
+      "action_id": "1",
+      "ts": 0,
+      "project": "acme/demo-14-big",
+      "kind": "prompt",
+      "verified_s": 120,
+      "unverified_s": 0,
+      "reasons": [
+        "first_action"
+      ],
+      "features": {
+        "chars": 200,
+        "novelty_bytes": 90,
+        "relevance_pm": 600
+      },
+      "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "hash": "3a47123514edcd8a2f878b0515002a9ff925b0c6d86e2849a84a4b7625aa8311"
+    },
+    {
+      "v": 1,
+      "ruleset": "2026.11-0",
+      "action_id": "2",
+      "ts": 600000,
+      "project": "acme/demo-14-big",
+      "kind": "prompt",
+      "verified_s": 600,
+      "unverified_s": 0,
+      "reasons": [],
+      "features": {
+        "chars": 200,
+        "novelty_bytes": 90,
+        "relevance_pm": 600
+      },
+      "prev_hash": "3a47123514edcd8a2f878b0515002a9ff925b0c6d86e2849a84a4b7625aa8311",
+      "hash": "c6eca799773f008fbfa2bf7bbc9aeaabd34c01cf89b7f695217686b43fa6a8df"
+    },
+    {
+      "v": 1,
+      "ruleset": "2026.11-0",
+      "action_id": "3",
+      "ts": 1200000,
+      "project": "acme/demo-14-big",
+      "kind": "prompt",
+      "verified_s": 3000000000,
+      "unverified_s": 0,
+      "reasons": [],
+      "features": {
+        "chars": 200,
+        "novelty_bytes": 90,
+        "relevance_pm": 600
+      },
+      "prev_hash": "c6eca799773f008fbfa2bf7bbc9aeaabd34c01cf89b7f695217686b43fa6a8df",
+      "hash": "396b68c68fdfb3a7b2e4bc82eeb2da39f148d61da8c1a46bc63097362f8e5141"
+    },
+    {
+      "v": 1,
+      "ruleset": "2026.11-0",
+      "action_id": "4",
+      "ts": 1800000,
+      "project": "acme/demo-14-big",
+      "kind": "prompt",
+      "verified_s": 600,
+      "unverified_s": 0,
+      "reasons": [],
+      "features": {
+        "chars": 200,
+        "novelty_bytes": 90,
+        "relevance_pm": 600
+      },
+      "prev_hash": "396b68c68fdfb3a7b2e4bc82eeb2da39f148d61da8c1a46bc63097362f8e5141",
+      "hash": "2ba4f9bc1ef5c098dafc81b5c1848a787131a8969d1b7cc7ec2dbc7768c2c56a"
+    },
+    {
+      "v": 1,
+      "ruleset": "2026.11-0",
+      "action_id": "5",
+      "ts": 2400000,
+      "project": "acme/demo-14-big",
+      "kind": "prompt",
+      "verified_s": 600,
+      "unverified_s": 0,
+      "reasons": [],
+      "features": {
+        "chars": 200,
+        "novelty_bytes": 90,
+        "relevance_pm": 600
+      },
+      "prev_hash": "2ba4f9bc1ef5c098dafc81b5c1848a787131a8969d1b7cc7ec2dbc7768c2c56a",
+      "hash": "576561a35fa10bdf237b125162fad64cddd54bbd8cd1144f087e462a9bf93e9c"
+    },
+    {
+      "v": 1,
+      "ruleset": "2026.11-0",
+      "action_id": "6",
+      "ts": 3000000,
+      "project": "acme/demo-14-big",
+      "kind": "prompt",
+      "verified_s": 600,
+      "unverified_s": 0,
+      "reasons": [],
+      "features": {
+        "chars": 200,
+        "novelty_bytes": 90,
+        "relevance_pm": 600
+      },
+      "prev_hash": "576561a35fa10bdf237b125162fad64cddd54bbd8cd1144f087e462a9bf93e9c",
+      "hash": "af4e61d22671b4dad600b0330040fc9724cb6c4bd7548a11b7ee027bde1e8d3a"
+    }
+  ],
   "acme/demo-15": [
     {
       "v": 1,

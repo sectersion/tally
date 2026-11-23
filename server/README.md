@@ -40,7 +40,7 @@ bun run typecheck
 bun run lint
 ```
 
-`db:reset` drops and recreates the `public` schema and needs `psql` on PATH. Without it, run the same SQL through your container, for example `docker exec <container> psql -U postgres -c "drop schema public cascade; create schema public"`. Migrations are re-applied by `bun run migrate`, the next server start, or the next `bun test`.
+`db:reset` drops and recreates the `public` schema and needs `psql` on PATH. Without it, run the same SQL through your container, for example `docker exec <container> psql -U postgres -c "drop schema public cascade; create schema public"`. `db:reset` drops the whole schema: never point it at production. Migrations are re-applied by `bun run migrate`, the next server start, or the next `bun test`.
 
 Regenerate fixtures with `bun run fixture` whenever `crates/tally-scoring` hashing changes (CI fails on a stale fixture).
 
@@ -50,9 +50,9 @@ One container or VM running `bun run start` behind a TLS-terminating proxy (C7 r
 
 ## Limits
 
-- Body 1 MiB, 1000 entries per batch.
+- Body 1 MiB, 1000 entries per batch. A body over 2 MiB is rejected by Bun itself with an empty-body 413; the JSON `body_too_large` applies between 1 and 2 MiB.
 - 120 requests/min per token (burst 30), single instance (in-process limiter).
-- Behind a proxy, the per-ip rate-limit buckets share the proxy's address (single instance, in-process limiter).
+- Failed auth is limited per client ip; behind a proxy all clients share the proxy's address.
 
 ## Monthly cost envelope check
 

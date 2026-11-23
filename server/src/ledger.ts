@@ -114,7 +114,7 @@ export async function appendEntries(
         ${col((_, i) => count + i)}::bigint[], ${col((e) => e.hash)}::text[],
         ${col((e) => e.prev_hash)}::text[], ${col((e) => e.action_id)}::text[],
         ${col((e) => e.ts)}::bigint[], ${col((e) => e.kind)}::text[],
-        ${col((e) => e.verified_s)}::int[], ${col((e) => e.unverified_s)}::int[],
+        ${col((e) => e.verified_s)}::bigint[], ${col((e) => e.unverified_s)}::bigint[],
         ${col((e) => JSON.stringify(e))}::text[]::json[])`;
     const last = fresh[fresh.length - 1] as LedgerEntry;
     const added = fresh.reduce((s, e) => s + e.verified_s, 0);

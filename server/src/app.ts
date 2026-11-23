@@ -73,6 +73,7 @@ export function createServer(deps: Deps) {
   };
   return Bun.serve({
     port: deps.port,
+    development: false,
     // Transport hard cap only: Bun resets the connection past it, so it sits above MAX_BODY_BYTES
     // and readJson answers the JSON 413 for everything in between (Content-Length is checked first).
     maxRequestBodySize: 2 * MAX_BODY_BYTES,

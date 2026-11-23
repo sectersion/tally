@@ -48,9 +48,16 @@ test("badge is the sum of verified seconds across chains", async () => {
 });
 
 test("chains.verified_s matches the stored entries", async () => {
+  const c = chains["acme/demo-11"] ?? [];
+  const p = await seedFixture(sql, "acme/demo-11");
+  const up = await fetch(`${srv.url}/v1/ledger/${p.projectId}/entries`, {
+    method: "POST",
+    headers: auth(p.token),
+    body: JSON.stringify({ prev_hash: GENESIS, entries: c }),
+  });
+  expect(up.status).toBe(200);
   const [r] = await sql`select c.verified_s as cv, (select sum(e.verified_s) from ledger_entries e
-    where e.chain_id = c.id) as ev from chains c join projects p on p.id = c.project_id
-    where p.public_name = 'acme/demo-9' and c.ruleset <> ${OLD}`;
+    where e.chain_id = c.id) as ev from chains c where c.project_id = ${p.projectId}`;
   expect(Number(r.cv)).toBe(Number(r.ev));
   expect(Number(r.cv)).toBeGreaterThan(0);
 });

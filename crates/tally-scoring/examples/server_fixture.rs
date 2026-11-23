@@ -1,7 +1,8 @@
 //! Prints the server test fixture: 16 six-entry chains, one per project `acme/demo-N`, plus two
 //! divergent chains for the upload tests: `acme/demo-7-alt` (another genesis chain for
 //! `acme/demo-7`), `acme/demo-4-alt` (shares entries 0..3 with `acme/demo-4`, then diverges) and
-//! `acme/demo-3-2099` (demo-3's entries rehashed at ruleset `2099.01-0`).
+//! `acme/demo-3-2099` (demo-3's entries rehashed at ruleset `2099.01-0`) and `acme/demo-14-big`
+//! (entry 2 has verified_s 3_000_000_000, rehashed).
 //! Regenerate with `cd server && bun run fixture`.
 use std::collections::BTreeMap;
 
@@ -48,5 +49,16 @@ fn main() {
         prev = e.hash.clone();
     }
     out.insert("acme/demo-3-2099".into(), next);
+    // a u32-sized verified_s (beyond SQL integer), rehashed
+    let mut big = out["acme/demo-14"].clone();
+    big[2].verified_s = 3_000_000_000;
+    let mut prev = GENESIS_HASH.to_string();
+    for e in &mut big {
+        e.project = Some("acme/demo-14-big".into());
+        e.prev_hash = prev;
+        e.hash = entry_hash(e);
+        prev = e.hash.clone();
+    }
+    out.insert("acme/demo-14-big".into(), big);
     println!("{}", serde_json::to_string_pretty(&out).unwrap());
 }

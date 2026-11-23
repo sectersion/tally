@@ -11,7 +11,12 @@ import fixture from "./fixtures/chain.json";
 // | 3-2099     | Task 6 (upload)         |
 // | 8          | Task 7                  |
 // | 9          | Task 8                  |
-// | 10..16     | Task 9 (any)            |
+// | 10         | entries: first batch    |
+// | 11         | badge: stored sums      |
+// | 12         | entries: mixed rulesets |
+// | 13         | entries: mid-chain resume |
+// | 14-big     | entries: 3e9 verified_s |
+// | 15, 16     | free                    |
 
 export const chains = fixture as unknown as Record<string, LedgerEntry[]>;
 

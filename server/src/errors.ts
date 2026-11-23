@@ -28,14 +28,19 @@ export async function readJson(req: Request): Promise<unknown> {
   }
 }
 
+const cap = (s: string) => s.slice(0, 64);
+
 /** Issues carry only a path and a fixed message: never zod's own text, which can quote input. */
 export function parse<T>(schema: ZodType<T>, value: unknown): T {
   const r = schema.safeParse(value);
   if (r.success) return r.data;
   const issues = r.error.issues.flatMap((i) => {
     if (i.code === "unrecognized_keys")
-      return i.keys.map((k) => ({ path: [...i.path, k].join("."), message: "unrecognized key" }));
-    return [{ path: i.path.map(String).join("."), message: i.code }];
+      return i.keys.map((k) => ({
+        path: cap([...i.path, k].join(".")),
+        message: "unrecognized key",
+      }));
+    return [{ path: cap(i.path.map(String).join(".")), message: i.code }];
   });
-  throw new HttpError(400, { error: "invalid_body", issues });
+  throw new HttpError(400, { error: "invalid_body", issues: issues.slice(0, 20) });
 }
