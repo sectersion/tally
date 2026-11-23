@@ -1,21 +1,6 @@
 // The nodejs wasm-pack target instantiates synchronously on import: loaded once per process.
 import * as w from "../wasm/tally_scoring.js";
-
-// ponytail: declared here until Task 4 moves it to schema.ts (inferred from the zod schema).
-export type LedgerEntry = {
-  v: number;
-  ruleset: string;
-  action_id: string;
-  ts: number;
-  project: string | null;
-  kind: string;
-  verified_s: number;
-  unverified_s: number;
-  reasons: string[];
-  features: Record<string, number>;
-  prev_hash: string;
-  hash: string;
-};
+import type { LedgerEntry } from "./schema";
 
 export type VerifyResult =
   | { ok: true }
