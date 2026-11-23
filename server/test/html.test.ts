@@ -98,6 +98,11 @@ test("no HTML route emits inline style= or on*= attributes", async () => {
   ).json()) as { user_code: string };
   for (const p of [
     `/p/${handle}/p/settings`,
+    `/p/${handle}/p`,
+    `/u/${handle}`,
+    "/",
+    "/settings",
+    "/device",
     `/device?code=${dc.user_code}`,
     "/device?code=nope",
     "/static/nope",

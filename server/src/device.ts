@@ -55,12 +55,16 @@ export function pollDeviceToken(sql: SQL, deviceCode: string): Promise<PollResul
   });
 }
 
-const norm = (c: string) => c.trim().toUpperCase();
+/** "bcdf ghjk", "bcdfghjk" and "BCDF-GHJK" are the same code. */
+export const normUserCode = (c: string) => {
+  const s = c.toUpperCase().replace(/[^A-Z]/g, "");
+  return s.length === 8 ? `${s.slice(0, 4)}-${s.slice(4)}` : s;
+};
 
 /** The pending device name for a code that can still be decided, else null. */
 export async function pendingDevice(sql: SQL, userCode: string): Promise<string | null> {
   const [r] = await sql`select device_name from device_codes
-    where user_code = ${norm(userCode)} and expires_at > now() and not consumed
+    where user_code = ${normUserCode(userCode)} and expires_at > now() and not consumed
       and not denied and user_id is null`;
   return r ? (r.device_name as string) : null;
 }
@@ -74,10 +78,10 @@ export async function decide(
 ): Promise<boolean> {
   const rows = approve
     ? await sql`update device_codes set user_id = ${userId}
-        where user_code = ${norm(userCode)} and expires_at > now() and not consumed
+        where user_code = ${normUserCode(userCode)} and expires_at > now() and not consumed
           and not denied and user_id is null returning 1 as x`
     : await sql`update device_codes set denied = true
-        where user_code = ${norm(userCode)} and expires_at > now() and not consumed
+        where user_code = ${normUserCode(userCode)} and expires_at > now() and not consumed
           and not denied and user_id is null returning 1 as x`;
   return rows.length > 0;
 }

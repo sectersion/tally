@@ -228,6 +228,24 @@ test("linking a repo already live on this project says so", async () => {
   expect(await r.json()).toMatchObject({ error: "repo already linked to this project" });
 });
 
+test("a project keeps one live repo: linking a second is 409 until the first is unlinked", async () => {
+  const u = await user();
+  const p = await project(u);
+  const r1 = { id: rnd(), full_name: `octo/one${rnd()}` };
+  const r2 = { id: rnd(), full_name: `octo/two${rnd()}` };
+  access(u, [r1, r2]);
+  const path = await settingsPath(p.id);
+  expect((await post(`${path}/link-repo`, u, { repo_id: String(r1.id) })).status).toBe(303);
+  const r = await post(`${path}/link-repo`, u, { repo_id: String(r2.id) });
+  expect(r.status).toBe(409);
+  expect(await r.json()).toMatchObject({
+    error: "project already has a linked repo; unlink it first",
+  });
+  expect(await live(r2.id)).toEqual([]);
+  await post(`${path}/unlink-repo`, u, {});
+  expect((await post(`${path}/link-repo`, u, { repo_id: String(r2.id) })).status).toBe(303);
+});
+
 test("gh never follows a Link next URL off the GitHub API origin", async () => {
   const urls: string[] = [];
   const f = (async (input: RequestInfo | URL) => {

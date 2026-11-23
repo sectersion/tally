@@ -7,7 +7,7 @@ import { HttpError } from "./errors.ts";
 export const COOKIE = "tally_session";
 const MAX_AGE = 2_592_000; // 30 days
 
-type Session = { userId: string; csrf: string; role: string };
+export type Session = { userId: string; csrf: string; role: string; handle: string | null };
 
 type Base = Pick<Config, "publicBaseUrl">;
 export const OAUTH_COOKIE = "tally_oauth";
@@ -51,9 +51,11 @@ export async function getSession(sql: SQL, req: Request): Promise<Session | null
   const token = sessionToken(req);
   if (!token) return null;
   const [row] =
-    await sql`select s.user_id, s.csrf, u.role from sessions s join users u on u.id = s.user_id
+    await sql`select s.user_id, s.csrf, u.role, u.handle from sessions s join users u on u.id = s.user_id
     where s.token_hash = ${hashToken(token)} and s.expires_at > now()`;
-  return row ? { userId: row.user_id, csrf: row.csrf, role: row.role } : null;
+  return row
+    ? { userId: row.user_id, csrf: row.csrf, role: row.role, handle: row.handle ?? null }
+    : null;
 }
 
 export async function requireUser(sql: SQL, req: Request): Promise<Session> {

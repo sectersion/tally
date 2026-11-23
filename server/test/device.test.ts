@@ -182,6 +182,27 @@ test("approval page escapes the device name", async () => {
   expect(html).toContain("&lt;script&gt;");
 });
 
+test("/device without a code shows the entry form; lowercase hyphenless codes are accepted", async () => {
+  const u = await user();
+  const { setCookie } = await createSession(sql, testConfig(), u.id);
+  const cookie = setCookie.split(";")[0] as string;
+  const form = await fetch(`${srv.url}/device`, { headers: { cookie } });
+  expect(form.status).toBe(200);
+  const t = await form.text();
+  expect(t).toContain('<form method="get" action="/device">');
+  expect(t).toContain('name="code"');
+  const c = await code();
+  const loose = (c.user_code as string).replace("-", "").toLowerCase();
+  const shown = await (
+    await fetch(`${srv.url}/device?code=${loose}`, { headers: { cookie } })
+  ).text();
+  expect(shown).toContain(`<strong>${c.user_code}</strong>`);
+  expect((await decideAs(u, ` ${loose} `)).status).toBe(200);
+  const [r] =
+    await sql`select user_id from device_codes where user_code = ${c.user_code as string}`;
+  expect(r.user_id).toBe(u.id);
+});
+
 test("device names are 1..64 chars and the body is strict", async () => {
   expect((await post("/v1/device/code", { device_name: "" })).status).toBe(400);
   expect((await post("/v1/device/code", { device_name: "x".repeat(65) })).status).toBe(400);

@@ -1,7 +1,13 @@
 import type { BunRequest, Server, SQL } from "bun";
 import { hashToken, newToken, requireToken } from "./auth.ts";
 import { type Config, MAX_BATCH, MAX_BODY_BYTES } from "./config";
-import { createDeviceCode, decide, pendingDevice, pollDeviceToken } from "./device.ts";
+import {
+  createDeviceCode,
+  decide,
+  normUserCode,
+  pendingDevice,
+  pollDeviceToken,
+} from "./device.ts";
 import { HttpError, json, parse, readJson } from "./errors.ts";
 import {
   accessibleRepos,
@@ -24,7 +30,23 @@ import {
   verifiedSeconds,
 } from "./ledger.ts";
 import { log } from "./log.ts";
-import { bumpChange, createProject, projectHours, setHandle, unique } from "./projects.ts";
+import {
+  deleteAccount,
+  homePage,
+  profilePage,
+  projectPage,
+  saveProfile,
+  settingsPage,
+  viewerOf,
+} from "./pages.ts";
+import {
+  bumpChange,
+  constraint,
+  createProject,
+  projectHours,
+  setHandle,
+  unique,
+} from "./projects.ts";
 import { createLimiter, type Limiter } from "./ratelimit.ts";
 import { CommitBody, DeviceCodeBody, DeviceTokenBody, UploadBody } from "./schema.ts";
 import {
@@ -34,6 +56,7 @@ import {
   cookieValue,
   createSession,
   GH_OAUTH_COOKIE,
+  getSession,
   ghOauthCookie,
   OAUTH_COOKIE,
   oauthCookie,
@@ -272,11 +295,48 @@ export function createServer(deps: Deps) {
           return redirect("/", [clearCookie(cfg)]);
         }),
       },
-      // Placeholder until the settings page lands: proves requireUser's login redirect.
+      "/": {
+        GET: handle("/", async (req) => homePage(sql, req, await getSession(sql, req))),
+      },
+      "/u/:handle": {
+        GET: handle("/u/:handle", async (req) =>
+          profilePage(sql, req.params.handle, await getSession(sql, req)),
+        ),
+      },
+      "/p/:owner/:name": {
+        GET: handle("/p/:owner/:name", async (req) =>
+          projectPage(
+            sql,
+            cfg,
+            req.params.owner,
+            req.params.name,
+            await getSession(sql, req),
+            fetchFn,
+          ),
+        ),
+      },
       "/settings": {
-        GET: handle("/settings", async (req) => {
+        GET: handle("/settings", async (req) =>
+          settingsPage(sql, req, await requireUser(sql, req)),
+        ),
+      },
+      "/settings/profile": {
+        POST: handle("/settings/profile", async (req) => {
           const s = await requireUser(sql, req);
-          return json(200, { user_id: s.userId });
+          const form = await formOf(req);
+          requireCsrf(cfg, req, s, form);
+          const err = await saveProfile(sql, s.userId, form);
+          return redirect(err ? `/settings?error=${err}` : "/settings");
+        }),
+      },
+      "/settings/delete": {
+        POST: handle("/settings/delete", async (req) => {
+          const s = await requireUser(sql, req);
+          const form = await formOf(req);
+          requireCsrf(cfg, req, s, form);
+          if (!(await deleteAccount(sql, s.userId, String(form.get("confirm") ?? ""))))
+            return redirect("/settings?error=confirm");
+          return redirect("/", [clearCookie(cfg)]);
         }),
       },
       "/settings/handle": {
@@ -314,14 +374,20 @@ export function createServer(deps: Deps) {
         GET: handle("/device", async (req) => {
           const s = await requireUser(sql, req);
           const code = new URL(req.url).searchParams.get("code") ?? "";
+          const viewer = viewerOf(s);
+          if (!code.trim())
+            return page(
+              "Link device",
+              html`<h1>Link a device</h1><form method="get" action="/device"><label>Code from your terminal <input name="code" required autocomplete="off" placeholder="XXXX-XXXX"></label> <button>Continue</button></form>`,
+              { viewer },
+            );
           const name = await pendingDevice(sql, code);
-          const viewer = { handle: null, csrf: s.csrf };
           if (name === null)
             return page("Link device", html`<p>This code is no longer valid</p>`, {
               status: 400,
               viewer,
             });
-          const c = code.trim().toUpperCase();
+          const c = normUserCode(code);
           return page(
             "Link device",
             html`<p>Link device '${name}' to your Tally account? Check that this code matches your terminal: <strong>${c}</strong></p>
@@ -336,7 +402,7 @@ export function createServer(deps: Deps) {
           requireCsrf(cfg, req, s, form);
           const d = form.get("decision");
           if (d !== "approve" && d !== "deny") throw new HttpError(400, { error: "bad_decision" });
-          const viewer = { handle: null, csrf: s.csrf };
+          const viewer = viewerOf(s);
           if (!(await decide(sql, String(form.get("user_code") ?? ""), s.userId, d === "approve")))
             return page("Link device", html`<p>This code is no longer valid</p>`, {
               status: 400,
@@ -356,7 +422,8 @@ export function createServer(deps: Deps) {
           const id = req.params.id;
           const rows = /^\d{1,15}$/.test(id)
             ? await sql`update device_tokens set revoked_at = now()
-                where id = ${id} and user_id = ${s.userId} and revoked_at is null returning id`
+                where id = ${id} and revoked_at is null and (user_id = ${s.userId}
+                  or project_id in (select id from projects where owner_id = ${s.userId})) returning id`
             : [];
           if (rows.length === 0) throw new HttpError(404, { error: "not_found" });
           return redirect("/settings");
@@ -474,7 +541,9 @@ export function createServer(deps: Deps) {
               throw new HttpError(409, {
                 error: mine
                   ? "repo already linked to this project"
-                  : "repo already linked to another project",
+                  : constraint(e) === "project_repos_one_per_project"
+                    ? "project already has a linked repo; unlink it first"
+                    : "repo already linked to another project",
               });
             }
             throw e;
@@ -541,10 +610,10 @@ export function createServer(deps: Deps) {
           await sql`update projects set public = ${form.get("public") === "on"} where id = ${p.id}`;
           return redirect(`/p/${p.public_name}/settings`);
         }),
-        // Placeholder HTML until Task 9 builds the real page; every value is escaped.
         GET: handle("/p/:owner/:name/settings", async (req) => {
           const s = await requireUser(sql, req);
           const p = await ownedProject(s.userId, req.params.owner, req.params.name);
+          const [{ public: isPublic }] = await sql`select public from projects where id = ${p.id}`;
           const linked = await sql`select r.id, r.full_name from project_repos l
             join github_repos r on r.id = l.github_repo_id
             where l.project_id = ${p.id} and l.unlinked_at is null`;
@@ -587,8 +656,9 @@ export function createServer(deps: Deps) {
           }
           return page(
             p.public_name,
-            html`<h1>${p.public_name}</h1><p>server id: ${p.id}</p><pre>${`tally project link <path> --server-id ${p.id}`}</pre>${repos}${upd}`,
-            { viewer: { handle: null, csrf: s.csrf } },
+            html`<h1>${p.public_name}</h1><p><a href="${action}">View the project page</a></p><p>server id: ${p.id}</p><pre>${`tally project link <path> --server-id ${p.id}`}</pre>
+<form method="post" action="${back}">${csrf}<label><input type="checkbox" name="public"${isPublic ? html` checked` : html``}> Public project</label> <button>Save</button></form>${repos}${upd}`,
+            { viewer: viewerOf(s) },
           );
         }),
       },
