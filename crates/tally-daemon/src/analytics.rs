@@ -22,8 +22,8 @@ use crate::store::StoreError;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use tally_scoring::caps::completes_fail_pass_loop;
-use tally_scoring::ruleset::LOOP_WINDOW_MS;
-use tally_scoring::{Actor, Event, Kind};
+use tally_scoring::ruleset::{FIRST_ACTION_MS, LOOP_WINDOW_MS, MAX_INTERVAL_MS};
+use tally_scoring::{Actor, Event, Kind, LedgerEntry};
 
 pub const AFTER_FAILURE_MS: i64 = 300_000;
 pub const INFORMED_PM: u16 = 300;
@@ -185,6 +185,153 @@ pub fn prompts_after_failure_for(snap: &Snapshot, from_ts: i64, to_ts: i64) -> R
     Ok(prompts_after_failure(&events, from_ts, to_ts))
 }
 
+#[derive(Serialize, Debug, PartialEq, Default, Clone)]
+pub struct Seconds {
+    pub verified_s: u64,
+    pub unverified_s: u64,
+    pub removed_s: u64,
+    pub claims: u32,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct DayProject {
+    pub day: usize,
+    pub project: Option<String>,
+    pub seconds: Seconds,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct RemovedReason {
+    pub reason: String,
+    pub claims: u32,
+    pub seconds: u64,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct SkippedDay {
+    pub day: usize,
+    pub claims: u32,
+    pub seconds: u64,
+}
+
+/// Verified and unverified are separate fields everywhere and are never added together.
+/// `no_presence` (claims with no presence coverage) is in none of the totals.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct Hours {
+    pub days: Vec<DayProject>,
+    pub totals: Seconds,
+    pub removed_by: Vec<RemovedReason>,
+    pub capped: RemovedReason,
+    pub no_presence: RemovedReason,
+    pub no_presence_days: Vec<SkippedDay>,
+    pub protected_claims: u32,
+    pub away_runs: u32,
+}
+
+/// Index `i` with `edges[i] <= ts < edges[i+1]`, `None` outside.
+pub fn day_index(edges: &[i64], ts: i64) -> Option<usize> {
+    if edges.len() < 2 || ts < edges[0] || ts >= edges[edges.len() - 1] {
+        return None;
+    }
+    Some(edges.partition_point(|&e| e <= ts) - 1)
+}
+
+/// The scorer's interval for a claim at `ts` after a previous human action at `prev`.
+fn interval_s(prev: Option<i64>, ts: i64) -> i64 {
+    match prev {
+        Some(p) if ts - p <= MAX_INTERVAL_MS => (ts - p) / 1000,
+        _ => FIRST_ACTION_MS / 1000,
+    }
+}
+
+/// `entries` consecutive ledger rows in the window, `skipped` the `ts` of skipped claims in the window (ascending),
+/// `prev_ts` the `ts` of the human action (ledger or skipped) before the window's first one. A claim belongs to the
+/// day of its `ts`, so an interval crossing midnight counts wholly toward the later day.
+pub fn hours(entries: &[(u64, LedgerEntry)], skipped: &[i64], prev_ts: Option<i64>, edges: &[i64]) -> Hours {
+    let mut by_day: BTreeMap<(usize, Option<String>), Seconds> = BTreeMap::new();
+    let mut totals = Seconds::default();
+    let mut removed_by: BTreeMap<String, (u32, u64)> = BTreeMap::new();
+    let mut skipped_days: BTreeMap<usize, (u32, u64)> = BTreeMap::new();
+    let mut capped = (0u32, 0u64);
+    let mut no_presence = (0u32, 0u64);
+    let (mut protected_claims, mut away_runs) = (0, 0);
+    // merge by ts; on a tie the ledger entry comes first
+    let (mut i, mut j, mut prev) = (0, 0, prev_ts);
+    while i < entries.len() || j < skipped.len() {
+        let take_ledger = j >= skipped.len() || (i < entries.len() && entries[i].1.ts <= skipped[j]);
+        let ts = if take_ledger { entries[i].1.ts } else { skipped[j] };
+        let interval = interval_s(prev, ts);
+        let day = day_index(edges, ts);
+        if take_ledger {
+            let e = &entries[i].1;
+            i += 1;
+            let has = |r: &str| e.reasons.iter().any(|x| x == r);
+            let removed = (interval - i64::from(e.verified_s) - i64::from(e.unverified_s)).max(0) as u64;
+            if let Some(d) = day {
+                let s = by_day.entry((d, e.project.clone())).or_default();
+                s.verified_s += u64::from(e.verified_s);
+                s.unverified_s += u64::from(e.unverified_s);
+                s.removed_s += removed;
+                s.claims += 1;
+                totals.verified_s += u64::from(e.verified_s);
+                totals.unverified_s += u64::from(e.unverified_s);
+                totals.removed_s += removed;
+                totals.claims += 1;
+                if removed > 0 {
+                    let mut why: Vec<&str> = ["agent_busy_subtracted", "idle_subtracted"].into_iter().filter(|r| has(r)).collect();
+                    if why.is_empty() {
+                        why.push("unexplained");
+                    }
+                    let row = removed_by.entry(why.join("+")).or_default();
+                    row.0 += 1;
+                    row.1 += removed;
+                }
+                if has("capped") {
+                    capped.0 += 1;
+                    capped.1 += u64::from(e.unverified_s);
+                }
+                protected_claims += u32::from(has("read_protected") || has("think_protected"));
+                away_runs += u32::from(has("first_action") && prev.is_some());
+            }
+        } else {
+            j += 1;
+            if let Some(d) = day {
+                no_presence.0 += 1;
+                no_presence.1 += interval as u64;
+                let row = skipped_days.entry(d).or_default();
+                row.0 += 1;
+                row.1 += interval as u64;
+            }
+        }
+        prev = Some(ts);
+    }
+    let row = |reason: &str, (claims, seconds): (u32, u64)| RemovedReason { reason: reason.into(), claims, seconds };
+    Hours {
+        days: by_day.into_iter().map(|((day, project), seconds)| DayProject { day, project, seconds }).collect(),
+        totals,
+        removed_by: removed_by.into_iter().map(|(k, v)| row(&k, v)).collect(),
+        capped: row("capped", capped),
+        no_presence: row("no_presence_coverage", no_presence),
+        no_presence_days: skipped_days.into_iter().map(|(day, (claims, seconds))| SkippedDay { day, claims, seconds }).collect(),
+        protected_claims,
+        away_runs,
+    }
+}
+
+/// Reads only the ledger rows and skipped claims inside `[edges[0], edges.last())`.
+pub fn hours_for(snap: &Snapshot, edges: &[i64]) -> Result<Hours, StoreError> {
+    let (Some(&lo), Some(&hi)) = (edges.first(), edges.last()) else { return Ok(hours(&[], &[], None, edges)) };
+    let (a, b) = (snap.ledger_seq_at_or_after(lo)?, snap.ledger_seq_at_or_after(hi)?);
+    let entries = snap.ledger_range(a, b)?;
+    let skipped: Vec<i64> = snap.skipped_in(lo, hi)?.into_iter().map(|s| s.1).collect();
+    let first = entries.first().map(|e| e.1.ts).into_iter().chain(skipped.first().copied()).min();
+    let prev_ts = match first {
+        Some(t) => snap.last_human_ts_before(t)?,
+        None => None,
+    };
+    Ok(hours(&entries, &skipped, prev_ts, edges))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,6 +450,122 @@ mod tests {
         assert_eq!(bugs_of(&evs, &[], 4_500_000, 5_000_000).fixed, 0);
     }
 
+    fn claim(seq: u64, ts_s: i64, verified: u32, unverified: u32, reasons: &[&str]) -> (u64, LedgerEntry) {
+        (seq, LedgerEntry {
+            v: 1, ruleset: "r".into(), action_id: format!("a{seq}"), ts: ts_s * 1000, project: Some("p1".into()), kind: "prompt".into(),
+            verified_s: verified, unverified_s: unverified, reasons: reasons.iter().map(|s| s.to_string()).collect(),
+            features: Default::default(), prev_hash: String::new(), hash: format!("h{seq}"),
+        })
+    }
+    const WIDE: [i64; 2] = [0, 1_000_000_000];
+    #[test]
+    fn day_index_respects_edges_exactly() {
+        let e = [0, 100, 200];
+        assert_eq!([0, 99, 100, 199, 200, -1].map(|t| day_index(&e, t)), [Some(0), Some(0), Some(1), Some(1), None, None]);
+    }
+    #[test]
+    fn a_claim_one_millisecond_apart_lands_on_different_days_on_a_23_hour_day() {
+        let e = [0, 82_800_000, 82_800_000 + 86_400_000];
+        assert_eq!((day_index(&e, 82_799_999), day_index(&e, 82_800_000)), (Some(0), Some(1)));
+    }
+    #[test]
+    fn removed_seconds_come_from_the_gap_to_the_previous_claim() {
+        let h = hours(&[claim(1, 600, 300, 0, &["idle_subtracted"])], &[], Some(0), &WIDE);
+        assert_eq!(h.totals.removed_s, 300);
+        assert_eq!(h.removed_by, vec![RemovedReason { reason: "idle_subtracted".into(), claims: 1, seconds: 300 }]);
+    }
+    #[test]
+    fn first_action_uses_the_fixed_interval_and_counts_away_runs() {
+        let h = hours(&[claim(1, 10, 100, 0, &["first_action"]), claim(2, 10_000, 90, 0, &["first_action"])], &[], None, &WIDE);
+        assert_eq!(h.totals.removed_s, 20 + 30);
+        assert_eq!(h.away_runs, 1);
+    }
+    #[test]
+    fn capped_seconds_are_unverified_not_removed() {
+        let h = hours(&[claim(1, 300, 90, 210, &["capped"])], &[], Some(0), &WIDE);
+        assert_eq!((h.totals.removed_s, h.capped.seconds, h.capped.claims), (0, 210, 1));
+    }
+    #[test]
+    fn verified_and_unverified_are_never_merged() {
+        let h = hours(&[claim(1, 100, 100, 0, &[]), claim(2, 200, 0, 100, &["capped"])], &[], Some(0), &WIDE);
+        assert_eq!((h.totals.verified_s, h.totals.unverified_s), (100, 100));
+        assert_eq!((h.days[0].seconds.verified_s, h.days[0].seconds.unverified_s), (100, 100));
+    }
+    #[test]
+    fn the_interval_matches_the_scorer_within_one_second_per_claim() {
+        let mut evs = Vec::new();
+        for i in 0..30i64 {
+            let t = (i * 200 + if i >= 15 { 10_000 } else { 0 }) * 1000;
+            evs.push(prompt(&format!("p{i:02}"), t, if i % 3 == 0 { 700 } else { 100 }));
+            evs.push(ev(&format!("e{i:02}"), t + 90_000, Kind::UserEdit { file_hash: "f".into(), lines_changed: 3 }));
+            evs.push(ev(&format!("o{i:02}"), t + 1000, Kind::AgentOutput { chars: 4000 }));
+            if i % 4 == 0 {
+                evs.push(ev(&format!("b{i:02}"), t + 5000, Kind::AgentBusy { end_ts: t + 80_000 }));
+            }
+            if i % 5 == 0 {
+                evs.push(ev(&format!("i{i:02}"), t + 20_000, Kind::Idle { end_ts: t + 190_000 }));
+            }
+        }
+        let claims = score(&evs);
+        let rows: Vec<(u64, LedgerEntry)> = tally_scoring::chain(&claims, tally_scoring::GENESIS_HASH).into_iter().enumerate().map(|(i, e)| (i as u64 + 1, e)).collect();
+        let h = hours(&rows, &[], None, &WIDE);
+        let mut prev = None;
+        let mut interval_sum = 0;
+        for (_, e) in &rows {
+            interval_sum += interval_s(prev, e.ts);
+            prev = Some(e.ts);
+        }
+        let got = (h.totals.verified_s + h.totals.unverified_s + h.totals.removed_s) as i64;
+        let n = rows.len() as i64;
+        assert!(got >= interval_sum && got - interval_sum <= n, "{got} vs {interval_sum}");
+        let unexplained = h.removed_by.iter().find(|r| r.reason == "unexplained").map_or(0, |r| r.seconds);
+        assert!(unexplained <= n as u64, "{unexplained}");
+    }
+    #[test]
+    fn a_project_with_no_claims_gives_empty_hours() {
+        let h = hours(&[], &[], None, &[0, 100]);
+        assert!(h.days.is_empty() && h.removed_by.is_empty());
+        assert_eq!((h.totals, h.no_presence.seconds, h.no_presence.claims), (Seconds::default(), 0, 0));
+    }
+    #[test]
+    fn a_skipped_claim_is_its_own_row_and_is_the_previous_action_of_the_next_claim() {
+        let h = hours(&[claim(1, 0, 120, 0, &[]), claim(2, 360, 55, 0, &["idle_subtracted"])], &[300_000], None, &WIDE);
+        // B's interval is 60 s from the skipped claim at 300 s, not 360 s from A: removed 5
+        assert_eq!(h.totals.removed_s, 5);
+        assert_eq!((h.no_presence.claims, h.no_presence.seconds), (1, 300));
+        assert_eq!(h.totals.verified_s, 175);
+        assert!(h.removed_by.iter().all(|r| r.reason != "no_presence_coverage"));
+        assert_eq!(h.no_presence_days, vec![SkippedDay { day: 0, claims: 1, seconds: 300 }]);
+    }
+    fn file_store(ledger_ts: &[i64], skipped: &[i64]) -> Store {
+        let s = Store::open_in_memory().unwrap();
+        for (i, t) in ledger_ts.iter().enumerate() {
+            let e = claim(i as u64 + 1, *t, 10, 0, &[]).1;
+            s.conn.execute("INSERT INTO ledger(hash, entry_json) VALUES (?1, ?2)", rusqlite::params![e.hash, serde_json::to_string(&e).unwrap()]).unwrap();
+        }
+        for (i, t) in skipped.iter().enumerate() {
+            s.conn.execute("INSERT INTO skipped_claims VALUES (?1, ?2, 'no_presence_coverage')", rusqlite::params![format!("s{i}"), t * 1000]).unwrap();
+        }
+        s
+    }
+    #[test]
+    fn skipped_claims_before_the_window_still_set_prev_ts() {
+        let mut s = file_store(&[1000, 1100], &[990]);
+        let snap = s.snapshot().unwrap();
+        // window starts at 995 s: the claim at 1000 s follows the skipped claim at 990 s (interval 10 s, not 120 s)
+        let h = hours_for(&snap, &[995_000, 2_000_000]).unwrap();
+        assert_eq!(h.totals.claims, 2);
+        assert_eq!(h.totals.removed_s, 90); // 10 s interval: 0 removed; 100 s interval: 90 removed
+    }
+    #[test]
+    fn hours_for_reads_only_the_window() {
+        let mut s = file_store(&[100, 200, 100_000, 100_100, 200_000, 200_100], &[]);
+        let snap = s.snapshot().unwrap();
+        let h = hours_for(&snap, &[90_000_000, 190_000_000]).unwrap();
+        assert_eq!(h.totals.claims, 2);
+        // the first row follows the previous day's last action (200 s) by over an hour: 120 s interval, then 100 s
+        assert_eq!(h.totals.removed_s, 110 + 90);
+    }
     fn pr(id: &str, ms: i64, rel: u16) -> Event {
         prompt(id, ms, rel)
     }
