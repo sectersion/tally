@@ -267,6 +267,9 @@ fn main() -> Result<()> {
                     tally_daemon::sync::SyncError::Api(tally_daemon::api::ApiError::Unauthorized) => {
                         eprintln!("{p}: device token rejected; run tally login --server-id {id}")
                     }
+                    e @ tally_daemon::sync::SyncError::Api(tally_daemon::api::ApiError::Rejected { .. }) => {
+                        eprintln!("{p}: {e}; run tally repair")
+                    }
                     e => eprintln!("{p}: {e}"),
                 }
             };

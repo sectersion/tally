@@ -96,7 +96,9 @@ impl Api {
     }
 
     pub fn head(&self, server_id: &str, ruleset: &str) -> Result<Head, ApiError> {
-        assert!(ruleset.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-'));
+        if !ruleset.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-') {
+            return Err(ApiError::Rejected { index: 0, reason: "bad ruleset name".into() });
+        }
         let url = format!("{}/v1/ledger/{server_id}/head?ruleset={ruleset}", self.base);
         Self::parse_head(self.send(self.agent.get(&url), None)?)
     }

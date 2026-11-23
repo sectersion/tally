@@ -299,6 +299,43 @@ fn sync_all_uploads_nothing_when_the_ledger_diverges() {
 }
 
 #[test]
+fn a_ruleset_bump_still_uploads_the_old_chains_tail() {
+    let f = FakeServer::start("tok");
+    let mut s = Store::open_in_memory().unwrap();
+    s.register_project("p1", "C:/r", Some("owner/repo")).unwrap();
+    s.set_server_id("p1", "srv_1").unwrap();
+    let local = chain_of_ruleset(3, "old-0")
+        .into_iter()
+        .map(|mut e| {
+            e.project = Some("p1".into());
+            e
+        })
+        .collect::<Vec<_>>();
+    let mut prev = GENESIS_HASH.to_string();
+    let local: Vec<_> = local
+        .into_iter()
+        .map(|mut e| {
+            e.prev_hash = prev.clone();
+            e.hash = tally_scoring::ledger::entry_hash(&e);
+            prev = e.hash.clone();
+            e
+        })
+        .collect();
+    s.append_ledger(&local, 5, 0, &[]).unwrap();
+    let published = tally_daemon::published::pending(&s).unwrap();
+    f.set_chain("srv_1", "old-0", published[..1].iter().map(|r| r.entry.clone()).collect());
+    let out = sync_all(&mut s, &f.url, &tokens());
+    assert!(matches!(&out[..], [(_, Ok(c))] if c.ruleset == "old-0" && c.uploaded == 2), "{out:?}");
+    assert_eq!(f.chain("srv_1", "old-0").len(), 3);
+}
+
+#[test]
+fn a_malformed_ruleset_is_an_error_not_a_panic() {
+    let f = FakeServer::start("tok");
+    assert!(matches!(Api::new(&f.url, "tok").head("srv_1", "a&b"), Err(ApiError::Rejected { .. })));
+}
+
+#[test]
 fn two_server_ids_for_one_public_name_is_refused() {
     let f = FakeServer::start("tok");
     let mut s = Store::open_in_memory().unwrap();

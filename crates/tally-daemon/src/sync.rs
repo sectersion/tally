@@ -132,8 +132,7 @@ pub fn sync_once(
 /// What `sync_all` would upload, from one `GET /head` per chain; stores and uploads nothing.
 /// `ChainReport::uploaded` is the count still to upload.
 pub fn dry_run(store: &mut Store, server: &str, tokens: &BTreeMap<String, String>) -> Vec<Labeled<ChainReport>> {
-    let prepared = finalize::check_derivation(store)
-        .map_err(SyncError::from)
+    let prepared = ruleset_ok(finalize::check_derivation(store))
         .and_then(|_| Ok(published::sync(store, false)?))
         .and_then(|pending| Ok((pending, store.server_ids()?)));
     let (pending, links) = match prepared {
@@ -147,8 +146,16 @@ pub fn dry_run(store: &mut Store, server: &str, tokens: &BTreeMap<String, String
     out
 }
 
+/// A ruleset bump is not a divergence: the old chain's tail must still upload (as in `repair::diagnose`).
+fn ruleset_ok(r: Result<(), finalize::FinalizeError>) -> Result<(), SyncError> {
+    match r {
+        Err(finalize::FinalizeError::RulesetChanged { .. }) => Ok(()),
+        r => Ok(r?),
+    }
+}
+
 fn prepare(store: &mut Store) -> Result<BTreeMap<String, Vec<String>>, SyncError> {
-    finalize::check_derivation(store)?;
+    ruleset_ok(finalize::check_derivation(store))?;
     published::sync(store, true)?;
     Ok(store.server_ids()?)
 }

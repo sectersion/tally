@@ -40,6 +40,11 @@ pub fn delete_token(home: &Path, server_id: &str) -> io::Result<bool> {
 
 fn write_all(home: &Path, all: &BTreeMap<String, String>) -> io::Result<()> {
     let tmp = home.join("device_tokens.tmp");
+    // A stale file would keep its old mode; mode() only applies on creation.
+    match std::fs::remove_file(&tmp) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
     let mut o = std::fs::OpenOptions::new();
     o.write(true).create(true).truncate(true);
     #[cfg(unix)]
