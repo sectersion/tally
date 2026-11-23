@@ -11,7 +11,7 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("event {id} at ts {ts} is at or before finalized_through {finalized_through}")]
+    #[error("late event {id} at ts {ts} is at or before finalized_through {finalized_through}")]
     LateEvent { id: String, ts: i64, finalized_through: i64 },
     #[error("ledger chain broken: first entry does not extend the stored chain")]
     ChainBroken,

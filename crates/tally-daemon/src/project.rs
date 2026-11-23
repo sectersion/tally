@@ -72,6 +72,6 @@ mod tests {
     #[test]
     fn no_git_root_in_plain_directory() {
         let t = tempfile::tempdir().unwrap();
-        assert!(find_git_root(t.path()).map_or(true, |r| !r.starts_with(t.path())));
+        assert!(find_git_root(t.path()).is_none_or(|r| !r.starts_with(t.path())));
     }
 }
