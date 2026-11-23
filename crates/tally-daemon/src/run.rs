@@ -76,9 +76,16 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
     r
 }
 
-/// The sources for this config. Empty until the Claude Code source lands.
-pub fn sources(_cfg: &Config, _home: &Path, _store: &Store) -> Vec<Box<dyn Source>> {
-    vec![]
+/// The sources for this config. Claude Code reads `projects_dir`, default `~/.claude/projects`.
+pub fn sources(cfg: &Config, _home: &Path, _store: &Store) -> Vec<Box<dyn Source>> {
+    let mut v: Vec<Box<dyn Source>> = vec![];
+    let cc = &cfg.claude_code;
+    if let Some(dir) = cc.projects_dir.clone().or_else(|| dirs::home_dir().map(|h| h.join(".claude").join("projects"))) {
+        if cc.enabled {
+            v.push(Box::new(crate::claude_code::ClaudeCode::new(dir)));
+        }
+    }
+    v
 }
 
 /// The per-tick hooks. Empty until daily publish and sync land.

@@ -56,15 +56,7 @@ impl Session {
     /// arrives while a human turn is open closes that turn early; accepted (README D4).
     pub fn feed(&mut self, e: Entry, ctx: &Ctx, out: &mut Vec<Event>) {
         let prev_seen = self.last_seen_ts;
-        let m = match &e {
-            Entry::HumanPrompt { meta, .. }
-            | Entry::Interrupt { meta }
-            | Entry::ToolDecision { meta, .. }
-            | Entry::ToolResult { meta, .. }
-            | Entry::AssistantText { meta, .. }
-            | Entry::ToolUse { meta, .. }
-            | Entry::TurnEnd { meta } => meta,
-        };
+        let m = e.meta();
         self.last_seen_ts = self.last_seen_ts.max(m.ts);
         let ev = |uuid: &str, suffix: &str, ts: i64, kind: Kind| event(&m.session, uuid, suffix, ts, &ctx.project, kind);
         match &e {

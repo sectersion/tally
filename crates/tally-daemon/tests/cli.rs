@@ -104,7 +104,7 @@ fn a_bad_event_line_names_its_line_number() {
 }
 
 #[test]
-fn run_once_with_no_sources_finalizes_and_exits() {
+fn run_once_with_an_empty_projects_dir_finalizes_and_exits() {
     let t = tempfile::tempdir().unwrap();
     let home = t.path().join("home");
     std::fs::create_dir_all(&home).unwrap();

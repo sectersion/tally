@@ -16,11 +16,18 @@ pub enum ProjectError {
 /// stores the canonical, normalized root and returns its local project id.
 /// `public_name = None` keeps an existing name.
 pub fn register_git_project(store: &mut Store, path: &Path, public_name: Option<&str>) -> Result<String, ProjectError> {
-    let root = find_git_root(&std::fs::canonicalize(path)?).ok_or(ProjectError::NotGit)?;
-    let root = normalize_path(&root.to_string_lossy());
-    let id = project_id_from_normalized(&root);
-    store.register_project(&id, &root, public_name)?;
+    std::fs::canonicalize(path)?; // a missing path is an Io error, not NotGit
+    let (root, id) = project_for_dir(path).ok_or(ProjectError::NotGit)?;
+    store.register_project(&id, &normalize_path(&root.to_string_lossy()), public_name)?;
     Ok(id)
+}
+
+/// Local project id of the git repository containing `dir`, without registering it. `None` outside git
+/// or when `dir` does not exist. The root is canonical (not normalized).
+pub fn project_for_dir(dir: &Path) -> Option<(PathBuf, String)> {
+    let root = find_git_root(&std::fs::canonicalize(dir).ok()?)?;
+    let id = project_id_from_normalized(&normalize_path(&root.to_string_lossy()));
+    Some((root, id))
 }
 
 /// Pure string normalization, identical on every OS (no `std::path`).
@@ -116,6 +123,16 @@ mod tests {
         let root: String = s.conn.query_row("SELECT root FROM projects WHERE local_id = ?1", [&id], |r| r.get(0)).unwrap();
         assert_eq!(root, normalize_path(&std::fs::canonicalize(&repo).unwrap().to_string_lossy()));
         assert!(Path::new(&root).is_absolute(), "{root}");
+    }
+    #[test]
+    fn project_for_dir_matches_project_id_and_needs_an_existing_dir() {
+        let t = tempfile::tempdir().unwrap();
+        let sub = t.path().join("a");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir(t.path().join(".git")).unwrap();
+        let root = std::fs::canonicalize(t.path()).unwrap();
+        assert_eq!(project_for_dir(&sub), Some((root, project_id(t.path()).unwrap())));
+        assert_eq!(project_for_dir(&t.path().join("missing")), None);
     }
     #[test]
     fn no_git_root_in_plain_directory() {

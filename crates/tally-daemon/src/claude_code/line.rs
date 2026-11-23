@@ -23,6 +23,20 @@ pub enum Entry {
     TurnEnd { meta: Meta },
 }
 
+impl Entry {
+    pub fn meta(&self) -> &Meta {
+        match self {
+            Entry::HumanPrompt { meta, .. }
+            | Entry::Interrupt { meta }
+            | Entry::ToolDecision { meta, .. }
+            | Entry::ToolResult { meta, .. }
+            | Entry::AssistantText { meta, .. }
+            | Entry::ToolUse { meta, .. }
+            | Entry::TurnEnd { meta } => meta,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum LineError {
     Utf8,
