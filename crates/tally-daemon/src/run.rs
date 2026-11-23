@@ -1,7 +1,11 @@
 //! One tick of the daemon: poll sources, persist, finalize, run hooks.
 use crate::finalize::{finalize, FinalizeSummary};
-use crate::source::Source;
+use crate::config::Config;
+use crate::source::{now_ms, Source};
 use crate::store::{Store, StoreError};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 #[derive(thiserror::Error, Debug)]
 #[error("{0}")]
@@ -70,6 +74,35 @@ pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut 
         }
     }
     r
+}
+
+/// The sources for this config. Empty until the Claude Code source lands.
+pub fn sources(_cfg: &Config, _home: &Path, _store: &Store) -> Vec<Box<dyn Source>> {
+    vec![]
+}
+
+/// The per-tick hooks. Empty until daily publish and sync land.
+pub fn hooks(_cfg: &Config, _home: &Path) -> Vec<TickHook> {
+    vec![]
+}
+
+/// Tick every `cfg.run.interval_secs` until `stop` is set. The current tick always completes.
+pub fn run_loop(store: &mut Store, cfg: &Config, home: &Path, stop: &AtomicBool) {
+    let mut srcs = sources(cfg, home, store);
+    let mut hks = hooks(cfg, home);
+    while !stop.load(Ordering::Relaxed) {
+        for e in run_once(store, &mut srcs, &mut hks, now_ms()).errors {
+            eprintln!("{e}");
+        }
+        let deadline = Instant::now() + Duration::from_secs(cfg.run.interval_secs);
+        while !stop.load(Ordering::Relaxed) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            std::thread::sleep(left.min(Duration::from_millis(200)));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -156,5 +189,15 @@ mod tests {
         assert_eq!(r.errors, ["hook: nope"]);
         assert_eq!(*seen.borrow(), [7, 7]);
         assert!(r.finalized.is_some());
+    }
+    #[test]
+    fn run_loop_returns_when_stopped() {
+        let stop = std::sync::atomic::AtomicBool::new(true);
+        let d = tempfile::tempdir().unwrap();
+        let mut s = Store::open_in_memory().unwrap();
+        let mut cfg = Config::default();
+        cfg.run.interval_secs = 3600;
+        cfg.claude_code.enabled = false;
+        run_loop(&mut s, &cfg, d.path(), &stop);
     }
 }

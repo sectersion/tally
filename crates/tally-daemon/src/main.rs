@@ -1,6 +1,10 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tally_daemon::config;
+use tally_daemon::run::{hooks, run_loop, run_once, sources};
+use tally_daemon::source::now_ms;
 use tally_daemon::finalize::finalize;
 use tally_daemon::status::{status, verify_ledger, VerifyError};
 use tally_daemon::store::Store;
@@ -43,7 +47,18 @@ enum Cmd {
     Finalize,
     Status,
     Verify,
+    /// Poll the sources and finalize every `run.interval_secs` until interrupted.
+    Run {
+        /// Overrides `run.interval_secs` from config.toml.
+        #[arg(long)]
+        interval_secs: Option<u64>,
+        /// Do one tick, print the result and exit.
+        #[arg(long)]
+        once: bool,
+    },
 }
+
+static STOP: AtomicBool = AtomicBool::new(false);
 
 #[derive(Subcommand)]
 enum ProjectCmd {
@@ -61,7 +76,7 @@ fn main() -> Result<()> {
         None => dirs::data_local_dir().ok_or_else(|| anyhow!("no local data directory; pass --home"))?.join("tally"),
     };
     let db = home.join("tally.db");
-    if matches!(cli.cmd, Cmd::Ingest { .. } | Cmd::Project { .. }) {
+    if matches!(cli.cmd, Cmd::Ingest { .. } | Cmd::Project { .. } | Cmd::Run { .. }) {
         std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
     } else if !db.exists() {
         bail!("no database at {}; run `tally ingest` or `tally project add` first", db.display());
@@ -69,6 +84,25 @@ fn main() -> Result<()> {
     let mut store = Store::open(&db)?;
 
     match cli.cmd {
+        Cmd::Run { interval_secs, once } => {
+            let mut cfg = config::load(&home)?;
+            if let Some(n) = interval_secs {
+                cfg.run.interval_secs = n;
+            }
+            if once {
+                let mut srcs = sources(&cfg, &home, &store);
+                let r = run_once(&mut store, &mut srcs, &mut hooks(&cfg, &home), now_ms());
+                for e in &r.errors {
+                    eprintln!("{e}");
+                }
+                let (total, prov) = r.finalized.map_or((0, 0), |f| (f.final_total, f.provisional));
+                println!("added {}, duplicates {}, final {total}, provisional {prov}", r.added, r.duplicates);
+            } else {
+                ctrlc::set_handler(|| STOP.store(true, Ordering::Relaxed)).context("installing the Ctrl-C handler")?;
+                run_loop(&mut store, &cfg, &home, &STOP);
+                println!("stopped");
+            }
+        }
         Cmd::Ingest { file, source, watermark } => {
             let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
             let s = ingest_ndjson(&mut store, &text, &source, watermark)?;
