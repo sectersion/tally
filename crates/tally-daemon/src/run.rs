@@ -143,9 +143,15 @@ pub fn sources(cfg: &Config, home: &Path, store: &mut Store) -> Result<Vec<Box<d
     Ok(v)
 }
 
-/// The per-tick hooks. Empty until daily publish and sync land.
-pub fn hooks(_cfg: &Config, _home: &Path) -> Vec<TickHook> {
-    vec![]
+/// The per-tick hooks: daily publish (plan 07 appends sync after it).
+pub fn hooks(cfg: &Config, home: &Path) -> Vec<TickHook> {
+    let publish = cfg.publish.clone();
+    let home = home.to_path_buf();
+    let mut scheduler = crate::publish::Scheduler::new();
+    vec![Box::new(move |store, now_ms| {
+        scheduler.tick(store, &publish, &home, crate::publish::local_day_number(chrono::Local::now()), now_ms);
+        Ok(())
+    })]
 }
 
 /// Seconds between ticks: 0 would busy-loop and a huge value overflows `Instant`, so 1 s to 24 h.
@@ -340,6 +346,19 @@ mod tests {
         cfg.claude_code.enabled = false;
         cfg.presence.enabled = false;
         run_loop(&mut s, &cfg, d.path(), &stop).unwrap();
+    }
+    #[test]
+    fn a_disabled_publish_hook_makes_no_git_call() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = Store::open_in_memory().unwrap();
+        let mut cfg = Config::default();
+        cfg.publish.enabled = false;
+        cfg.publish.remote = Some(d.path().join("nope").to_string_lossy().into_owned());
+        let mut hks = hooks(&cfg, d.path());
+        let r = run_once(&mut s, &mut [], &mut hks, 0);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(!d.path().join("publish").exists());
+        assert_eq!(s.meta_get("last_publish_day").unwrap(), None);
     }
     #[test]
     fn a_run_config_write_failure_is_fatal_for_sources() {

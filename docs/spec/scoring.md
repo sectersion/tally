@@ -99,7 +99,7 @@ Computed locally on prompt text, which is then discarded.
   "ruleset": "2026.11-0",
   "action_id": "01J...",
   "ts": 1763800000000,
-  "project": "<server project id>",
+  "project": "<public project name, e.g. sectersion/tally>",
   "kind": "prompt",
   "verified_s": 412,
   "unverified_s": 0,
@@ -109,6 +109,8 @@ Computed locally on prompt text, which is then discarded.
   "hash": "<hex>"
 }
 ```
+
+The `project` field is the public project name, set before chaining, and is never rewritten; the server keeps its own project id separately.
 
 `hash = SHA-256(canonical JSON of the entry without "hash")`. Canonical JSON: sorted keys, no whitespace, integers only. The daemon commits the latest hash to the server every `COMMIT_INTERVAL_S`.
 

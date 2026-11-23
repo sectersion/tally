@@ -8,6 +8,7 @@ pub struct Config {
     pub run: RunConfig,
     pub claude_code: ClaudeCodeConfig,
     pub presence: PresenceConfig,
+    pub publish: crate::publish::PublishConfig,
 }
 
 /// `require: None` means "same as `enabled`".

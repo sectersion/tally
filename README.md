@@ -1,5 +1,7 @@
 # Tally
 
+[![tracked with Tally](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fsectersion%2Ftally%2Ftally-data%2Fsectersion%2Ftally%2Fbadge.json)](https://github.com/sectersion/tally/tree/tally-data/sectersion/tally)
+
 **Open-source AI time tracking that counts the hours of human decisions, not agent activity.**
 
 Tally passively measures the hours of *productive struggle* you spend building projects with AI. Hackatime counts how active your editor (and your AI agent) is. Tally counts how often **you** decide something, and how long you spent getting to that decision.
@@ -22,6 +24,23 @@ Tally passively measures the hours of *productive struggle* you spend building p
 ## Why keep it installed
 
 A local dashboard focused on getting better at building with AI: bugs fixed, time from failure to fix, how often your prompts used what you learned from running the code, and replays of your sessions. Public profiles show verified hours next to linked commits.
+
+## How this badge is made
+
+The number is verified hours only, all-time for this repository, counted from the day the daemon first ran on the maintainer's machine (2026-11-23). Earlier work, and time while the daemon was off, are not counted.
+
+The `tally-data` branch holds `sectersion/tally/badge.json` and `sectersion/tally/ledger-<ruleset>.json`. They update about once a day, and the badge can lag up to about 15 minutes behind a publish because of caching.
+
+To check the ledger yourself (no daemon or account needed):
+
+```
+curl -LO https://raw.githubusercontent.com/sectersion/tally/tally-data/sectersion/tally/ledger-2026.11-0.json
+tally verify-published ledger-2026.11-0.json
+```
+
+Expected output: `ok: ledger-2026.11-0.json: N entries, project sectersion/tally, ruleset 2026.11-0, verified_hours N.N`.
+
+This proves the chain is intact and the hours add up. A ledger holds claims, not events, so it cannot be re-scored. Each entry's timestamp is public and permanent in the branch history. A new ruleset starts a new file, and the badge sums all files.
 
 ## Planned stack
 
