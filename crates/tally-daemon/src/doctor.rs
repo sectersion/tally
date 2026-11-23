@@ -25,6 +25,8 @@ pub struct HarnessHealth {
     pub skipped: usize,
     pub format: String,
     pub status: Status,
+    /// Source-specific counters (heartbeat: accepted, dropped_agent, ...).
+    pub counters: Vec<(String, u64)>,
 }
 
 /// 1000 * errors / max(records, 1)
@@ -55,6 +57,7 @@ fn from_health(source: &str, h: &Health) -> HarnessHealth {
         skipped: h.skipped,
         format: h.format.clone(),
         status: status_of(h),
+        counters: h.counters.clone(),
     }
 }
 
@@ -78,7 +81,8 @@ pub fn line(h: &HarnessHealth) -> String {
         .and_then(chrono::DateTime::from_timestamp_millis)
         .map_or("never".to_string(), |t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
     let format = if h.format.is_empty() { "-" } else { &h.format };
-    format!("{}  {}  files={}  last={}  format={}  errors={}/{}", h.source, status, h.files_found, last, format, h.errors, h.records)
+    let counters: String = h.counters.iter().map(|(k, v)| format!("  {k}={v}")).collect();
+    format!("{}  {}  files={}  last={}  format={}  errors={}/{}{}", h.source, status, h.files_found, last, format, h.errors, h.records, counters)
 }
 
 #[cfg(test)]

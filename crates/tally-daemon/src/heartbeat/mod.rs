@@ -259,7 +259,7 @@ impl Source for HeartbeatSource {
         self.last_event_ts = m.events.iter().map(|e| e.ts).max().or(self.last_event_ts);
         let c = |k: &str, v: usize| (k.to_string(), v as u64);
         self.health = Some(Health {
-            files_found: 0,
+            files_found: 1, // the listener itself; 0 would read as NoLogs
             records: t.accepted,
             skipped: t.dropped_agent + t.outside_project + t.late_dropped + t.not_a_file,
             errors: 0,

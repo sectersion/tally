@@ -475,3 +475,43 @@ fn doctor_prints_a_line_per_configured_source() {
     let o = tally(&home, &["doctor", "--json"]);
     assert!(out(&o).contains("\"status\": \"no_logs\""), "{}", out(&o));
 }
+
+#[test]
+fn heartbeat_config_prints_loopback_url_and_token_and_creates_token_file() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let o = tally(&home, &["heartbeat-config"]);
+    assert!(o.status.success(), "{}", err(&o));
+    let s = out(&o);
+    assert!(s.lines().any(|l| l == "api_url = http://127.0.0.1:25930/api"), "{s}");
+    let key = s.lines().find_map(|l| l.strip_prefix("api_key = ")).expect("api_key line").to_string();
+    assert!(key.len() >= 32, "{s}");
+    let file = std::fs::read_to_string(home.join("heartbeat.token")).unwrap();
+    assert_eq!(file.trim(), key);
+    assert!(s.contains("heartbeat.token"), "{s}");
+    assert_eq!(out(&tally(&home, &["heartbeat-config"])), s);
+}
+
+#[test]
+fn doctor_lists_heartbeat_counters() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let mut store = tally_daemon::store::Store::open(&home.join("tally.db")).unwrap();
+    let h = tally_daemon::source::Health {
+        files_found: 1,
+        records: 3,
+        format: "wakatime".into(),
+        counters: vec![("accepted".into(), 3), ("dropped_agent".into(), 2)],
+        ..Default::default()
+    };
+    store.put_health("heartbeat", &h, 1).unwrap();
+    drop(store);
+    let o = tally(&home, &["doctor"]);
+    assert!(o.status.success(), "{}", err(&o));
+    let s = out(&o);
+    let l = s.lines().find(|l| l.starts_with("heartbeat")).expect("heartbeat line");
+    assert!(l.contains("accepted=3") && l.contains("dropped_agent=2"), "{s}");
+    let o = tally(&home, &["doctor", "--json"]);
+    assert!(out(&o).contains("\"dropped_agent\""), "{}", out(&o));
+}
