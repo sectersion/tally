@@ -7,6 +7,7 @@ pub mod presence;
 #[cfg(windows)]
 mod presence_win;
 pub mod project;
+pub mod published;
 pub mod run;
 pub mod source;
 pub mod status;
