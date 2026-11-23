@@ -202,6 +202,9 @@ mod tests {
         let rows = sync(&mut s, true).unwrap();
         assert_eq!(rows.len(), 2);
         assert_ne!(rows[0].entry.hash, s.ledger().unwrap()[0].hash);   // rechained, not copied
+        let entries: Vec<_> = s.published_rows("owner/repo").unwrap().into_iter().map(|r| r.entry).collect();
+        assert!(tally_scoring::verify_chain(&entries, GENESIS_HASH).is_ok());
+        assert_eq!(rows[1].entry.prev_hash, rows[0].entry.hash);
     }
     #[test] fn a_second_local_id_with_the_same_name_joins_the_same_chain() {
         let mut s = store_with_ledger(Some("owner/repo"));
@@ -213,6 +216,7 @@ mod tests {
         finalize(&mut s).unwrap();
         assert_eq!(sync(&mut s, true).unwrap().len(), 1);
         let entries: Vec<_> = s.published_rows("owner/repo").unwrap().into_iter().map(|r| r.entry).collect();
+        assert_eq!(entries.len(), 3);
         assert!(tally_scoring::verify_chain(&entries, GENESIS_HASH).is_ok());
     }
     #[test] fn dry_run_writes_nothing() {
