@@ -13,7 +13,7 @@ fn lines(name: &str) -> Vec<String> {
 #[test]
 fn every_positive_is_redacted() {
     let ls = lines("positives.txt");
-    assert!(ls.len() >= 33);
+    assert!(ls.len() >= 40);
     for l in ls {
         let mut it = l.splitn(3, '|');
         let (kind, secret, line) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());

@@ -63,18 +63,23 @@ fn wanted(kind: &str, c: &Captures, text: &str) -> bool {
                 let before: String = text[..m.start()].chars().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect();
                 let before = before.to_lowercase();
                 let sha_len = v.len() == 40 || v.len() == 64;
-                if sha_len && ["commit", "sha", "hash"].iter().any(|w| before.contains(w)) {
+                // whole words only, so "marshal" or "hashmap" do not count
+                let near = before.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| {
+                    w == "commit" || w == "hash" || w.strip_prefix("sha").is_some_and(|r| r.bytes().all(|b| b.is_ascii_digit()))
+                });
+                if sha_len && near {
                     return false;
                 }
                 entropy(v) >= 3.0
             } else {
-                // needs all three classes so paths and identifiers (usually lowercase) survive
+                // needs a digit plus a letter: identifiers and paths rarely carry digits
+                // ponytail: a 32+ char random token without any digit passes; rare (P(no digit) ~ 1e-3 at 44 chars of base64)
                 let up = v.bytes().any(|b| b.is_ascii_uppercase());
                 let lo = v.bytes().any(|b| b.is_ascii_lowercase());
                 let di = v.bytes().any(|b| b.is_ascii_digit());
                 // `/` mixed with `-` or `_` is a path, not one base64 alphabet
                 let path = v.contains('/') && v.contains(['-', '_']);
-                up && lo && di && !path && entropy(v) >= 4.0
+                di && (up || lo) && !path && entropy(v) >= 4.0
             }
         }
         _ => true,
