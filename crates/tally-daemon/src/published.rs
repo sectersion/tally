@@ -34,10 +34,22 @@ fn resolve<'a>(names: &'a BTreeMap<String, String>, p: &str) -> Option<&'a str> 
 
 fn valid_names(store: &Store) -> Result<BTreeMap<String, String>, PublishError> {
     let names = store.project_names()?;
-    match names.values().find(|n| !valid_public_name(n)) {
-        Some(bad) => Err(PublishError::BadName(bad.clone())),
-        None => Ok(names),
+    if let Some(bad) = names.values().find(|n| !valid_public_name(n)) {
+        return Err(PublishError::BadName(bad.clone()));
     }
+    // Names differing only by case share a directory on case-insensitive filesystems.
+    let mut seen = HashSet::new();
+    for n in names.values().collect::<HashSet<_>>() {
+        if !seen.insert(n.to_ascii_lowercase()) {
+            return Err(PublishError::BadName(n.clone()));
+        }
+    }
+    Ok(names)
+}
+
+/// True if `name` differs only by case from a different already-registered public name.
+pub fn case_collides(store: &Store, name: &str) -> Result<bool, PublishError> {
+    Ok(store.project_names()?.values().any(|n| n != name && n.eq_ignore_ascii_case(name)))
 }
 
 /// Rows to append; writes nothing.
@@ -189,6 +201,13 @@ mod tests {
         for n in names { s.conn.execute(&format!("DROP TRIGGER {n}"), []).unwrap(); }
     }
 
+    #[test] fn case_differing_names_are_rejected() {
+        let mut s = store_with_ledger(Some("Owner/Repo"));
+        assert!(case_collides(&s, "owner/repo").unwrap());
+        assert!(!case_collides(&s, "Owner/Repo").unwrap());
+        s.register_project("p2", "C:/r2", Some("owner/repo")).unwrap();
+        assert!(matches!(pending(&s), Err(PublishError::BadName(_))));
+    }
     #[test] fn unnamed_projects_publish_nothing() {
         let mut s = store_with_ledger(None);
         assert!(sync(&mut s, true).unwrap().is_empty());
