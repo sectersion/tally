@@ -3,7 +3,7 @@ import { formatClock } from "../time";
 
 export function Onboarding({ status }: { status: StatusData | null }) {
   return (
-    <section aria-labelledby="ob">
+    <section class="wrap" aria-labelledby="ob">
       <h2 id="ob" tabIndex={-1}>Get started</h2>
       <ol>
         <li>Start tracking: run <code>tally run</code></li>

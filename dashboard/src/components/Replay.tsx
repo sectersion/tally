@@ -14,8 +14,10 @@ export function Replay(p: ViewProps) {
   const list: Session[] = sessions.data?.data ?? [];
   const [sel, setSel] = useState(0);
   const s = list[sel];
+  const maxV = Math.max(1, ...list.map((x) => x.verified_s));
+  const dayKey = (t: number) => new Date(t).toDateString();
   return (
-    <div>
+    <div class="wrap">
       <h2 id="replay-h" tabIndex={-1}>Session replay</h2>
       <p class="muted" id="replay-note">
         What you see here and what you do not: you see when each moment happened, its kind, and numbers (a prompt's share drawn from what you saw, exit codes, lines changed, the first 8 characters of a command or commit hash).
@@ -27,11 +29,15 @@ export function Replay(p: ViewProps) {
           {list.length === 0 && <p>No sessions in the last 28 days.</p>}
           <ul class="sessions">
             {list.map((x, i) => (
-              <li>
-                <button type="button" aria-pressed={i === sel} onClick={() => setSel(i)}>
-                  {projectLabel(x.project, p.projects)}, {dayLabel(x.start_ts)} {formatClock(x.start_ts)} to {formatClock(x.end_ts)}, {Math.round(x.verified_s / 60)} min verified
-                </button>
-              </li>
+              <>
+                {(i === 0 || dayKey(x.start_ts) !== dayKey(list[i - 1].start_ts)) && <li class="day-h" aria-hidden="true">{dayLabel(x.start_ts)}</li>}
+                <li>
+                  <button type="button" aria-pressed={i === sel} onClick={() => setSel(i)}>
+                    {projectLabel(x.project, p.projects)}, {dayLabel(x.start_ts)} {formatClock(x.start_ts)} to {formatClock(x.end_ts)}, {Math.round(x.verified_s / 60)} min verified
+                    <span class="mini" aria-hidden="true"><i style={{ width: `${Math.max(2, Math.round((x.verified_s * 100) / maxV))}%` }} /></span>
+                  </button>
+                </li>
+              </>
             ))}
           </ul>
         </div>
@@ -76,6 +82,7 @@ function Moments({ p, s }: { p: ViewProps; s: Session }) {
   return (
     <section aria-labelledby="moments-h">
       <h3 id="moments-h">Moments</h3>
+      <p class="muted">The space between moments grows with the time between them (square-root scale, capped).</p>
       <div role="status" aria-live="polite">{announce}</div>
       <Timeline items={items} />
       {next && <button type="button" onClick={more}>Load more</button>}

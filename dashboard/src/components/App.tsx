@@ -46,7 +46,7 @@ export function App({ api, pollMs = 15000, now = Date.now, hintAfterMs = 300_000
     <>
       <header>
         <div class="topbar">
-          <h1>Tally</h1>
+          <h1><svg class="mark" viewBox="0 0 28 24" width="28" height="24" aria-hidden="true" focusable="false"><g stroke="currentColor" stroke-width="3" stroke-linecap="round"><line x1="5" y1="3" x2="5" y2="21" /><line x1="11" y1="3" x2="11" y2="21" /><line x1="17" y1="3" x2="17" y2="21" /><line x1="23" y1="3" x2="23" y2="21" /><line x1="2" y1="17" x2="26" y2="7" /></g></svg>Tally</h1>
           <nav aria-label="Views">
             {NAV.map(([h, l]) => <a href={h} aria-current={route === h ? "page" : undefined}>{l}</a>)}
           </nav>

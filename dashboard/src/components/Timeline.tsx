@@ -25,14 +25,28 @@ function detail(i: Item): string {
 }
 
 export function Timeline({ items }: { items: Item[] }) {
+  const failedAt = new Map<string, number>(); // command id (first 8 characters) to the last failing run
+  let prev: number | null = null;
   return (
     <ol class="timeline">
-      {items.map((i) => (
-        <li>
-          <time>{formatClock(i.ts)}</time> <span class={`chip k-${i.kind}`} aria-hidden="true">{ICON[i.kind]}</span> <strong>{LABEL[i.kind]}</strong>
-          {detail(i) && <span class="muted">{` (${detail(i)})`}</span>}
-        </li>
-      ))}
+      {items.map((i) => {
+        // vertical space grows with the time since the previous moment (square-root scale, capped)
+        const gap = prev === null ? 0 : Math.max(0, (i.ts - prev) / 1000);
+        prev = i.ts;
+        const gapPx = Math.min(72, 6 + Math.round(Math.sqrt(gap) * 1.4));
+        let loop = "";
+        if (i.kind === "error" && i.short) failedAt.set(i.short, i.ts);
+        if ((i.kind === "fix" || i.kind === "agent_fix") && i.short && failedAt.has(i.short)) {
+          loop = `fixed ${formatDuration((i.ts - failedAt.get(i.short)!) / 1000)} after it failed`;
+        }
+        return (
+          <li class={`k-${i.kind}`} style={{ marginTop: `${gapPx}px` }}>
+            <time>{formatClock(i.ts)}</time> <span class={`chip k-${i.kind}`} aria-hidden="true">{ICON[i.kind]}</span> <strong>{LABEL[i.kind]}</strong>
+            {detail(i) && <span class="muted">{` (${detail(i)})`}</span>}
+            {loop && <span class="loop-note">{loop}</span>}
+          </li>
+        );
+      })}
     </ol>
   );
 }

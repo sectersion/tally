@@ -2,7 +2,7 @@ import { formatDuration } from "../time";
 
 /** Grouped bars per day: verified (solid) and unverified (hatched). Never summed. The caller renders the data table. */
 export function BarChart(p: { id: string; title: string; labels: string[]; verified: number[]; unverified: number[] }) {
-  const n = p.labels.length, W = 900, H = 240, L = 64, B = 28, T = 20;
+  const n = p.labels.length, W = 900, H = 240, L = 88, B = 28, T = 20;
   const max = Math.max(1, ...p.verified, ...p.unverified);
   const slot = Math.floor((W - L) / Math.max(n, 1)), bw = Math.max(2, Math.floor(slot * 0.4));
   const y = (v: number) => H - B - Math.floor((v * (H - B - T)) / max);
@@ -29,7 +29,7 @@ export function BarChart(p: { id: string; title: string; labels: string[]; verif
           <rect class="v" x={L + i * slot} y={y(p.verified[i])} width={bw} height={H - B - y(p.verified[i])} />
           <rect class="u" x={L + i * slot + bw + 2} y={y(p.unverified[i])} width={bw} height={H - B - y(p.unverified[i])} />
           {show(p.verified[i], p.verified) && <text class="val" x={L + i * slot + bw} y={y(p.verified[i]) - 4} text-anchor="end">{formatDuration(p.verified[i])}</text>}
-          {show(p.unverified[i], p.unverified) && <text class="val" x={L + i * slot + bw + 2} y={y(p.unverified[i]) - 4} text-anchor="start">{formatDuration(p.unverified[i])}</text>}
+          {n <= 14 && show(p.unverified[i], p.unverified) && <text class="val" x={L + i * slot + bw + 2} y={y(p.unverified[i]) - 4} text-anchor="start">{formatDuration(p.unverified[i])}</text>}
           {i % step === 0 && <text x={L + i * slot} y={H - 8}>{l}</text>}
         </g>
       ))}
