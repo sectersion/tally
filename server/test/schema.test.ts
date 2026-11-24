@@ -77,6 +77,19 @@ test("readJson rejects a body over the limit", async () => {
   expect((await catchAsync(() => readJson(req))).body.error).toBe("body_too_large");
 });
 
+test("readJson stops a chunked body over the limit", async () => {
+  const chunk = new Uint8Array(MAX_BODY_BYTES / 2 + 1);
+  const body = new ReadableStream({
+    start(c) {
+      c.enqueue(chunk);
+      c.enqueue(chunk);
+      c.close();
+    },
+  });
+  const req = new Request("http://x/", { method: "POST", body, duplex: "half" } as RequestInit);
+  expect((await catchAsync(() => readJson(req))).body.error).toBe("body_too_large");
+});
+
 test("readJson rejects bad json and parses good json", async () => {
   const post = (b: string) => new Request("http://x/", { method: "POST", body: b });
   const err = await catchAsync(() => readJson(post("{nope")));

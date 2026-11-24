@@ -2,7 +2,7 @@ import { createServer } from "./app.ts";
 import { loadConfig } from "./config.ts";
 import { connect, migrate } from "./db.ts";
 import { createLive } from "./live.ts";
-import { log } from "./log.ts";
+import { log, setLogLevel } from "./log.ts";
 
 try {
   await import("./wasm.ts");
@@ -12,6 +12,7 @@ try {
 }
 
 const cfg = loadConfig();
+setLogLevel(cfg.logLevel);
 const sql = connect(cfg.databaseUrl);
 const applied = await migrate(sql);
 if (applied.length) log("info", "migrated", { applied });

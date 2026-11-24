@@ -9,7 +9,7 @@ import {
   pendingDevice,
   pollDeviceToken,
 } from "./device.ts";
-import { HttpError, json, parse, readJson } from "./errors.ts";
+import { HttpError, json, parse, readCapped, readJson } from "./errors.ts";
 import {
   accessibleRepos,
   dispatch,
@@ -247,9 +247,9 @@ export function createServer(deps: Deps) {
   return Bun.serve({
     port: deps.port,
     development: false,
-    // Transport hard cap only: Bun resets the connection past it, so it sits above MAX_BODY_BYTES
-    // and readJson answers the JSON 413 for everything in between (Content-Length is checked first).
-    maxRequestBodySize: 2 * MAX_BODY_BYTES,
+    // Transport cap only: Bun answers an empty 413 past it, so it sits far above MAX_BODY_BYTES and
+    // readCapped answers the JSON 413 (Content-Length first, then a streamed count).
+    maxRequestBodySize: 256 * MAX_BODY_BYTES,
     routes: {
       "/static/:file": {
         GET: async (req) => {
@@ -729,10 +729,7 @@ export function createServer(deps: Deps) {
       "/github/webhook": {
         // No cookies and no rate limit (GitHub's addresses are shared): the signature is the auth.
         POST: handle("/github/webhook", async (req) => {
-          const tooBig = () => new HttpError(413, { error: "body_too_large", max: MAX_BODY_BYTES });
-          if (Number(req.headers.get("content-length")) > MAX_BODY_BYTES) throw tooBig();
-          const raw = new Uint8Array(await req.arrayBuffer());
-          if (raw.byteLength > MAX_BODY_BYTES) throw tooBig();
+          const raw = await readCapped(req);
           if (
             !verifySignature(cfg.githubWebhookSecret, raw, req.headers.get("x-hub-signature-256"))
           )
