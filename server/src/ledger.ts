@@ -60,7 +60,7 @@ export function checkBatch(
 ): { index: number; reason: string } | null {
   const r = entries.findIndex((e) => e.ruleset !== ruleset);
   if (r >= 0) return { index: r, reason: "unknown_ruleset" };
-  const p = entries.findIndex((e) => e.project !== publicName);
+  const p = entries.findIndex((e) => typeof e.project !== "string" || e.project.toLowerCase() !== publicName.toLowerCase());
   if (p >= 0) return { index: p, reason: "project_mismatch" };
   const v = verifyChain(entries, prevHash);
   return v.ok ? null : { index: v.index, reason: v.reason };
