@@ -10,7 +10,7 @@ Ruleset version: `2026.11-0`. Every constant below is part of the ruleset; chang
 - **Human action:** an event that represents a decision by the user. Only human actions claim time.
 - **Claim:** seconds a human action earns, split into `verified_s` and `unverified_s`.
 - **Ledger entry:** one claim, hash-chained, uploaded. For logged hours, ledger entries, head hashes with commit timestamps (sync) and badge data and public ledger files (publish) are all that leave the machine; see the README privacy section.
-- **Project:** a git repository root. Local id = SHA-256 of the canonical absolute root path; server id assigned on link.
+- **Project:** a git repository root. Local id = SHA-256 of the canonical absolute root path; server id assigned on link. Network-share spellings of one checkout (for example `\\localhost\C$\...` and `\\127.0.0.1\C$\...`) are distinct paths and get distinct local ids; register a checkout by its local drive path.
 
 ## 2. Event schema
 
