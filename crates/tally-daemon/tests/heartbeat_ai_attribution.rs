@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use tally_daemon::heartbeat::{file_hash, map_heartbeats, server::Received, Heartbeat};
+use tally_daemon::heartbeat::{map_heartbeats, server::Received, Heartbeat};
 use tally_daemon::project::{normalize_path, project_for_dir};
 
 const T: i64 = 1_763_800_000_000;
