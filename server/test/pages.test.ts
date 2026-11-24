@@ -75,6 +75,8 @@ async function ledger(projectId: string, rows: { ts: number; v: number; u?: numb
   for (const [i, r] of rows.entries())
     await sql`insert into ledger_entries (chain_id, seq, hash, prev_hash, action_id, ts, kind, verified_s, unverified_s, entry)
       values (${c.id}, ${i}, ${`${++hashNo}`.padStart(64, "0")}, ${GENESIS}, ${`a${i}`}, ${r.ts}, 'k', ${r.v}, ${r.u ?? 0}, '{}'::json)`;
+  await sql`update chains set verified_s = ${rows.reduce((n, r) => n + r.v, 0)},
+    unverified_s = ${rows.reduce((n, r) => n + (r.u ?? 0), 0)} where id = ${c.id}`;
 }
 async function receipt(
   projectId: string,
