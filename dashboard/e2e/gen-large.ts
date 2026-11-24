@@ -1,5 +1,5 @@
 // bun run e2e/gen-large.ts > large.ndjson   (2,000,000 events over 90 days, hashes only; for manual measurement)
-const N = 2_000_000;
+const N = Number(process.env.N ?? 2_000_000);
 const end = Date.now();
 const start = end - 90 * 86_400_000;
 const step = (end - start) / N;
