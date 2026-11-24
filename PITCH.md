@@ -52,7 +52,7 @@ Every **human action** earns the human-present time since your previous action, 
 - approving or rejecting an agent's change,
 - an edit that survives (measured as surviving diff, not keystrokes),
 - a test or build run,
-- a commit made by you (agent commits are identified from transcript tool calls).
+- a commit made by you (agent commits are identified from transcript tool calls; only Claude Code transcripts are recognised today, so commits made by other agent harnesses are counted as yours).
 
 From each claim, Tally subtracts:
 
