@@ -19,10 +19,12 @@ pub enum BashKind {
 }
 
 /// Per-file state. Text fields are memory only; `open_turn` is persisted by the caller as "<uuid> <ts>".
-#[derive(Default)]
 pub struct Session {
     pub open_turn: Option<(String, i64)>, // (prompt uuid, prompt ts)
     pub last_seen_ts: i64,
+    /// Entry timestamps above this are future-dated (clock skew, bad line) and do not move `last_seen_ts`,
+    /// so a far-future line cannot pin the open turn past expiry. `i64::MAX` = no bound.
+    pub ts_ceiling: i64,
     pending: BTreeMap<String, (Meta, String, BashKind)>, // Bash tool_use id -> (meta, cmd_hash, kind)
     tail: ContextTail,
     last_output: String,
@@ -53,6 +55,21 @@ fn event(session: &str, uuid: &str, suffix: &str, ts: i64, project: &Option<Stri
     }
 }
 
+impl Default for Session {
+    fn default() -> Self {
+        Session {
+            open_turn: None,
+            last_seen_ts: 0,
+            ts_ceiling: i64::MAX,
+            pending: BTreeMap::new(),
+            tail: ContextTail::default(),
+            last_output: String::new(),
+            last_error: String::new(),
+            agent_writes: Vec::new(),
+        }
+    }
+}
+
 impl Session {
     /// Turn close rule (FORMAT.md deviation 1): the open turn closes at the first of an interrupt, a
     /// `turn_duration`, or the next non-queued human prompt. A `turn_duration` of a task-notification turn that
@@ -60,7 +77,9 @@ impl Session {
     pub fn feed(&mut self, e: Entry, ctx: &Ctx, out: &mut Vec<Event>) {
         let prev_seen = self.last_seen_ts;
         let m = e.meta();
-        self.last_seen_ts = self.last_seen_ts.max(m.ts);
+        if m.ts <= self.ts_ceiling {
+            self.last_seen_ts = self.last_seen_ts.max(m.ts);
+        }
         let ev = |uuid: &str, suffix: &str, ts: i64, kind: Kind| event(&m.session, uuid, suffix, ts, &ctx.project, kind);
         match &e {
             Entry::HumanPrompt { meta, text, queued } => {
