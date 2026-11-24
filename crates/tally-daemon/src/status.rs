@@ -1,6 +1,6 @@
 //! Read-only views over the store: counts, seconds, and ledger verification.
 use crate::store::{Store, StoreError};
-use tally_scoring::{score, verify_chain, GENESIS_HASH};
+use tally_scoring::{score, verify_chain, GENESIS_HASH, RULESET_VERSION};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
@@ -35,7 +35,8 @@ pub fn status(store: &Store) -> Result<Status, StoreError> {
         horizon,
         finalized_through,
         blocked_on_presence: store.presence_required()? && store.watermark(crate::presence::PRESENCE_SOURCE)?.is_none(),
-        last_hash: ledger.last().map_or(GENESIS_HASH, |e| e.hash.as_str()).to_string(),
+        last_hash: store.ledger_chains()?.iter().rfind(|c| c.ruleset == RULESET_VERSION)
+            .and_then(|c| c.entries.last()).map_or(GENESIS_HASH, |e| e.hash.as_str()).to_string(),
     })
 }
 
@@ -47,11 +48,19 @@ pub enum VerifyError {
     Chain { index: usize, reason: &'static str },
 }
 
-/// Number of entries when the whole chain verifies from `GENESIS_HASH`.
+/// Number of entries when every chain verifies from `GENESIS_HASH` and holds one ruleset.
+/// A failure reports the global index.
 pub fn verify_ledger(store: &Store) -> Result<usize, VerifyError> {
-    let ledger = store.ledger()?;
-    verify_chain(&ledger, GENESIS_HASH).map_err(|e| VerifyError::Chain { index: e.index, reason: e.reason })?;
-    Ok(ledger.len())
+    let mut total = 0;
+    for c in store.ledger_chains()? {
+        let at = |index: usize, reason| VerifyError::Chain { index: total + index, reason };
+        verify_chain(&c.entries, GENESIS_HASH).map_err(|e| at(e.index, e.reason))?;
+        if let Some(i) = c.entries.iter().position(|e| e.ruleset != c.ruleset) {
+            return Err(at(i, "ruleset_mismatch"));
+        }
+        total += c.entries.len();
+    }
+    Ok(total)
 }
 
 #[cfg(test)]
@@ -112,4 +121,30 @@ mod tests {
         assert!(!json(&s).contains("\"verified_s\":100"));
         assert!(matches!(verify_ledger(&s), Err(VerifyError::Chain { index: 1, reason: "bad_hash" })));
     }
+    fn put(s: &mut Store, ruleset: &str, action: &str, prev: &str) -> tally_scoring::LedgerEntry {
+        let mut e = tally_scoring::LedgerEntry { v: 1, ruleset: ruleset.into(), action_id: action.into(), ts: 1, project: None,
+            kind: "k".into(), verified_s: 1, unverified_s: 0, reasons: vec![], features: Default::default(),
+            prev_hash: prev.into(), hash: String::new() };
+        e.hash = tally_scoring::ledger::entry_hash(&e);
+        s.append_ledger(std::slice::from_ref(&e), 5, 0, &[]).unwrap();
+        e
+    }
+    #[test] fn two_rulesets_in_one_store_verify() {
+        let mut s = Store::open_in_memory().unwrap();
+        let a = put(&mut s, "old-0", "a", GENESIS_HASH);
+        put(&mut s, "old-0", "b", &a.hash);
+        put(&mut s, RULESET_VERSION, "c", GENESIS_HASH);
+        assert_eq!(verify_ledger(&s).unwrap(), 3);
+        for n in ["ledger_no_update", "ledger_no_delete"] { s.conn.execute(&format!("DROP TRIGGER {n}"), []).unwrap(); }
+        s.conn.execute("UPDATE ledger SET entry_json = replace(entry_json, '\"verified_s\":1,', '\"verified_s\":9,') WHERE seq = 3", []).unwrap();
+        assert!(matches!(verify_ledger(&s), Err(VerifyError::Chain { index: 2, reason: "bad_hash" })));
+    }
+    #[test] fn last_hash_is_the_current_chain_head() {
+        let mut s = Store::open_in_memory().unwrap();
+        put(&mut s, "old-0", "a", GENESIS_HASH);
+        assert_eq!(status(&s).unwrap().last_hash, GENESIS_HASH);
+        let c = put(&mut s, RULESET_VERSION, "c", GENESIS_HASH);
+        assert_eq!(status(&s).unwrap().last_hash, c.hash);
+    }
+
 }

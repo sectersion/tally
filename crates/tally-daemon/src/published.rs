@@ -275,10 +275,10 @@ mod tests {
                 prev_hash: prev.clone(), hash: String::new(),
             };
             e.hash = entry_hash(&e);
-            prev = e.hash.clone();
+            prev = GENESIS_HASH.to_string();   // each ruleset is its own main chain, at genesis
             entries.push(e);
         }
-        s.append_ledger(&entries, 0, 0, &[]).unwrap();
+        for e in &entries { s.append_ledger(std::slice::from_ref(e), 0, 0, &[]).unwrap(); }
         let rows = sync(&mut s, true).unwrap();
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|r| r.entry.prev_hash == GENESIS_HASH));

@@ -92,7 +92,10 @@ struct Derived {
     scored_events: usize,
     claims: Vec<tally_scoring::Claim>,
     skipped: BTreeSet<String>,
-    ledger: Vec<LedgerEntry>,
+    /// Entries of all chains but the current one.
+    before: usize,
+    /// The chain of `RULESET_VERSION` (empty right after a bump).
+    current: Vec<LedgerEntry>,
 }
 
 fn derive(store: &Store) -> Result<Derived, FinalizeError> {
@@ -113,18 +116,23 @@ fn derive(store: &Store) -> Result<Derived, FinalizeError> {
         }
     }
     let skipped: BTreeSet<String> = store.skipped()?.into_iter().map(|(id, ..)| id).collect();
-    let ledger = store.ledger()?;
-    if let Some(last) = ledger.last().filter(|e| e.ruleset != tally_scoring::RULESET_VERSION) {
+    let mut chains = store.ledger_chains()?;
+    let current_ruleset = tally_scoring::RULESET_VERSION;
+    let last_is_current = chains.last().is_some_and(|c| c.ruleset == current_ruleset);
+    if !last_is_current && chains.iter().any(|c| c.ruleset == current_ruleset) {
+        // an older build after a newer one
         return Err(FinalizeError::RulesetChanged {
-            ledger: last.ruleset.clone(),
-            current: tally_scoring::RULESET_VERSION.to_string(),
+            ledger: chains.last().map(|c| c.ruleset.clone()).unwrap_or_default(),
+            current: current_ruleset.to_string(),
         });
     }
-    if let Some((index, field)) = first_divergence(&ledger, &claims, &skipped) {
-        let action_id = ledger[index].action_id.clone();
+    let current = if last_is_current { chains.pop().map(|c| c.entries).unwrap_or_default() } else { Vec::new() };
+    let before = chains.iter().map(|c| c.entries.len()).sum::<usize>();
+    if let Some((index, field)) = first_divergence(&current, before, &claims, &skipped) {
+        let action_id = current[index - before].action_id.clone();
         return Err(FinalizeError::Divergence { index, action_id, field });
     }
-    Ok(Derived { guard, horizon, scored_events, claims, skipped, ledger })
+    Ok(Derived { guard, horizon, scored_events, claims, skipped, before, current })
 }
 
 /// Verifies the stored ledger is a prefix of the re-scored claims; writes nothing.
@@ -142,10 +150,11 @@ pub(crate) fn rescored_seconds(store: &Store, index: usize) -> Result<Option<(u3
 /// First ledger index that differs from the claims (minus `skipped`, never ledgered) and the
 /// first differing field; `"missing"` when the ledger is longer than the claims. `project` is
 /// not compared.
-fn first_divergence(ledger: &[LedgerEntry], claims: &[tally_scoring::Claim], skipped: &BTreeSet<String>) -> Option<(usize, &'static str)> {
-    let mut kept = claims.iter().filter(|c| !skipped.contains(&c.action_id));
+/// `ledger` is the current chain, aligned with the kept claims from `before`; the index returned is global.
+fn first_divergence(ledger: &[LedgerEntry], before: usize, claims: &[tally_scoring::Claim], skipped: &BTreeSet<String>) -> Option<(usize, &'static str)> {
+    let mut kept = claims.iter().filter(|c| !skipped.contains(&c.action_id)).skip(before);
     ledger.iter().enumerate().find_map(|(i, e)| {
-        let Some(c) = kept.next() else { return Some((i, "missing")) };
+        let Some(c) = kept.next() else { return Some((before + i, "missing")) };
         let field = if c.action_id != e.action_id { "action_id" }
             else if c.ts != e.ts { "ts" }
             else if c.kind != e.kind { "kind" }
@@ -154,19 +163,22 @@ fn first_divergence(ledger: &[LedgerEntry], claims: &[tally_scoring::Claim], ski
             else if c.reasons != e.reasons { "reasons" }
             else if c.features != e.features { "features" }
             else { return None };
-        Some((i, field))
+        Some((before + i, field))
     })
 }
 
 fn prepare(store: &Store) -> Result<Prepared, FinalizeError> {
-    let Derived { guard, horizon, scored_events, claims, skipped, ledger } = derive(store)?;
+    let Derived { guard, horizon, scored_events, claims, skipped, before, current } = derive(store)?;
+    // ponytail: alignment is by count, which holds while a ruleset changes seconds but not which actions are
+    // claims; a ruleset that adds or removes claims needs alignment by `action_id`.
+    let have = before + current.len();
     // Read after the horizon, so it holds every interval the horizon implies.
     let coverage = if guard { store.coverage()? } else { Vec::new() };
     // Indexes into `claims` of every claim not already skipped.
     let kept: Vec<usize> = (0..claims.len()).filter(|&i| !skipped.contains(&claims[i].action_id)).collect();
 
     let (mut new, mut skips) = (Vec::new(), Vec::new());
-    for &i in kept.get(ledger.len()..).unwrap_or(&[]) {
+    for &i in kept.get(have..).unwrap_or(&[]) {
         let c = &claims[i];
         if horizon.is_none_or(|h| c.ts.saturating_add(INTERRUPT_FOLLOW_MS) > h) {
             break;
@@ -182,8 +194,8 @@ fn prepare(store: &Store) -> Result<Prepared, FinalizeError> {
             skips.push((c.action_id.clone(), c.ts, NO_COVERAGE.to_string()));
         }
     }
-    let entries = chain(&new, ledger.last().map_or(GENESIS_HASH, |e| e.hash.as_str()));
-    let final_total = ledger.len() + entries.len();
+    let entries = chain(&new, current.last().map_or(GENESIS_HASH, |e| e.hash.as_str()));
+    let final_total = have + entries.len();
     let summary = FinalizeSummary {
         appended: entries.len(),
         skipped: skips.len(),
@@ -216,15 +228,53 @@ mod tests {
         e.hash = tally_scoring::ledger::entry_hash(&e);
         e
     }
-    #[test] fn finalize_refuses_to_append_across_a_ruleset_change() {
+    fn entry_of(ruleset: &str, action: &str, prev: &str) -> LedgerEntry {
+        let mut e = LedgerEntry { ruleset: ruleset.into(), action_id: action.into(), prev_hash: prev.into(), ..old_ruleset_entry() };
+        e.hash = tally_scoring::ledger::entry_hash(&e);
+        e
+    }
+    fn old_then_events() -> Store {
         let mut s = Store::open_in_memory().unwrap();
         s.append_ledger(&[old_ruleset_entry()], 5, 0, &[]).unwrap();
+        s.append_events(&[prompt("a", 10, 600), edit("b", 100_000)]).unwrap();
+        s.set_watermark("src", 1_000_000).unwrap();
+        s
+    }
+    #[test] fn finalize_after_a_ruleset_change_starts_a_new_chain() {
+        let mut s = old_then_events();
+        let r = finalize(&mut s).unwrap();
+        assert_eq!((r.appended, r.final_total), (1, 2));
+        let l = s.ledger().unwrap();
+        assert_eq!((l[1].ruleset.as_str(), l[1].prev_hash.as_str()), (tally_scoring::RULESET_VERSION, GENESIS_HASH));
+        s.append_events(&[prompt("c", 2_000_000, 600)]).unwrap();
+        s.set_watermark("src", 20_000_000).unwrap();
+        assert_eq!(finalize(&mut s).unwrap().appended, 1);
+        let c = s.ledger_chains().unwrap();
+        assert_eq!((c.len(), c[1].entries.len()), (2, 2));
+        assert_eq!(c[1].entries[1].prev_hash, c[1].entries[0].hash);
+    }
+    #[test] fn divergence_only_compares_the_current_chain() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.append_ledger(&[old_ruleset_entry()], -1, 0, &[]).unwrap();   // 1s, unlike what score gives now
+        s.append_events(&[prompt("a", 0, 600), prompt("b", 600_000, 400)]).unwrap();
+        s.set_watermark("src", 1_000_000).unwrap();
+        finalize(&mut s).unwrap();
+        assert_eq!(finalize(&mut s).unwrap().appended, 0);
+        let idle = Event { id: "i".into(), ts: 100_000, kind: Kind::Idle { end_ts: 590_000 }, ..prompt("x", 0, 0) };
+        s.conn.execute("INSERT INTO events (id, ts, json) VALUES (?1, ?2, ?3)",
+            rusqlite::params![idle.id, idle.ts, serde_json::to_string(&idle).unwrap()]).unwrap();
+        assert!(matches!(finalize(&mut s), Err(FinalizeError::Divergence { index: 1, .. })));
+    }
+    #[test] fn going_back_to_an_older_build_is_refused() {
+        let mut s = Store::open_in_memory().unwrap();
+        let o = old_ruleset_entry();
+        let cur = entry_of(tally_scoring::RULESET_VERSION, "b", GENESIS_HASH);
+        let z = entry_of("zzz-0", "c", GENESIS_HASH);
+        for e in [o, cur, z] { s.append_ledger(&[e], 5, 0, &[]).unwrap(); }
         s.append_events(&[prompt("a", 10, 600)]).unwrap();
         s.set_watermark("src", 10_000_000).unwrap();
-        assert!(matches!(finalize(&mut s),
-            Err(FinalizeError::RulesetChanged { ledger, .. }) if ledger == "old-0"));
-        assert_eq!(s.ledger().unwrap().len(), 1);
-        assert_eq!(s.finalized_through().unwrap(), 5);
+        assert!(matches!(finalize(&mut s), Err(FinalizeError::RulesetChanged { ledger, .. }) if ledger == "zzz-0"));
+        assert_eq!(s.ledger().unwrap().len(), 3);
     }
     #[test] fn final_prefix_boundary_is_exact() {
         let mut s = Store::open_in_memory().unwrap();

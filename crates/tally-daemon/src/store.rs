@@ -43,6 +43,15 @@ pub struct PublishedRow {
     pub entry: LedgerEntry,
 }
 
+/// One chain (epoch) of the main ledger: it starts at `GENESIS_HASH` at `start_seq`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LedgerChain {
+    pub ruleset: String,
+    pub epoch: i64,
+    pub start_seq: i64,
+    pub entries: Vec<LedgerEntry>,
+}
+
 /// `(start, end)` in ms.
 pub type Interval = (i64, i64);
 
@@ -78,6 +87,12 @@ CREATE TRIGGER IF NOT EXISTS published_no_update BEFORE UPDATE ON published_ledg
 BEGIN SELECT RAISE(ABORT, 'published ledger is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS published_no_delete BEFORE DELETE ON published_ledger
 BEGIN SELECT RAISE(ABORT, 'published ledger is append-only'); END;
+CREATE TABLE IF NOT EXISTS ledger_chains(
+  start_seq INTEGER PRIMARY KEY, ruleset TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 0, UNIQUE (ruleset, epoch));
+CREATE TRIGGER IF NOT EXISTS ledger_chains_no_update BEFORE UPDATE ON ledger_chains
+BEGIN SELECT RAISE(ABORT, 'ledger_chains is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS ledger_chains_no_delete BEFORE DELETE ON ledger_chains
+BEGIN SELECT RAISE(ABORT, 'ledger_chains is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS ledger_no_update BEFORE UPDATE ON ledger
 BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS ledger_no_delete BEFORE DELETE ON ledger
@@ -120,6 +135,14 @@ impl Store {
                 }
             }
         }
+        // Pre-chains ledgers hold one ruleset (plan 05's guard): mark it as the first chain.
+        conn.execute_batch(
+            "BEGIN IMMEDIATE;
+             INSERT INTO ledger_chains(start_seq, ruleset, epoch)
+               SELECT seq, json_extract(entry_json, '$.ruleset'), 0 FROM ledger
+               WHERE seq = (SELECT MIN(seq) FROM ledger) AND NOT EXISTS (SELECT 1 FROM ledger_chains);
+             COMMIT;",
+        )?;
         Ok(Store { conn })
     }
 
@@ -449,8 +472,25 @@ impl Store {
             .query_row("SELECT hash FROM ledger ORDER BY seq DESC LIMIT 1", [], |r| r.get(0))
             .optional()?;
         if let Some(first) = entries.first() {
-            if first.prev_hash != last.as_deref().unwrap_or(GENESIS_HASH) {
+            if entries.iter().any(|e| e.ruleset != first.ruleset) {
                 return Err(StoreError::ChainBroken);
+            }
+            let cur: Option<String> = tx
+                .query_row("SELECT ruleset FROM ledger_chains ORDER BY start_seq DESC LIMIT 1", [], |r| r.get(0))
+                .optional()?;
+            if cur.as_deref() == Some(first.ruleset.as_str()) {
+                if first.prev_hash != last.as_deref().unwrap_or(GENESIS_HASH) {
+                    return Err(StoreError::ChainBroken);
+                }
+            } else {
+                // a new chain: at genesis, and its ruleset must not name an earlier chain
+                let named: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM ledger_chains WHERE ruleset = ?1)", [&first.ruleset], |r| r.get(0))?;
+                if first.prev_hash != GENESIS_HASH || named {
+                    return Err(StoreError::ChainBroken);
+                }
+                let start: i64 = tx.query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM ledger", [], |r| r.get(0))?;
+                tx.execute("INSERT INTO ledger_chains(start_seq, ruleset, epoch) VALUES (?1, ?2, 0)", params![start, first.ruleset])?;
             }
         }
         for e in entries {
@@ -532,6 +572,23 @@ impl Store {
         let mut out = Vec::new();
         for j in rows {
             out.push(serde_json::from_str(&j?)?);
+        }
+        Ok(out)
+    }
+
+    /// The main ledger split into chains in `start_seq` order; concatenated they equal `ledger()`.
+    pub fn ledger_chains(&self) -> Result<Vec<LedgerChain>, StoreError> {
+        let mut st = self.conn.prepare("SELECT start_seq, ruleset, epoch FROM ledger_chains ORDER BY start_seq")?;
+        let heads = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let rows = self.ledger_rows()?;
+        let mut out: Vec<LedgerChain> = heads.into_iter()
+            .map(|(start_seq, ruleset, epoch)| LedgerChain { ruleset, epoch, start_seq, entries: Vec::new() })
+            .collect();
+        for (seq, e) in rows {
+            if let Some(c) = out.iter_mut().rev().find(|c| c.start_seq <= seq) {
+                c.entries.push(e);
+            }
         }
         Ok(out)
     }
@@ -874,4 +931,50 @@ mod tests {
         s.register_project("id1", "C:/r", Some("owner/renamed")).unwrap();
         assert_eq!(s.project_names().unwrap().get("id1").map(String::as_str), Some("owner/renamed"));
     }
+    fn rentry(action_id: &str, prev: &str, ruleset: &str) -> LedgerEntry {
+        let mut e = entry(action_id, prev);
+        e.ruleset = ruleset.into();
+        e.hash = tally_scoring::ledger::entry_hash(&e);
+        e
+    }
+    fn old_two() -> (LedgerEntry, LedgerEntry) {
+        let a = rentry("a1", GENESIS_HASH, "old-0");
+        let b = rentry("a2", &a.hash, "old-0");
+        (a, b)
+    }
+    #[test] fn migration_marks_the_existing_chain() {
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("t.db");
+        let (a, b) = old_two();
+        Store::open(&path).unwrap().append_ledger(&[a.clone(), b.clone()], 10, 0, &[]).unwrap();
+        // simulate a pre-chains database
+        { let s = Store::open(&path).unwrap(); s.conn.execute_batch("DROP TRIGGER ledger_chains_no_delete; DELETE FROM ledger_chains;").unwrap(); }
+        for _ in 0..2 {
+            let s = Store::open(&path).unwrap();
+            let c = s.ledger_chains().unwrap();
+            assert_eq!(c.len(), 1);
+            assert_eq!((c[0].ruleset.as_str(), c[0].epoch, c[0].start_seq, c[0].entries.clone()), ("old-0", 0, 1, vec![a.clone(), b.clone()]));
+        }
+    }
+    #[test] fn two_epochs_of_one_ruleset_are_allowed_in_the_table() {
+        let s = Store::open_in_memory().unwrap();
+        let ins = |r: &str, e: i64, seq: i64| s.conn.execute("INSERT INTO ledger_chains(start_seq, ruleset, epoch) VALUES (?1, ?2, ?3)", params![seq, r, e]);
+        ins("old-0", 0, 1).unwrap();
+        ins("old-0", 1, 5).unwrap();
+        assert!(ins("old-0", 0, 9).is_err());
+    }
+    #[test] fn a_new_ruleset_opens_a_chain_at_genesis() {
+        let mut s = Store::open_in_memory().unwrap();
+        let (a, b) = old_two();
+        s.append_ledger(&[a, b.clone()], 10, 0, &[]).unwrap();
+        assert!(matches!(s.append_ledger(&[rentry("n1", &b.hash, "new-0")], 20, 0, &[]), Err(StoreError::ChainBroken)));
+        let n1 = rentry("n1", GENESIS_HASH, "new-0");
+        s.append_ledger(std::slice::from_ref(&n1), 20, 0, &[]).unwrap();
+        let c = s.ledger_chains().unwrap();
+        assert_eq!(c.iter().map(|c| (c.ruleset.as_str(), c.start_seq, c.entries.len())).collect::<Vec<_>>(), [("old-0", 1, 2), ("new-0", 3, 1)]);
+        assert!(matches!(s.append_ledger(&[rentry("o3", GENESIS_HASH, "old-0")], 30, 0, &[]), Err(StoreError::ChainBroken)));
+        assert!(matches!(s.append_ledger(&[rentry("o3", &n1.hash, "old-0")], 30, 0, &[]), Err(StoreError::ChainBroken)));
+        assert!(s.conn.execute("UPDATE ledger_chains SET epoch = 3", []).is_err());
+        assert!(s.conn.execute("DELETE FROM ledger_chains", []).is_err());
+    }
+
 }
