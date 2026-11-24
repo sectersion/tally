@@ -217,12 +217,55 @@ pub fn effective_interval(secs: u64) -> u64 {
     secs.clamp(1, 86_400)
 }
 
+/// A wall clock this far ahead of the monotonic clock is a jump, not time passing.
+const CLOCK_JUMP_MS: i64 = 5 * 60_000;
+/// Consecutive jump ticks before the new wall time is believed (a real clock change, not a glitch).
+const CLOCK_JUMP_TICKS: u32 = 3;
+
+/// Turns the wall clock into the tick's `now_ms`. One forward jump (bad NTP, VM resume) would push every
+/// source watermark and `finalized_through` into the future and drop all later real events as late
+/// (REDTEAM-2, r2b-2), so a jump ahead of the monotonic clock is replaced by monotonic time for a few ticks.
+/// Backward jumps pass through: they only delay finalization.
+pub struct ClockGuard {
+    last: Option<(i64, Instant)>,
+    strikes: u32,
+}
+
+impl ClockGuard {
+    pub fn new() -> Self {
+        ClockGuard { last: None, strikes: 0 }
+    }
+
+    pub fn now(&mut self, wall: i64, mono: Instant) -> i64 {
+        let mut now = wall;
+        if let Some((w, m)) = self.last {
+            let expected = w + mono.saturating_duration_since(m).as_millis() as i64;
+            if wall - expected > CLOCK_JUMP_MS && self.strikes < CLOCK_JUMP_TICKS {
+                self.strikes += 1;
+                now = expected;
+            } else {
+                self.strikes = 0;
+            }
+        }
+        self.last = Some((now, mono));
+        now
+    }
+}
+
+impl Default for ClockGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Tick every `cfg.run.interval_secs` until `stop` is set. The current tick always completes.
 pub fn run_loop(store: &mut Store, cfg: &Config, home: &Path, stop: &AtomicBool) -> Result<(), StoreError> {
     let mut srcs = sources(cfg, home, store)?;
     let mut hks = hooks(cfg, home);
+    let mut clock = ClockGuard::new();
     while !stop.load(Ordering::Relaxed) {
-        for e in run_once(store, &mut srcs, &mut hks, now_ms()).errors {
+        let now = clock.now(now_ms(), Instant::now());
+        for e in run_once(store, &mut srcs, &mut hks, now).errors {
             eprintln!("{e}");
         }
         let deadline = Instant::now() + Duration::from_secs(effective_interval(cfg.run.interval_secs));
@@ -404,6 +447,24 @@ mod tests {
         cfg.copilot.enabled = false;
         assert_eq!(ids(&cfg), ["git"]);
     }
+    #[test]
+    fn one_forward_clock_jump_is_not_believed_but_a_lasting_one_is() {
+        let (mut g, t, w) = (ClockGuard::new(), Instant::now(), 1_800_000_000_000i64);
+        let sec = Duration::from_secs;
+        assert_eq!(g.now(w, t), w);
+        let jumped = w + 30 * 86_400_000;
+        assert_eq!(g.now(jumped, t + sec(60)), w + 60_000); // glitch tick: monotonic time
+        assert_eq!(g.now(w + 120_000, t + sec(120)), w + 120_000); // clock corrected
+        let (mut g, mut at) = (ClockGuard::new(), t);
+        g.now(w, at);
+        for _ in 0..CLOCK_JUMP_TICKS {
+            at += sec(60);
+            assert!(g.now(jumped, at) < jumped);
+        }
+        at += sec(60);
+        assert_eq!(g.now(jumped, at), jumped); // it stayed: believed
+    }
+
     #[test]
     fn a_zero_interval_ticks_every_second() {
         assert_eq!((effective_interval(0), effective_interval(15)), (1, 15));
