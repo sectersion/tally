@@ -208,9 +208,9 @@ impl Scheduler {
     pub fn new() -> Self {
         Self::default()
     }
-    /// A day missed while off (`last_publish_day < today`) is caught up once, not once per missed day.
+    /// A day missed while off (`last_publish_day != today`) is caught up once, not once per missed day.
     pub fn due(&self, store: &Store, today: i64, now_ms: i64, enabled: bool) -> Result<bool, crate::store::StoreError> {
-        if !enabled || store.meta_get("last_publish_day")?.is_some_and(|d| d >= today) {
+        if !enabled || store.meta_get("last_publish_day")?.is_some_and(|d| d == today) {
             return Ok(false);
         }
         Ok(self.last_failure_ms.is_none_or(|f| now_ms - f >= RETRY_MS))
@@ -493,6 +493,11 @@ mod tests {
         sch.tick(&mut s, &cfg(&url), home.path(), 20261125, 0);
         assert_eq!((commits(bare.path()), day(&s)), (1, Some(20261125)));
         assert!(!sch.due(&s, 20261125, 1, true).unwrap());
+    }
+    #[test] fn a_future_last_publish_day_does_not_block_the_real_day() {
+        let mut s = named_store();
+        s.meta_set("last_publish_day", 20261125).unwrap();
+        assert!(Scheduler::new().due(&s, 20261124, 0, true).unwrap());
     }
     #[test] fn a_day_with_no_new_claims_is_marked_done_without_a_commit() {
         if skip_without_git() { return; }
