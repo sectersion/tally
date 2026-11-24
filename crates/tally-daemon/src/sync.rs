@@ -12,6 +12,7 @@ use tally_scoring::{LedgerEntry, GENESIS_HASH, RULESET_VERSION};
 
 pub const BATCH_MAX: usize = 500;
 pub const MAX_409_RETRIES: usize = 3;
+const MAX_429_RETRIES: usize = 10;
 
 #[derive(thiserror::Error, Debug)]
 pub enum SyncError {
@@ -47,7 +48,7 @@ pub fn sync_chain(api: &Api, server_id: &str, project: &str, ruleset: &str, loca
 
 /// `dry`: stop after the head check and report how many entries are left to upload.
 fn chain(api: &Api, server_id: &str, project: &str, ruleset: &str, local: &[LedgerEntry], dry: bool) -> Result<ChainReport, SyncError> {
-    let (mut uploaded, mut conflicts, mut batch_max) = (0, 0, BATCH_MAX);
+    let (mut uploaded, mut conflicts, mut limited, mut batch_max) = (0, 0, 0, BATCH_MAX);
     'refetch: loop {
         let head = api.head(server_id, ruleset)?;
         let foreign = |hash: &str, count: u64| SyncError::ForeignHead {
@@ -90,6 +91,10 @@ fn chain(api: &Api, server_id: &str, project: &str, ruleset: &str, local: &[Ledg
                         return Err(SyncError::TooManyConflicts { project: project.into() });
                     }
                     continue 'refetch;
+                }
+                Err(ApiError::RateLimited(secs)) if limited < MAX_429_RETRIES => {
+                    limited += 1;
+                    std::thread::sleep(std::time::Duration::from_secs(secs.min(30)));
                 }
                 Err(ApiError::TooLarge) if batch_max > 1 => batch_max /= 2,
                 Err(e) => return Err(e.into()),
