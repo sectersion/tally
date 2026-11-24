@@ -389,7 +389,7 @@ export function createServer(deps: Deps) {
           const { owner, name } = req.params;
           const p = await visibleProject(sql, owner, name, await getSession(sql, req));
           if (!p) return notFound();
-          return live.stream(req, server, p.id, ip(req, server));
+          return live.stream(req, server, p.id, ip(req, server), p.public);
         }),
       },
       "/settings": {
