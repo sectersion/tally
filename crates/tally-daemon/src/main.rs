@@ -247,6 +247,9 @@ fn main() -> Result<()> {
                 bail!("presence.require is true but presence is not supported on this platform; set [presence] require = false in config.toml");
             }
             if once {
+                if dashboard || cfg.run.dashboard {
+                    eprintln!("note: --once does not serve the dashboard; use `tally dashboard` or `tally run --dashboard`");
+                }
                 let mut srcs = sources(&cfg, &home, &mut store)?;
                 let r = run_once(&mut store, &mut srcs, &mut hooks(&cfg, &home), now_ms());
                 for e in &r.errors {
@@ -255,6 +258,11 @@ fn main() -> Result<()> {
                 let (skipped, total, prov) = r.finalized.map_or((0, 0, 0), |f| (f.skipped, f.final_total, f.provisional));
                 println!("added {}, duplicates {}, skipped {skipped}, final {total}, provisional {prov}", r.added, r.duplicates);
             } else {
+                // Advisory lock for the life of the process; the OS releases it on exit or crash.
+                let lock = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(home.join("run.lock"))?;
+                if lock.try_lock().is_err() {
+                    bail!("another `tally run` is already using {}", home.display());
+                }
                 ctrlc::set_handler(|| STOP.store(true, Ordering::Relaxed)).context("installing the Ctrl-C handler")?;
                 let dash = if dashboard || cfg.run.dashboard {
                     let port = dashboard_port.unwrap_or(cfg.run.dashboard_port);
@@ -285,9 +293,15 @@ fn main() -> Result<()> {
             if let Some(n) = name.as_deref().filter(|n| !tally_daemon::published::valid_public_name(n)) {
                 bail!("invalid project name {n:?}; use owner/repo (letters, digits, '.', '_', '-')");
             }
+            let before = store.project_names()?;
             let (id, adopted) = register_git_project_matched(&mut store, &path, name.as_deref())?;
             if let Some((name, via)) = adopted {
                 eprintln!("matched {name} via {via}");
+            }
+            if let (Some(old), Some(n)) = (before.get(&id), &name) {
+                if old != n {
+                    eprintln!("note: project was named {old}; renamed to {n}");
+                }
             }
             println!("{id}");
         }
