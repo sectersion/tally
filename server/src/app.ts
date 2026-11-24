@@ -641,8 +641,12 @@ export function createServer(deps: Deps) {
           // Re-derived from the live list: the form only names a candidate.
           if (!(await findUpdEntries(full, fetchFn)).some((e) => e.id === id))
             throw new HttpError(400, { error: "not a match for the linked repo" });
+          // The Ships fetch above can outlive an unlink-repo: only write while the link is live.
           await sql.begin(async (tx) => {
-            await tx`update projects set upd_record_id = ${id} where id = ${p.id}`;
+            const r = await tx`update projects set upd_record_id = ${id}
+              where id = ${p.id} and exists (select 1 from project_repos
+                where project_id = ${p.id} and unlinked_at is null) returning id`;
+            if (!r.length) throw new HttpError(409, { error: "repo was unlinked; link a repo first" });
             await bumpChange(tx, p.id);
           });
           return redirect(`/p/${p.public_name}/settings`);
