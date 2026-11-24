@@ -132,6 +132,15 @@ pub struct Mapped {
     pub stats: Stats,
 }
 
+/// `rel_under`, retrying with the canonical parent dir: project roots are canonical (symlinks, junctions, Windows 8.3 names) but logged paths may not be.
+pub(crate) fn rel_under_canon(root: &str, entity: &str) -> Option<String> {
+    rel_under(root, entity).or_else(|| {
+        let (dir, name) = entity.rsplit_once('/')?;
+        let canon = std::fs::canonicalize(dir).ok()?;
+        rel_under(root, &format!("{}/{name}", crate::project::normalize_path(&canon.to_string_lossy())))
+    })
+}
+
 /// Path of `entity` under `root` (both normalized, component-aware, case-insensitive on Windows and macOS).
 pub(crate) fn rel_under(root: &str, entity: &str) -> Option<String> {
     let fold = cfg!(any(windows, target_os = "macos"));
@@ -182,13 +191,7 @@ pub fn map_heartbeats(
             continue;
         };
         let root_n = crate::project::normalize_path(&root.to_string_lossy());
-        // project_for_dir canonicalizes (symlinks, Windows 8.3 names), so retry with the canonical dir when the raw path misses the root.
-        let rel = rel_under(&root_n, &ent).or_else(|| {
-            let canon = std::fs::canonicalize(dir).ok()?;
-            let name = ent.rsplit_once('/')?.1;
-            rel_under(&root_n, &format!("{}/{name}", crate::project::normalize_path(&canon.to_string_lossy())))
-        });
-        let Some(rel) = rel else {
+        let Some(rel) = rel_under_canon(&root_n, &ent) else {
             stats.outside_project += 1;
             continue;
         };
