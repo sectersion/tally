@@ -41,6 +41,10 @@ Revoke with `bun run token:revoke <token_id>` (prints `revoked`, or `no such act
 - `bun run token:claim <project_id> <handle>` gives a project (for example one made by `token:create`, which has no owner) to the user with that handle. If the project already has an owner it refuses and exits 1; add `--force` to replace the owner.
 - `bun run user:role <handle> user|reviewer|admin` sets a user's role (prints `<handle> is now <role>`, or `no such handle` and exits 1).
 
+## Migrations
+
+`server/migrations/` runs in name order. Number `103` has two files (`103_device.sql`, `103_one_repo_per_project.sql`; both apply, never rename an applied migration), `104` is reserved for plan 10 (`104_submissions.sql`), and `105_ledger_entries_chain_ts.sql` already exists.
+
 ## Test
 
 ```sh
