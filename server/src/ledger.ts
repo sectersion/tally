@@ -51,7 +51,7 @@ export async function recordCommit(
   await sql`insert into commits (project_id, hash, ts) values (${projectId}, ${c.hash}, ${c.ts})`;
 }
 
-/** Pure batch checks, first failure wins: foreign ruleset, foreign project, then the Rust chain check. */
+/** Pure batch checks, first failure wins: foreign ruleset, foreign project, repeated action_id, then the Rust chain check. */
 export function checkBatch(
   entries: LedgerEntry[],
   prevHash: string,
@@ -62,6 +62,9 @@ export function checkBatch(
   if (r >= 0) return { index: r, reason: "unknown_ruleset" };
   const p = entries.findIndex((e) => e.project !== publicName);
   if (p >= 0) return { index: p, reason: "project_mismatch" };
+  const seen = new Set<string>();
+  const d = entries.findIndex((e) => seen.size === seen.add(e.action_id).size);
+  if (d >= 0) return { index: d, reason: "duplicate_action" };
   const v = verifyChain(entries, prevHash);
   return v.ok ? null : { index: v.index, reason: v.reason };
 }
@@ -78,7 +81,8 @@ export async function appendEntries(
 ): Promise<Head> {
   const { prev_hash, entries } = body;
   const R = (entries[0] as LedgerEntry).ruleset;
-  return sql.begin(async (tx) => {
+  return sql
+    .begin(async (tx) => {
     if (R === ruleset)
       await tx`insert into chains (project_id, ruleset, head_hash) values (${projectId}, ${R}, ${GENESIS})
         on conflict do nothing`;
@@ -127,5 +131,11 @@ export async function appendEntries(
         verified_s = verified_s + ${added} where id = ${ch.id} returning head_hash, count`;
     await bumpChange(tx, projectId);
     return { head_hash: u.head_hash, count: Number(u.count) };
-  });
+    })
+    .catch((e) => {
+      // unique (chain_id, action_id): a claim already on the chain, re-chained in a later batch
+      if (e?.errno === "23505" && e?.constraint === "ledger_entries_chain_action")
+        throw new HttpError(422, { error: "broken_chain", index: 0, reason: "duplicate_action" });
+      throw e;
+    });
 }

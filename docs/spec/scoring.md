@@ -1,6 +1,6 @@
 # Tally Scoring Spec (draft v0)
 
-The contract every component implements: the daemon computes it, the server re-computes it (same Rust crate compiled to WebAssembly), auditors re-derive it. If code and this spec disagree, the spec wins until it is changed.
+The contract every component implements: the daemon computes it, the server verifies the ledger's hash chain, ruleset, project and unique action ids (same Rust crate compiled to WebAssembly) but does not re-score claims, which is bounded by the device token; auditors re-derive it from events. If code and this spec disagree, the spec wins until it is changed.
 
 Ruleset version: `2026.11-0`. Every constant below is part of the ruleset; changing any value bumps the version.
 
