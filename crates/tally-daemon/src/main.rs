@@ -178,7 +178,14 @@ fn main() -> Result<()> {
     if let Cmd::VerifyPublished { files } = &cli.cmd {
         let mut failed = false;
         for f in files {
-            let text = std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?;
+            let text = match std::fs::read_to_string(f) {
+                Ok(t) => t,
+                Err(e) => {
+                    println!("{}: FAIL reading file: {e}", f.display());
+                    failed = true;
+                    continue;
+                }
+            };
             match tally_daemon::published::verify_published_json(&text) {
                 Ok(c) => {
                     let h = tally_daemon::published::hours_message(c.verified_s);
@@ -335,8 +342,12 @@ fn main() -> Result<()> {
             };
             let ids = store.server_ids()?;
             let mut failed = false;
+            let mut reported = std::collections::HashSet::new();
             let mut fail = |p: &str, e: &tally_daemon::sync::SyncError| {
                 failed = true;
+                if !reported.insert(p.to_string()) {
+                    return; // one line per project, not one per phase
+                }
                 let id = ids.get(p).and_then(|v| v.first()).map_or("<id>", String::as_str);
                 match e {
                     tally_daemon::sync::SyncError::NotLoggedIn { .. } => eprintln!("{p}: no device token; run tally login --server-id {id}"),
@@ -372,6 +383,7 @@ fn main() -> Result<()> {
                 Diagnosis::ScoringChanged { index, field, .. } => Some(format!("scoring changed at entry {index} ({field}): uploads are stopped; repair needs plan 10 Task 1b merged and server epoch support; see docs/superpowers/plans/2026-11-23-07-daemon-sync.md Task 9")),
                 Diagnosis::Diverged { index, field, .. } => Some(format!("ledger diverged at entry {index} ({field}): uploads are stopped for all projects; a new epoch needs tally repair --new-epoch (not yet available: needs plan 10 Task 1b merged and server epoch support)")),
                 Diagnosis::Published(e) => Some(format!("published chains are inconsistent: {e}")),
+                Diagnosis::RulesetChanged { ledger, current } => Some(format!("ledger was written under ruleset {ledger} but this build scores with {current}: it cannot be checked against a fresh derivation")),
             };
             if let Some(m) = msg {
                 println!("{m}");
@@ -501,15 +513,19 @@ fn login(home: &std::path::Path, server_id: &str, server: Option<&str>) -> Resul
         }
     }
     // One GET /head when a server is configured. The token stays stored either way.
+    let mut verified = true;
     if let Some(url) = config::load(home)?.sync.server {
         let token = tally_daemon::credentials::load_tokens(home).context("reading device tokens")?.remove(server_id).unwrap_or_default();
         match tally_daemon::api::Api::new(&url, &token).head(server_id, tally_scoring::RULESET_VERSION) {
             Ok(_) => {}
             Err(tally_daemon::api::ApiError::Unauthorized) => bail!("device token rejected by {url}; the token is stored, run tally login again with a valid one"),
-            Err(e) => eprintln!("warning: could not check the token with {url}: {e}"),
+            Err(e) => {
+                verified = false;
+                eprintln!("warning: could not check the token with {url}: {e}");
+            }
         }
     }
-    println!("logged in");
+    println!("{}", if verified { "logged in" } else { "token stored, not verified" });
     Ok(())
 }
 

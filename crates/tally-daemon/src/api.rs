@@ -27,6 +27,8 @@ pub enum ApiError {
     Rejected { index: usize, reason: String },
     #[error("server has no such project; check tally project link")]
     NotFound,
+    #[error("rate limited by the server; retry in {0}s")]
+    RateLimited(u64),
     #[error("server error {0}")]
     Server(u16),
     #[error("network error: {0}")]
@@ -35,7 +37,7 @@ pub enum ApiError {
 
 impl ApiError {
     pub fn retryable(&self) -> bool {
-        matches!(self, ApiError::Server(_) | ApiError::Network(_))
+        matches!(self, ApiError::RateLimited(_) | ApiError::Server(_) | ApiError::Network(_))
     }
 }
 
@@ -45,6 +47,7 @@ fn classify(e: ureq::Error) -> ApiError {
             401 | 403 => ApiError::Unauthorized,
             404 => ApiError::NotFound,
             413 => ApiError::TooLarge,
+            429 => ApiError::RateLimited(resp.header("retry-after").and_then(|v| v.trim().parse().ok()).unwrap_or(1)),
             409 | 422 => {
                 let v: serde_json::Value = serde_json::from_reader(resp.into_reader()).unwrap_or_default();
                 if code == 409 {

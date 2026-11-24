@@ -16,6 +16,8 @@ pub enum Diagnosis {
     ScoringChanged { index: usize, action_id: String, field: &'static str },
     Diverged { index: usize, action_id: String, field: &'static str },
     Published(PublishError),
+    /// The ledger is under another ruleset, so nothing was compared.
+    RulesetChanged { ledger: String, current: String },
 }
 
 /// Fixed codes for the closing reason; never free text, since it leaves the machine.
@@ -44,8 +46,10 @@ pub fn diagnose(store: &Store) -> Result<Diagnosis, StoreError> {
                 Diagnosis::Diverged { index, action_id, field }
             });
         }
-        // A ruleset change is not a divergence of this ledger's data.
-        Err(FinalizeError::RulesetChanged { .. } | FinalizeError::Busy) => {}
+        // Not a divergence, but nothing was compared either: do not report Clean.
+        Err(FinalizeError::RulesetChanged { ledger, current }) => return Ok(Diagnosis::RulesetChanged { ledger, current }),
+        // A finalize lock conflict is not a divergence (check_derivation does not take the lock).
+        Err(FinalizeError::Busy) => {}
     }
     Ok(match published::check(store) {
         Ok(()) => Diagnosis::Clean,
@@ -76,6 +80,15 @@ mod tests {
 
     #[test] fn clean_store_is_clean() {
         assert!(matches!(diagnose(&finalized()).unwrap(), Diagnosis::Clean));
+    }
+    #[test] fn a_ledger_under_another_ruleset_is_not_clean() {
+        let mut s = Store::open_in_memory().unwrap();
+        let mut e = tally_scoring::LedgerEntry { v: 1, ruleset: "old-0".into(), action_id: "a".into(), ts: 1, project: None,
+            kind: "k".into(), verified_s: 1, unverified_s: 0, reasons: vec![], features: Default::default(),
+            prev_hash: tally_scoring::GENESIS_HASH.into(), hash: String::new() };
+        e.hash = tally_scoring::ledger::entry_hash(&e);
+        s.append_ledger(&[e], 5, 0, &[]).unwrap();
+        assert!(matches!(diagnose(&s).unwrap(), Diagnosis::RulesetChanged { ledger, .. } if ledger == "old-0"));
     }
     #[test] fn a_changed_feature_is_scoring_changed() {
         let s = finalized();

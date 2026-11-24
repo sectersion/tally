@@ -62,6 +62,24 @@ fn lunch_scenario_end_to_end() {
 }
 
 #[test]
+fn verify_published_rejects_an_empty_chain_and_continues_past_unreadable_files() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let claims = [tally_scoring::Claim {
+        action_id: "a0".into(), ts: 0, project: Some("o/r".into()), kind: "prompt".into(),
+        verified_s: 360, unverified_s: 0, reasons: vec![], features: Default::default(),
+    }];
+    let (gf, ef, mf) = (t.path().join("good.json"), t.path().join("empty.json"), t.path().join("missing.json"));
+    std::fs::write(&gf, serde_json::to_string(&tally_scoring::chain(&claims, tally_scoring::GENESIS_HASH)).unwrap()).unwrap();
+    std::fs::write(&ef, "[]").unwrap();
+    let o = tally(&home, &["verify-published", ef.to_str().unwrap(), mf.to_str().unwrap(), gf.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(!out(&o).contains("ok: ") || out(&o).matches("ok: ").count() == 1, "{}", out(&o));
+    assert!(out(&o).contains("empty chain") && out(&o).contains("FAIL reading file"), "{}", out(&o));
+    assert!(out(&o).contains(&format!("ok: {}", gf.display())), "{}", out(&o));
+}
+
+#[test]
 fn project_add_rejects_a_directory_outside_git_and_prints_the_id_inside_one() {
     let t = tempfile::tempdir().unwrap();
     let home = t.path().join("home");
@@ -339,6 +357,20 @@ fn verify_published_checks_files_without_creating_a_database() {
 }
 
 #[test]
+fn verify_published_continues_past_unreadable_files_and_flags_empty_chains() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let (bin, empty, missing) = (t.path().join("rnd.bin"), t.path().join("empty.json"), t.path().join("missing.json"));
+    std::fs::write(&bin, [0xffu8, 0xfe, 0x80, 0x81]).unwrap();
+    std::fs::write(&empty, "[]").unwrap();
+    let o = tally(&home, &["verify-published", bin.to_str().unwrap(), missing.to_str().unwrap(), empty.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    let s = out(&o);
+    assert!(s.contains(&format!("{}: FAIL reading file", bin.display())), "{s}");
+    assert!(s.contains(&format!("{}: FAIL: empty chain", empty.display())), "{s}");
+}
+
+#[test]
 fn project_add_rejects_a_name_that_is_not_owner_slash_repo() {
     let t = tempfile::tempdir().unwrap();
     let o = tally(&t.path().join("home"), &["project", "add", t.path().to_str().unwrap(), "--name", "foo"]);
@@ -446,6 +478,18 @@ fn login_checks_the_token_against_a_configured_server() {
     let o = login(t.path(), "tok", &[]);
     assert!(o.status.success(), "{}", err(&o));
     assert!(err(&o).contains("warning"), "{}", err(&o));
+    assert_eq!(out(&o), "token stored, not verified");
+}
+
+#[test]
+fn sync_with_a_rejected_token_prints_one_line_per_project() {
+    let f = FakeServer::start("tok");
+    let t = tempfile::tempdir().unwrap();
+    let home = synced_home(t.path(), &f.url);
+    login(&home, "tok_wrong", &[]); // rejected, but the token stays stored
+    let o = tally(&home, &["sync"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(err(&o).matches("device token rejected").count(), 1, "{}", err(&o));
 }
 
 #[test]

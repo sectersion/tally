@@ -645,3 +645,50 @@ fn nothing_but_ledger_entries_and_head_hashes_leaves_the_machine() {
     }
     assert!(reqs.iter().any(|r| r.path.contains("/entries")) && reqs.iter().any(|r| r.path.contains("/commit")));
 }
+
+/// SYNC-2: an unreachable server must stop the pass after the first failure, not cost every project a timeout.
+#[test]
+fn sync_stops_after_the_first_network_failure() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    let hits = Arc::new(AtomicUsize::new(0));
+    let h = hits.clone();
+    std::thread::spawn(move || {
+        for c in l.incoming() {
+            h.fetch_add(1, Ordering::SeqCst);
+            drop(c); // accept and hang up: a network error
+        }
+    });
+    let mut s = tally_daemon::store::Store::open_in_memory().unwrap();
+    let mut evs = vec![];
+    for i in 0..3 {
+        let p = format!("p{i}");
+        s.register_project(&p, &format!("C:/r{i}"), Some(&format!("qa/proj{i}"))).unwrap();
+        s.set_server_id(&p, &format!("srv_{i}")).unwrap();
+        evs.push(tally_scoring::Event {
+            v: 1, id: format!("a{i}"), ts: (i as i64) * 100_000, source: "test".into(), project: Some(p),
+            session: None, kind: tally_scoring::Kind::Prompt { chars: 200, relevance_pm: 600, novelty_bytes: 100 },
+        });
+    }
+    s.append_events(&evs).unwrap();
+    s.set_watermark("src", 100_000_000).unwrap();
+    tally_daemon::finalize::finalize(&mut s).unwrap();
+    let tokens = (0..3).map(|i| (format!("srv_{i}"), "tok".to_string())).collect();
+    let (commits, uploads) =
+        tally_daemon::sync::sync_once(&mut s, &url, &tokens, &mut Default::default(), Some(1_000_000));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert_eq!(commits.len() + uploads.len(), 1, "{commits:?} {uploads:?}");
+    assert!(hits.load(Ordering::SeqCst) <= 2, "hits {}", hits.load(Ordering::SeqCst));
+}
+
+#[test]
+fn a_429_between_batches_is_waited_out_not_fatal() {
+    let f = FakeServer::start("tok");
+    f.max_batch(1);
+    // The second batch (after the first succeeded) gets a 429; the sync must retry it.
+    f.on_next_upload(|s| s.fail = (1, 429));
+    let r = sync_chain(&api(&f), "srv_1", "p", R, &chain_of(2)).unwrap();
+    assert_eq!(r.uploaded, 2);
+}

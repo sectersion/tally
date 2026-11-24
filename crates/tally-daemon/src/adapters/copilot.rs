@@ -4,7 +4,7 @@
 //!
 //! Supported: prompt, agent_output, agent_busy. Not recorded in any log seen so far (so never emitted):
 //! interrupt, tool_decision (every observed approval was `host_policy`, not the user), agent writes.
-use super::common::{file_watermark, iso_to_ms, stable_id};
+use super::common::{file_watermark, iso_to_ms, safe_id, stable_id};
 use super::{Adapter, ParseCtx, ParseReport, Parsed, RealCtx};
 use crate::claude_code::features::ContextTail;
 use crate::claude_code::session::OPEN_SPAN_MAX_MS;
@@ -33,14 +33,20 @@ fn chars(s: &str) -> u32 {
     u32::try_from(s.chars().count()).unwrap_or(u32::MAX)
 }
 
+// Escape the id separator so session "a:b" + msg "c" cannot collide with "a" + "b:c".
+fn esc(s: &str) -> String {
+    s.replace('%', "%25").replace(':', "%3A")
+}
+
 fn ev(session: &str, project: &Option<String>, native: &str, kind_s: &str, ts: i64, kind: Kind) -> Event {
+    let (session, native) = (safe_id(session), safe_id(native));
     Event {
         v: 1,
-        id: stable_id(SOURCE, &format!("{session}:{native}"), kind_s),
+        id: stable_id(SOURCE, &format!("{}:{}", esc(&session), esc(&native)), kind_s),
         ts,
         source: SOURCE.into(),
         project: project.clone(),
-        session: Some(session.to_string()),
+        session: Some(session),
         kind,
     }
 }
@@ -86,6 +92,7 @@ pub fn parse_full(text: &str, ctx: &dyn ParseCtx) -> (Parsed, ParseReport, Optio
         };
         let str_of = |k: &str| data.and_then(|d| d.get(k)).and_then(Value::as_str);
         if ty == "session.start" {
+            close!(None::<i64>); // book the open turn to the session it began in
             session = str_of("sessionId").map(str::to_string);
             if session.is_some() {
                 rep.format = match data.and_then(|d| d.get("version")).and_then(Value::as_u64) {
@@ -108,7 +115,7 @@ pub fn parse_full(text: &str, ctx: &dyn ParseCtx) -> (Parsed, ParseReport, Optio
         match ty {
             "user.message" => {
                 // Only `delivery == "idle"` is seen in real logs; any other value is not guessed to be human input.
-                let content = str_of("content").filter(|c| !c.is_empty());
+                let content = str_of("content").filter(|c| !c.trim().is_empty());
                 match (str_of("delivery"), content) {
                     (Some("idle"), Some(text)) => {
                         close!(None::<i64>);
@@ -270,6 +277,15 @@ mod tests {
     fn stop(ms: i64) -> String {
         line("assistant.turn_end", ms - 1, serde_json::json!({"turnId": "0"})) + &line("hook.start", ms, serde_json::json!({"hookType": "agentStop"}))
     }
+    #[test]
+    fn ids_do_not_collide_when_session_and_message_ids_contain_colons() {
+        let id = |sid: &str, mid: &str| {
+            let t = line("session.start", 1000, serde_json::json!({"sessionId": sid, "version": 1, "context": {"cwd": "/p"}})) + &prompt(2000, mid, "hello", "idle");
+            parse_full(&t, &StubCtx).0.events[0].id.clone()
+        };
+        assert_ne!(id("a:b", "c"), id("a", "b:c"));
+    }
+
     fn kinds(p: &Parsed) -> Vec<&'static str> {
         p.events
             .iter()
@@ -306,10 +322,26 @@ mod tests {
     }
 
     #[test]
+    fn whitespace_only_prompt_is_not_a_prompt() {
+        let t = start(0, "C:/tallyproj") + &prompt(1_000, "m1", "   
+ ", "idle");
+        assert!(parse_full(&t, &StubCtx).0.events.is_empty());
+    }
+
+    #[test]
     fn agent_followups_and_unknown_deliveries_are_not_prompts() {
         let t = start(0, "C:/tallyproj") + &prompt(1_000, "m1", "queued text", "queued") + &prompt(2_000, "m2", "", "idle");
         let (p, r, _) = parse_full(&t, &StubCtx);
         assert!(p.events.is_empty() && r.skipped >= 3 && r.errors == 0);
+    }
+
+    #[test]
+    fn second_session_start_keeps_open_turn_on_its_own_session() {
+        let s2 = line("session.start", 60_000, serde_json::json!({"sessionId": "s2", "version": 1, "context": {"cwd": "D:/other"}}));
+        let t = start(0, "C:/tallyproj") + &prompt(1_000, "m1", "hello", "idle") + &line("assistant.turn_end", 9_000, serde_json::json!({})) + &s2;
+        let (p, _, _) = parse_full(&t, &StubCtx);
+        let busy = p.events.iter().find(|e| matches!(e.kind, Kind::AgentBusy { .. })).unwrap();
+        assert_eq!((busy.session.as_deref(), busy.project.as_deref()), (Some("s1"), Some("proj")));
     }
 
     #[test]

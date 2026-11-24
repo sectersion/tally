@@ -213,8 +213,10 @@ pub fn sync_hook(cfg: &Config, home: &Path) -> Option<TickHook> {
 }
 
 /// Seconds between ticks: 0 would busy-loop and a huge value overflows `Instant`, so 1 s to 24 h.
-pub fn effective_interval(secs: u64) -> u64 {
-    secs.clamp(1, 86_400)
+/// With presence enabled the cap is half the coverage gap, else samples count as a gap and no coverage is stored.
+pub fn effective_interval(secs: u64, presence: bool) -> u64 {
+    let max = if presence { crate::presence::COVERAGE_MAX_GAP_MS as u64 / 2000 } else { 86_400 };
+    secs.clamp(1, max)
 }
 
 /// A wall clock this far ahead of the monotonic clock is a jump, not time passing.
@@ -268,7 +270,7 @@ pub fn run_loop(store: &mut Store, cfg: &Config, home: &Path, stop: &AtomicBool)
         for e in run_once(store, &mut srcs, &mut hks, now).errors {
             eprintln!("{e}");
         }
-        let deadline = Instant::now() + Duration::from_secs(effective_interval(cfg.run.interval_secs));
+        let deadline = Instant::now() + Duration::from_secs(effective_interval(cfg.run.interval_secs, cfg.presence.enabled));
         while !stop.load(Ordering::Relaxed) {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -467,9 +469,10 @@ mod tests {
 
     #[test]
     fn a_zero_interval_ticks_every_second() {
-        assert_eq!((effective_interval(0), effective_interval(15)), (1, 15));
-        assert_eq!(effective_interval(u64::MAX), 86_400);
-        let _ = Instant::now() + Duration::from_secs(effective_interval(u64::MAX)); // no overflow panic
+        assert_eq!((effective_interval(0, false), effective_interval(15, false)), (1, 15));
+        assert_eq!(effective_interval(u64::MAX, false), 86_400);
+        assert_eq!((effective_interval(65, true), effective_interval(65, false)), (30, 65)); // presence needs ticks well under COVERAGE_MAX_GAP_MS
+        let _ = Instant::now() + Duration::from_secs(effective_interval(u64::MAX, false)); // no overflow panic
     }
     #[test]
     fn a_failing_hook_does_not_stop_the_next() {

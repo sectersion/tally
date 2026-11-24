@@ -134,12 +134,23 @@ impl ClaudeCode {
     /// After a restart: replays the last 64 KiB before `off` (events discarded) to rebuild the context tail
     /// and pending tool uses, then restores the open turn from state.
     fn warm_up(&mut self, rel: &str, path: &Path, off: u64, open: Option<String>) {
-        let start = off.saturating_sub(WARM_UP_BYTES);
-        let mut buf = Vec::new();
-        let read = std::fs::File::open(path).and_then(|mut f| {
-            f.seek(SeekFrom::Start(start))?;
-            f.take(off - start).read_to_end(&mut buf)
-        });
+        // Pending tool uses live in the open turn, so widen the window until it starts before that turn's prompt.
+        let open_ts = open.as_deref().and_then(|o| o.split_once(' ')?.1.parse::<i64>().ok());
+        let mut window = WARM_UP_BYTES;
+        let (mut start, mut buf, mut read);
+        loop {
+            start = off.saturating_sub(window);
+            buf = Vec::new();
+            read = std::fs::File::open(path).and_then(|mut f| {
+                f.seek(SeekFrom::Start(start))?;
+                f.take(off - start).read_to_end(&mut buf)
+            });
+            let first_ts = buf.split(|b| *b == b'\n').nth(1).and_then(|l| line::classify(l).ok()?.first().map(|e| e.meta().ts));
+            if read.is_err() || start == 0 || open_ts.is_none_or(|t| first_ts.is_some_and(|f| f < t)) {
+                break;
+            }
+            window *= 2;
+        }
         if read.is_ok() {
             let body = match (start, buf.iter().position(|b| *b == b'\n')) {
                 (0, _) => &buf[..],
@@ -239,7 +250,11 @@ impl Source for ClaudeCode {
                 }
             };
             if chunk.rotated {
-                self.files.insert(rel.clone(), File { floor: last_ts, ..File::new(path, sub) });
+                // The open turn's agent_busy was not sent yet; its ts is the prompt ts, so keep the floor below it
+                // (re-sent events dedupe by id, and the open turn held the watermark below its start).
+                let open_ts: Option<i64> = state.get(&open_key).and_then(|o| o.split_once(' ')?.1.parse().ok());
+                let floor = last_ts.map(|l| open_ts.map_or(l, |t| l.min(t - 1)));
+                self.files.insert(rel.clone(), File { floor, ..File::new(path, sub) });
             } else if self.files.get(rel).is_none_or(|f| {
                 // Saved state differs from memory (last tick not persisted, e.g. an expiry with no new lines).
                 f.fed_to != off || open_str(&f.session) != state.get(&open_key).unwrap_or_else(|| "-".into())
@@ -417,6 +432,34 @@ mod tests {
     }
 
     #[test]
+    fn a_rotation_keeps_the_busy_span_of_the_turn_open_at_rotation() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("p")).unwrap();
+        let f = d.path().join("p/s.jsonl");
+        let head = |ty: &str, u: &str, i: usize| {
+            let t = ts(i);
+            format!(r#"{{"type":"{ty}","uuid":"{u}","sessionId":"s","timestamp":"{t}""#)
+        };
+        let p = head("user", "p1", 0) + r#","origin":{"kind":"human"},"message":{"content":"go"}}"#;
+        let a = head("assistant", "a1", 1) + r#","message":{"content":[{"type":"text","text":"working"}]}}"#;
+        let end = head("system", "d1", 3) + r#","subtype":"turn_duration"}"#;
+        std::fs::write(&f, [p.as_str(), a.as_str(), &"x".repeat(500)].join("
+") + "
+").unwrap();
+        let now = parse_rfc3339_ms(&ts(0)).unwrap() + 30_000;
+        let mut src = ClaudeCode::new(d.path().to_path_buf());
+        let mut st = BTreeMap::from([("started".to_owned(), "1".to_owned())]);
+        src.poll(now, &mut st).unwrap();
+        assert_eq!(src.poll(now, &mut st).unwrap().events.len(), 0);
+        // The file shrinks (rewritten), still holding the open turn, and now ends it.
+        std::fs::write(&f, [p, a, end].join("
+") + "
+").unwrap();
+        let ids: Vec<_> = src.poll(now, &mut st).unwrap().events.into_iter().map(|e| e.id).collect();
+        assert!(ids.contains(&"claude:s:p1:agent_busy".to_owned()), "{ids:?}");
+    }
+
+    #[test]
     fn a_tick_whose_state_was_not_saved_is_replayed_from_the_saved_cursor() {
         let d = tempfile::tempdir().unwrap();
         std::fs::create_dir(d.path().join("p")).unwrap();
@@ -447,6 +490,37 @@ mod tests {
         let ids: Vec<_> = p.events.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, ["claude:s:a1:test_run", "claude:s:p1:agent_busy"]);
         assert!(matches!(p.events[1].kind, tally_scoring::Kind::AgentBusy { end_ts } if end_ts == parse_rfc3339_ms(&ts(3)).unwrap()));
+    }
+
+    #[test]
+    fn a_pending_tool_use_survives_a_restart_beyond_the_warm_up_window() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("p")).unwrap();
+        let f = d.path().join("p/s.jsonl");
+        let head = |ty: &str, u: &str, i: usize| {
+            let t = ts(i);
+            format!(r#"{{"type":"{ty}","uuid":"{u}","sessionId":"s","timestamp":"{t}""#)
+        };
+        let append = |lines: &[String]| {
+            std::fs::OpenOptions::new().create(true).append(true).open(&f).unwrap().write_all((lines.join("\n") + "\n").as_bytes()).unwrap();
+        };
+        let now = parse_rfc3339_ms(&ts(0)).unwrap() + 3_600_000;
+        let mut st = BTreeMap::from([("started".to_owned(), "1".to_owned())]);
+        append(&[
+            head("user", "p1", 0) + r#","origin":{"kind":"human"},"message":{"content":"go"}}"#,
+            head("assistant", "a1", 1)
+                + r#","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+        ]);
+        ClaudeCode::new(d.path().to_path_buf()).poll(now, &mut st).unwrap(); // restart 1
+        let filler = "y".repeat(WARM_UP_BYTES as usize + 1000);
+        append(&[head("assistant", "a2", 2) + &format!(r#","message":{{"content":[{{"type":"text","text":"{filler}"}}]}}}}"#)]);
+        ClaudeCode::new(d.path().to_path_buf()).poll(now, &mut st).unwrap(); // restart 2
+        append(&[
+            head("user", "r1", 3) + r#","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"x"}]}}"#,
+            head("system", "d1", 4) + r#","subtype":"turn_duration"}"#,
+        ]);
+        let p = ClaudeCode::new(d.path().to_path_buf()).poll(now, &mut st).unwrap();
+        assert!(p.events.iter().any(|e| e.id == "claude:s:a1:test_run"), "{:?}", p.events.iter().map(|e| &e.id).collect::<Vec<_>>());
     }
 
     #[test]

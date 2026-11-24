@@ -166,6 +166,14 @@ pub struct PublishedCheck {
 /// Checks a downloaded public chain file: valid chain from genesis, one project, one ruleset.
 pub fn verify_published_json(json: &str) -> Result<PublishedCheck, String> {
     let entries: Vec<LedgerEntry> = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    // unhashed fields (unknown keys) would pass the chain check, so require a lossless round trip
+    let raw: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    if serde_json::to_value(&entries).map_err(|e| e.to_string())? != raw {
+        return Err("FAIL: entries contain unknown or unhashed fields".into());
+    }
+    if entries.is_empty() {
+        return Err("FAIL: empty chain".into());
+    }
     verify_chain(&entries, GENESIS_HASH).map_err(|e| format!("FAIL at entry {}: {}", e.index, e.reason))?;
     let first = entries.first();
     if entries.iter().any(|e| Some(&e.project) != first.map(|f| &f.project) || Some(&e.ruleset) != first.map(|f| &f.ruleset)) {
@@ -218,6 +226,15 @@ mod tests {
         assert!(!case_collides(&s, "Owner/Repo").unwrap());
         s.register_project("p2", "C:/r2", Some("owner/repo")).unwrap();
         assert!(matches!(pending(&s), Err(PublishError::BadName(_))));
+    }
+    #[test] fn verify_published_rejects_unhashed_extra_fields() {
+        let mut s = store_with_ledger(Some("owner/repo"));
+        sync(&mut s, true).unwrap();
+        let entries: Vec<_> = s.published_rows("owner/repo").unwrap().into_iter().map(|r| r.entry).collect();
+        let mut v = serde_json::to_value(&entries).unwrap();
+        assert!(verify_published_json(&v.to_string()).is_ok());
+        v[0]["extra"] = "smuggled text".into();
+        assert!(verify_published_json(&v.to_string()).unwrap_err().contains("unknown"));
     }
     #[test] fn unnamed_projects_publish_nothing() {
         let mut s = store_with_ledger(None);
@@ -366,7 +383,7 @@ mod tests {
         let bad = good.replacen("\"verified_s\":100", "\"verified_s\":999", 1);
         assert!(verify_published_json(&bad).unwrap_err().starts_with("FAIL at entry"));
         assert_eq!(verify_published_json(&chain_json(&["o/r", "o/x"])).unwrap_err(), "FAIL: file mixes projects or rulesets");
-        assert_eq!(verify_published_json("[]").unwrap().entries, 0);
+        assert_eq!(verify_published_json("[]").unwrap_err(), "FAIL: empty chain");
         assert!(verify_published_json("nope").is_err());
     }
     #[test] fn badge_hours_floor_to_one_decimal() {
