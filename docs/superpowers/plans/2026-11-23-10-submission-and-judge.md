@@ -110,6 +110,8 @@ Reasons are appended in that order and are never duplicated. verified_s + unveri
 
 ### Task 1b: Main ledger chains per ruleset (epoch marker), before the bump
 
+> **Status: ruleset chains are implemented, without the `ledger_chains` table.** The QA fix set bumped the ruleset to `2026.11-1`, so this could not wait. Chains are the consecutive runs of one `ruleset` in `ledger`: `append_ledger_checked` opens a new chain at `GENESIS_HASH` when the ruleset changes (once per ruleset), `finalize` re-checks only the trailing run for `RULESET_VERSION`, `verify_ledger` verifies each run from genesis, and `Status.last_hash` is the current chain's tip. Same-ruleset repair epochs still need the `ledger_chains` table below.
+
 Index ruling 2: plan 05 adds only the guard (`finalize` returns `FinalizeError::RulesetChanged` when `ledger.last().ruleset != RULESET_VERSION`). Without this task, the bump in Task 2 makes every daemon refuse to finalize forever. This task does not change `RULESET_VERSION`; its tests use a fake older ruleset string.
 
 **Files:**
