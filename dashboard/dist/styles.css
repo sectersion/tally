@@ -174,3 +174,13 @@ code { background: var(--soft); border: 1px solid var(--hair); padding: 2px 6px;
   nav a { padding: 0 10px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+/* Windows High Contrast: the browser forces HTML colours but leaves SVG paint alone, so dark ink drawn on the forced black canvas vanished. */
+@media (forced-colors: active) {
+  svg:not(.heatmap) text:not(.val), svg text.dow { fill: CanvasText; }
+  svg:not(.heatmap) :is(g, line):not(pattern *) { stroke: CanvasText; }
+  svg:not(.heatmap) .grid-line { stroke: GrayText; }
+  svg:not(.heatmap) rect:not(pattern *, .u) { fill: CanvasText; }
+  svg .u { stroke: CanvasText; }
+  /* shapes made of backgrounds would otherwise be erased */
+  .swatch, .corner, .strip i,.bar, .bar > span, .loop-bar, .loop-bar i, .mini i { forced-color-adjust: none; }
+}
