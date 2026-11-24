@@ -102,7 +102,11 @@ enum Cmd {
     Stop,
     /// Undo `tally stop` and start the daemon if it is not running.
     Start,
-    Status,
+    Status {
+        /// One line: verified time, unverified minutes and whether the daemon is running (for status bars).
+        #[arg(long)]
+        brief: bool,
+    },
     Verify,
     /// Check downloaded published chain files; needs no home or database. Exits 1 if any fail.
     VerifyPublished {
@@ -272,7 +276,7 @@ fn main() -> Result<()> {
         println!("heartbeat_rate_limit_seconds = 0");
         println!("# put these under [settings] in ~/.wakatime.cfg; token file: {}", file.display());
         if !cfg.heartbeat.enabled {
-            println!("# note: set [heartbeat] enabled = true in config.toml; the server is off by default");
+            println!("# note: set [heartbeat] enabled = true in config.toml; the server is off");
         }
         return Ok(());
     }
@@ -445,8 +449,19 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Status => {
+        Cmd::Status { brief } => {
             let s = status(&store)?;
+            if brief {
+                let d = if home.join("paused").exists() {
+                    "paused"
+                } else if tally_daemon::ensure::daemon_running(&home) {
+                    "running"
+                } else {
+                    "stopped"
+                };
+                println!("Tally: {}h {}m verified ({} unverified min), daemon {d}", s.verified_s / 3600, s.verified_s % 3600 / 60, s.unverified_s / 60);
+                return Ok(());
+            }
             println!("events: {}", s.events);
             println!("final_claims: {}", s.final_claims);
             println!("provisional_claims: {}", s.provisional_claims);

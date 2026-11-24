@@ -25,7 +25,7 @@ pub struct HeartbeatConfig {
 
 impl Default for HeartbeatConfig {
     fn default() -> Self {
-        Self { enabled: false, port: 25930, token_file: None }
+        Self { enabled: true, port: 25930, token_file: None }
     }
 }
 
@@ -247,6 +247,16 @@ mod tests {
         write(&d, "[sync]\ntoken = \"x\"\n");
         assert!(load(d.path()).unwrap_err().to_string().contains("unknown"));
         assert_eq!(Config::default().sync, SyncConfig { enabled: false, server: None });
+    }
+
+    #[test]
+    fn heartbeat_is_on_by_default() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(load(d.path()).unwrap().heartbeat.enabled);
+        write(&d, "[heartbeat]
+enabled = false
+");
+        assert!(!load(d.path()).unwrap().heartbeat.enabled);
     }
 
     #[test]

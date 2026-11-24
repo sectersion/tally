@@ -221,3 +221,71 @@ fn start_clears_the_pause() {
     assert!(r.started);
     assert_eq!(n.get(), 1);
 }
+
+/// Kills the daemon it is given the home of, on drop (so a failed assert cannot leak it).
+struct Reap<'a>(&'a Path);
+impl Drop for Reap<'_> {
+    fn drop(&mut self) {
+        kill_daemons(self.0);
+    }
+}
+
+#[test]
+fn a_fresh_home_serves_heartbeats_after_ensure() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    // Not the default port: a maintainer's own daemon (or a parallel test's) may hold 25930.
+    // `enabled` is left at its default, which is what this test is about.
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("config.toml"), format!("[heartbeat]\nport = {port}\n")).unwrap();
+    let cfg = String::from_utf8(tally(&home, &["heartbeat-config"]).stdout).unwrap();
+    let get = |k: &str| cfg.lines().find_map(|l| l.strip_prefix(k)).unwrap().trim().to_string();
+    let (url, key) = (get("api_url = "), get("api_key = "));
+    assert!(url.contains(&format!(":{port}/")), "{url}");
+
+    assert!(tally(&home, &["ensure"]).status.success());
+    let _reap = Reap(&home);
+    let url = format!("{url}/v1/users/current/heartbeats");
+    let body = r#"{"entity":"C:/p/a.rs","type":"file","time":1763800000.5,"is_write":true}"#;
+    let code = |auth: Option<&str>| {
+        let mut r = ureq::post(&url);
+        if let Some(a) = auth {
+            r = r.set("Authorization", a);
+        }
+        match r.set("Content-Type", "application/json").send_string(body) {
+            Ok(r) => Some(r.status()),
+            Err(ureq::Error::Status(c, _)) => Some(c),
+            Err(_) => None,
+        }
+    };
+    let start = std::time::Instant::now();
+    let mut unauth = code(None);
+    while unauth.is_none() && start.elapsed().as_secs() < 5 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        unauth = code(None);
+    }
+    assert_eq!(unauth, Some(401), "heartbeat server did not come up on port {port}");
+    use base64::Engine;
+    let basic = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(&key));
+    assert_eq!(code(Some(&basic)), Some(201));
+}
+
+#[test]
+fn status_brief_is_one_line() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let file = t.path().join("events.jsonl");
+    // One prompt: a single 120 s claim.
+    let ev = |id: &str, ts: i64| {
+        format!(r#"{{"v":1,"id":"{id}","ts":{ts},"source":"test","project":null,"session":null,"kind":"prompt","chars":200,"relevance_pm":600,"novelty_bytes":100}}"#)
+    };
+    std::fs::write(&file, format!("{}\n", ev("1", 0))).unwrap();
+    assert!(tally(&home, &["ingest", file.to_str().unwrap(), "--watermark", "3000000"]).status.success());
+    assert!(tally(&home, &["finalize"]).status.success());
+    let o = tally(&home, &["status", "--brief"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let s = String::from_utf8(o.stdout).unwrap();
+    assert_eq!(s.lines().count(), 1, "{s}");
+    assert!(s.contains("0h 2m verified") && s.contains("daemon stopped"), "{s}");
+}

@@ -522,7 +522,8 @@ claude-code  no_logs  files=0  last=never  format=-  errors=0/0
 codex  unsupported  no adapter built; see docs/adapters/codex.md
 copilot  no_logs  files=0  last=never  format=-  errors=0/0  unsupported_signals=interrupt,tool_decision,agent_write
 cursor  unsupported  no adapter built; see docs/adapters/cursor.md
-gemini-cli  unsupported  no adapter built; see docs/adapters/gemini-cli.md"
+gemini-cli  unsupported  no adapter built; see docs/adapters/gemini-cli.md
+heartbeat  no_logs  files=0  last=never  format=-  errors=0/0"
     );
     let o = tally(&home, &["doctor", "--json"]);
     assert!(out(&o).contains("\"status\": \"no_logs\""), "{}", out(&o));

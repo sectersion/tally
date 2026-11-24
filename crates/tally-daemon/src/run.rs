@@ -419,6 +419,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open(&d.path().join("tally.db")).unwrap();
         let mut cfg = Config::default();
+        cfg.heartbeat.enabled = false;
         cfg.claude_code.enabled = false;
         cfg.copilot.enabled = false;
         cfg.presence.enabled = true;
@@ -444,6 +445,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open(&d.path().join("tally.db")).unwrap();
         let mut cfg = Config::default();
+        cfg.heartbeat.enabled = false;
         cfg.claude_code.enabled = false;
         cfg.presence.enabled = false;
         let mut ids = |c: &Config| sources(c, d.path(), &mut s).unwrap().iter().map(|x| x.id().to_string()).collect::<Vec<_>>();
@@ -502,6 +504,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open_in_memory().unwrap();
         let mut cfg = Config::default();
+        cfg.heartbeat.enabled = false;
         cfg.run.interval_secs = 3600;
         cfg.claude_code.enabled = false;
         cfg.presence.enabled = false;
@@ -513,6 +516,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open_in_memory().unwrap();
         let mut cfg = Config::default();
+        cfg.heartbeat.enabled = false;
         cfg.run.interval_secs = 1;
         cfg.claude_code.enabled = false;
         cfg.presence.enabled = false;
@@ -534,6 +538,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open_in_memory().unwrap();
         let mut cfg = Config::default();
+        cfg.heartbeat.enabled = false;
         cfg.publish.enabled = false;
         cfg.publish.remote = Some(d.path().join("nope").to_string_lossy().into_owned());
         let mut hks = hooks(&cfg, d.path());
