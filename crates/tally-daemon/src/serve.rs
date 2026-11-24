@@ -123,7 +123,14 @@ mod tests {
         let s = DashboardServer::start(d.path().join("none.db"), 0).unwrap();
         let port = s.addr.port();
         s.stop();
-        DashboardServer::start(d.path().join("none.db"), port).unwrap().stop();
+        // the OS may take a moment to release the listener (and parallel tests may briefly take the port): retry
+        let again = (0..50).find_map(|_| {
+            DashboardServer::start(d.path().join("none.db"), port).ok().or_else(|| {
+                std::thread::sleep(Duration::from_millis(100));
+                None
+            })
+        });
+        again.expect("port was never released").stop();
     }
     #[test]
     fn a_post_with_a_body_is_405() {
