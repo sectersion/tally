@@ -4,7 +4,7 @@
 //!
 //! Supported: prompt, agent_output, agent_busy. Not recorded in any log seen so far (so never emitted):
 //! interrupt, tool_decision (every observed approval was `host_policy`, not the user), agent writes.
-use super::common::{file_watermark, iso_to_ms, stable_id};
+use super::common::{file_watermark, iso_to_ms, safe_id, stable_id};
 use super::{Adapter, ParseCtx, ParseReport, Parsed, RealCtx};
 use crate::claude_code::features::ContextTail;
 use crate::claude_code::session::OPEN_SPAN_MAX_MS;
@@ -34,13 +34,14 @@ fn chars(s: &str) -> u32 {
 }
 
 fn ev(session: &str, project: &Option<String>, native: &str, kind_s: &str, ts: i64, kind: Kind) -> Event {
+    let (session, native) = (safe_id(session), safe_id(native));
     Event {
         v: 1,
         id: stable_id(SOURCE, &format!("{session}:{native}"), kind_s),
         ts,
         source: SOURCE.into(),
         project: project.clone(),
-        session: Some(session.to_string()),
+        session: Some(session),
         kind,
     }
 }
