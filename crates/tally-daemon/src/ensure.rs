@@ -57,19 +57,27 @@ pub fn ensure(home: &Path, o: &EnsureOpts, spawn: &dyn Fn(&Path) -> std::io::Res
     if home.join("paused").exists() {
         return out;
     }
-    let consent = home.join("consent.json");
-    if !consent.exists() {
-        let body = serde_json::json!({
-            "client": o.client.as_deref().unwrap_or("unknown"),
-            "version": env!("CARGO_PKG_VERSION"),
-            "at_ms": crate::source::now_ms(),
-        });
-        match std::fs::write(&consent, body.to_string()) {
+    // create_new makes the first writer the only one that sees `first_run`; nothing starts without consent on disk.
+    let body = serde_json::json!({
+        "client": o.client.as_deref().unwrap_or("unknown"),
+        "version": env!("CARGO_PKG_VERSION"),
+        "at_ms": crate::source::now_ms(),
+    });
+    match OpenOptions::new().write(true).create_new(true).open(home.join("consent.json")) {
+        Ok(mut f) => match f.write_all(body.to_string().as_bytes()) {
             Ok(()) => {
                 out.first_run = true;
                 out.notice = Some(EXPLAINER);
             }
-            Err(e) => log(home, &format!("writing consent.json: {e}")),
+            Err(e) => {
+                log(home, &format!("writing consent.json: {e}"));
+                return out;
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && home.join("consent.json").is_file() => {}
+        Err(e) => {
+            log(home, &format!("writing consent.json: {e}"));
+            return out;
         }
     }
     if let Some(dir) = &o.register_cwd {
@@ -99,8 +107,24 @@ pub fn spawn_daemon(home: &Path) -> std::io::Result<()> {
     let mut c = Command::new(std::env::current_exe()?);
     c.arg("run").arg("--home").arg(home).stdin(Stdio::null()).stdout(logf.try_clone()?).stderr(logf);
     #[cfg(windows)]
+    hide_std_handles();
+    #[cfg(windows)]
     std::os::windows::process::CommandExt::creation_flags(&mut c, 0x0800_0000 | 0x0000_0008); // CREATE_NO_WINDOW | DETACHED_PROCESS
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut c, 0);
     c.spawn().map(|_| ())
+}
+
+/// std spawns with bInheritHandles=TRUE, so the daemon would inherit the host's stdout/stderr pipes and the
+/// host would wait for EOF on them until the daemon exits. Make this process's own std handles non-inheritable.
+#[cfg(windows)]
+fn hide_std_handles() {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
+    for h in [std::io::stdin().as_raw_handle(), std::io::stdout().as_raw_handle(), std::io::stderr().as_raw_handle()] {
+        if !h.is_null() {
+            // SAFETY: a plain flag change on a handle this process owns; failure is harmless and ignored.
+            unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0) };
+        }
+    }
 }

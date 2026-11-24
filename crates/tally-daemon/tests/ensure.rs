@@ -126,3 +126,51 @@ fn kill_daemons(home: &Path) {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
+
+#[test]
+fn unwritable_consent_starts_and_registers_nothing() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    std::fs::create_dir_all(home.join("consent.json")).unwrap();
+    let repo = t.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let o = EnsureOpts { client: None, register_cwd: Some(repo) };
+    let r = ensure(&home, &o, &|_| panic!("spawn must not be called"));
+    assert!(!r.first_run && !r.started);
+    assert!(std::fs::read_to_string(home.join("ensure.log")).unwrap().contains("consent.json"));
+    assert!(!home.join("tally.db").exists());
+}
+
+#[test]
+fn concurrent_first_runs_report_first_run_once() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let firsts: usize = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..8).map(|_| s.spawn(|| ensure(&home, &opts(), &|_| Ok(())).first_run)).collect();
+        hs.into_iter().map(|h| usize::from(h.join().unwrap())).sum()
+    });
+    assert_eq!(firsts, 1);
+}
+
+#[test]
+fn hook_json_returns_while_the_daemon_keeps_running() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    // output() reads stdout through a pipe until EOF: it hangs if the daemon inherited the pipe.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let h = home.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(tally(&h, &["ensure", "--hook-json"]));
+    });
+    let res = rx.recv_timeout(std::time::Duration::from_secs(8));
+    let start = std::time::Instant::now();
+    while res.is_ok() && !daemon_running(&home) && start.elapsed().as_secs() < 5 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let up = daemon_running(&home);
+    kill_daemons(&home);
+    let o = res.expect("tally ensure did not return: the daemon holds the host's pipe");
+    assert!(o.status.success() && !o.stdout.is_empty());
+    assert!(up);
+}
