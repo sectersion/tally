@@ -19,10 +19,21 @@ pub enum PublishError {
     PublishedChain { project: String, ruleset: String, index: usize, reason: &'static str },
 }
 
-/// `owner/repo`: two non-empty segments of `[A-Za-z0-9._-]`, neither `.` nor `..`.
+/// `owner/repo`: two segments of `[A-Za-z0-9._-]`, 1..=100 chars, not `.`/`..`/`.git` (git ignores it),
+/// not ending in `.` (Windows aliases it) and not a Windows device name (`con`, `aux.x`, `com1`, ...).
 pub fn valid_public_name(name: &str) -> bool {
     let seg = |s: &str| {
-        !s.is_empty() && s != "." && s != ".." && s.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+        let stem = s.split('.').next().unwrap_or("").to_ascii_uppercase();
+        let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+        !s.is_empty()
+            && s.len() <= 100
+            && s != "."
+            && s != ".."
+            && !s.eq_ignore_ascii_case(".git")
+            && !s.ends_with('.')
+            && !device
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
     };
     matches!(name.split_once('/'), Some((a, b)) if seg(a) && seg(b))
 }
@@ -309,7 +320,10 @@ mod tests {
         assert_eq!(after[0], before[0]);
     }
     #[test] fn bad_public_names_are_rejected() {
-        for bad in ["", "owner", "a/b/c", "../x", "o/..", "o/r r", "o/r?x"] { assert!(!valid_public_name(bad), "{bad}"); }
+        for bad in ["", "owner", "a/b/c", "../x", "o/..", "o/r r", "o/r?x",
+            "o/.git", "o/.GIT", "o/r.", "o/con", "o/CON", "o/aux.x", "o/com1", "o/lpt9.txt"] { assert!(!valid_public_name(bad), "{bad}"); }
+        assert!(!valid_public_name(&format!("o/{}", "a".repeat(101))));
+        for ok in ["o/.github", "o/console", "o/com0", "o/com10", "o/r.x", &format!("o/{}", "a".repeat(100))] { assert!(valid_public_name(ok), "{ok}"); }
         assert!(valid_public_name("sectersion/tally"));
         let mut s = store_with_ledger(None);
         s.register_project("p1", "C:/r", Some("o/r r")).unwrap();
