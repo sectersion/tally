@@ -21,7 +21,7 @@ pub struct Claim {
     pub features: BTreeMap<String, i64>,
 }
 
-/// Claims for every human action, in `(ts, id)` order. Input order and duplicate ids do not matter.
+/// Claims for every human action, in `(ts, kind, id)` order. Input order and duplicate ids do not matter.
 pub fn score(events: &[Event]) -> Vec<Claim> {
     let sorted = sort_dedup(events);
     let mut prev = None;
@@ -50,10 +50,10 @@ pub fn score(events: &[Event]) -> Vec<Claim> {
     out
 }
 
-/// Sorted by `(ts, id)`, first occurrence of each id kept.
+/// Sorted by `(ts, kind, id)` so equal-ts order does not hinge on the id string; first occurrence of each id kept.
 fn sort_dedup(events: &[Event]) -> Vec<Event> {
     let mut sorted = events.to_vec();
-    sorted.sort_by(|a, b| (a.ts, &a.id).cmp(&(b.ts, &b.id)));
+    sorted.sort_by_cached_key(|e| (e.ts, kind_features(&e.kind).0, e.id.clone()));
     let mut seen = BTreeSet::new();
     sorted.retain(|e| seen.insert(e.id.clone()));
     sorted
@@ -108,7 +108,7 @@ fn claim<'a>(ev: &[Event], i: usize, iv: Span, new_run: bool, spans: impl Iterat
 
     let ctx = CapContext {
         interrupt_followed_by_prompt: matches!(a.kind, Kind::Interrupt)
-            && ev[i + 1..]
+            && ev[ev.partition_point(|e| e.ts < t)..]
                 .iter()
                 .take_while(|e| e.ts.saturating_sub(t) <= INTERRUPT_FOLLOW_MS)
                 .any(|e| matches!(e.kind, Kind::Prompt { .. })),
@@ -134,7 +134,7 @@ fn claim<'a>(ev: &[Event], i: usize, iv: Span, new_run: bool, spans: impl Iterat
         project: a.project.clone(),
         kind: kind.into(),
         verified_s: (verified_ms / 1000) as u32,
-        unverified_s: ((raw_ms - verified_ms) / 1000).min(u32::MAX as i64) as u32,
+        unverified_s: (raw_ms / 1000 - verified_ms / 1000).min(u32::MAX as i64) as u32,
         reasons: reasons.iter().filter(|r| r.1).map(|r| r.0.to_string()).collect(),
         features: features.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
     }

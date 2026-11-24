@@ -55,7 +55,7 @@ For each human action `a` at time `t`, with the previous human action (any proje
 3. **Thinking allowance.** If `a` is a substantive prompt (`relevance_pm ≥ THINK_RELEVANCE_PM`), the last `THINK_MAX_S` seconds before `t` are also protected. Deep thinking counts only when it ends in a substantive decision.
 4. **Idle subtraction.** For each `idle` span inside `I`, subtract the part beyond the first `IDLE_GRACE_S` seconds, excluding protected windows.
 5. **Agent-busy subtraction.** For each `agent_busy` span inside `I`, subtract the overlap with idle time beyond `AGENT_IDLE_S`.
-6. **Raw seconds** = what remains of `I`.
+6. **Raw seconds** = what remains of `I`. Seconds are floored: `verified_s = floor(verified_ms / 1000)` and `unverified_s = floor(raw_ms / 1000) - verified_s`, so the two sum to `floor(raw_ms / 1000)`. The sub-second remainder of each claim is dropped (a downward error only, never inflation; activity spaced under 1 s apart earns little).
 7. **Cap.** `verified_s = min(raw, cap(a))`, `unverified_s = raw − verified_s`.
 8. **Attribution.** The claim belongs to `a.project`.
 
@@ -90,6 +90,7 @@ Computed locally on prompt text, which is then discarded.
 - `relevance_pm = 1000 × |prompt ∩ context| / max(|prompt|, 1)`.
 - `novelty_bytes = len(zstd(context_tail ‖ prompt)) − len(zstd(context_tail))`, level 3, where `context_tail` is the last 8 KiB of conversation.
 - If `novelty_bytes < NOVELTY_MIN`, `relevance_pm` is set to 0 (the prompt adds nothing).
+- **Known limit:** the ratio ignores prompt size, so a single in-vocabulary identifier (about 24+ chars, passing the novelty gate) scores `relevance_pm = 1000`. This is a deliberate heuristic limit; the damage is bounded by the 1200 s prompt cap and the 20-char triviality floor.
 
 ## 6. Ledger entry (uploaded)
 
@@ -144,4 +145,4 @@ All values are starting points, to be calibrated against human-labeled sessions.
 1. **Silent thinking:** idle time beyond `IDLE_GRACE_S` is subtracted, except a thinking allowance of up to `THINK_MAX_S` before a substantive prompt. Thinking that leads nowhere isn't counted; a stretch away from the keyboard can earn at most 5 minutes, and only when followed by a substantive prompt.
 2. **Plain-language prompts:** project vocabulary includes comments and prose files, and the trivial threshold is 150‰.
 3. **Unverified seconds:** never credited automatically. Every project gets a human review before it ships.
-4. **Event ids:** stable derived strings, not ULIDs, so a re-read log is deduplicated by id. Nothing orders by id except as the tie-break in (ts, id).
+4. **Event ids:** stable derived strings, not ULIDs, so a re-read log is deduplicated by id. Nothing orders by id except as the last tie-break in (ts, kind, id), so equal-ts order does not depend on id spelling.
