@@ -44,7 +44,9 @@ pub fn score(events: &[Event]) -> Vec<Claim> {
         }
         // iv.start never decreases, so a span ending at or before it can never overlap again.
         open.retain(|e| span_end(e).is_some_and(|end| end > iv.start));
-        out.push(claim(&sorted, i, iv, new_run, open.iter().copied()));
+        let lo = sorted.partition_point(|e| e.ts < iv.start);
+        let hi = sorted.partition_point(|e| e.ts <= a.ts);
+        out.push(claim(&sorted, i, iv, new_run, open.iter().copied(), &sorted[lo..hi]));
         prev = Some(a.ts);
     }
     out
@@ -74,19 +76,29 @@ fn span_end(e: &Event) -> Option<i64> {
     }
 }
 
-/// `ev` sorted by `(ts, id)`. `spans` must include every idle/busy event overlapping `iv`; extra events are filtered out here.
+/// `ev` sorted by `(ts, id)`. `spans` must include every idle/busy event overlapping `iv` and
+/// `outputs` every event with ts in `[iv.start, t]`; extra events are filtered out here.
 fn claim<'a>(
     ev: &[Event],
     i: usize,
     iv: Span,
     new_run: bool,
     spans: impl Iterator<Item = &'a Event>,
+    outputs: &[Event],
 ) -> Claim {
     let a = &ev[i];
     let t = a.ts;
     let overlaps = |s: &Span| s.end > iv.start && s.start < iv.end;
 
-    let (mut idle_part, mut agent_idle, mut busy) = (vec![], vec![], vec![]);
+    let (mut reading, mut idle_part, mut agent_idle, mut busy) = (vec![], vec![], vec![], vec![]);
+    for e in outputs {
+        if let Kind::AgentOutput { chars } = e.kind {
+            if iv.start <= e.ts && e.ts <= t {
+                let len = (chars as i64 * 1000 / READ_CPS).min(MAX_READ_MS);
+                reading.push(Span { start: e.ts, end: e.ts.saturating_add(len) });
+            }
+        }
+    }
     // Spans not overlapping iv cannot change anything below: every result is clipped to iv.
     for e in spans {
         match e.kind {
@@ -108,7 +120,7 @@ fn claim<'a>(
     };
 
     let all = [idle_part.as_slice(), &busy_part].concat();
-    let prot = think;
+    let prot = [reading.as_slice(), &think].concat();
     let removed = |src: &[Span], prot: &[Span]| total_ms(&clip(&subtract(src, prot), iv));
     let removed_ms = removed(&all, &prot);
 
@@ -126,7 +138,8 @@ fn claim<'a>(
 
     let reasons = [
         ("first_action", new_run),
-        ("think_protected", removed(&all, &[]) != removed_ms),
+        ("read_protected", removed(&all, &think) != removed_ms),
+        ("think_protected", removed(&all, &reading) != removed_ms),
         ("idle_subtracted", removed(&idle_part, &prot) > 0),
         ("agent_busy_subtracted", removed(&busy_part, &prot) > 0),
         ("fail_pass_loop", ctx.completes_fail_pass_loop),
@@ -181,7 +194,7 @@ mod tests {
         for (i, a) in sorted.iter().enumerate() {
             if a.is_human_action() {
                 let (iv, new_run) = interval(a.ts, prev);
-                out.push(claim(&sorted, i, iv, new_run, sorted.iter()));
+                out.push(claim(&sorted, i, iv, new_run, sorted.iter(), &sorted));
                 prev = Some(a.ts);
             }
         }
@@ -226,7 +239,7 @@ mod tests {
         let events = synthetic(4000);
         let got = score(&events);
         assert_eq!(got, score_reference(&events));
-        for r in ["first_action", "idle_subtracted", "agent_busy_subtracted", "think_protected", "fail_pass_loop", "capped"] {
+        for r in ["first_action", "idle_subtracted", "agent_busy_subtracted", "read_protected", "think_protected", "fail_pass_loop", "capped"] {
             assert!(got.iter().any(|c| c.reasons.iter().any(|x| x == r)), "generator never hits {r}");
         }
     }

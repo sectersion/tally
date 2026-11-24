@@ -285,6 +285,11 @@ fn main() -> Result<()> {
             if let Some(n) = name.as_deref().filter(|n| !tally_daemon::published::valid_public_name(n)) {
                 bail!("invalid project name {n:?}; use owner/repo (letters, digits, '.', '_', '-')");
             }
+            if let Some(n) = name.as_deref() {
+                if tally_daemon::published::case_collides(&store, n)? {
+                    bail!("project name {n:?} differs only by case from an existing project name");
+                }
+            }
             let (id, adopted) = register_git_project_matched(&mut store, &path, name.as_deref())?;
             if let Some((name, via)) = adopted {
                 eprintln!("matched {name} via {via}");
