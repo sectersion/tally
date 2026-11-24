@@ -178,8 +178,19 @@ fn main() -> Result<()> {
     if let Cmd::VerifyPublished { files } = &cli.cmd {
         let mut failed = false;
         for f in files {
-            let text = std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?;
+            let text = match std::fs::read_to_string(f) {
+                Ok(t) => t,
+                Err(e) => {
+                    println!("{}: FAIL reading file: {e}", f.display());
+                    failed = true;
+                    continue;
+                }
+            };
             match tally_daemon::published::verify_published_json(&text) {
+                Ok(c) if c.entries == 0 => {
+                    println!("{}: FAIL empty chain (0 entries)", f.display());
+                    failed = true;
+                }
                 Ok(c) => {
                     let h = tally_daemon::published::hours_message(c.verified_s);
                     println!("ok: {}: {} entries, project {}, ruleset {}, verified_hours {}", f.display(), c.entries,
