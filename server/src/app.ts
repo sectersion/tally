@@ -344,7 +344,7 @@ export function createServer(deps: Deps) {
           const bound = cookieValue(req, OAUTH_COOKIE);
           if (!bound || !same(bound, state)) throw new HttpError(400, { error: "bad_state" });
           const [st] =
-            await sql`delete from oauth_states where state_hash = ${hashToken(state)} and expires_at > now() returning verifier, nonce, return_to`;
+            await sql`delete from oauth_states where state_hash = ${hashToken(state)} and nonce not like 'gh:%' and expires_at > now() returning verifier, nonce, return_to`;
           if (!st) throw new HttpError(400, { error: "bad_state" });
           let u: Awaited<ReturnType<typeof exchange>>;
           try {
@@ -529,7 +529,7 @@ export function createServer(deps: Deps) {
           );
           await sql`delete from oauth_states where expires_at < now()`;
           await sql`insert into oauth_states (state_hash, verifier, nonce, return_to, expires_at)
-            values (${hashToken(state)}, ${verifier}, ${s.userId}, ${safeReturn(new URL(req.url).searchParams.get("return_to"))}, now() + interval '10 minutes')`;
+            values (${hashToken(state)}, ${verifier}, ${`gh:${s.userId}`}, ${safeReturn(new URL(req.url).searchParams.get("return_to"))}, now() + interval '10 minutes')`;
           return redirect(ghAuthorizeUrl(cfg, state, challenge), [ghOauthCookie(cfg, state)]);
         }),
       },
@@ -547,9 +547,9 @@ export function createServer(deps: Deps) {
           if (!code || !state) throw new HttpError(400, { error: "bad_callback" });
           const bound = cookieValue(req, GH_OAUTH_COOKIE);
           if (!bound || !same(bound, state)) throw new HttpError(400, { error: "bad_state" });
-          // nonce holds the user who started the flow: a state cannot be completed by someone else.
+          // nonce holds gh:<user who started the flow> (the prefix keeps /auth/callback from taking it): a state cannot be completed by someone else.
           const [st] =
-            await sql`delete from oauth_states where state_hash = ${hashToken(state)} and nonce = ${s.userId} and expires_at > now() returning verifier, return_to`;
+            await sql`delete from oauth_states where state_hash = ${hashToken(state)} and nonce = ${`gh:${s.userId}`} and expires_at > now() returning verifier, return_to`;
           if (!st) throw new HttpError(400, { error: "bad_state" });
           let g: Awaited<ReturnType<typeof exchangeCode>>;
           try {
