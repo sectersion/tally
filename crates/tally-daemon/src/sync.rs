@@ -228,7 +228,8 @@ impl Backoff {
         self.next_ms
     }
     pub fn ready(&self, now_ms: i64) -> bool {
-        now_ms >= self.next_ms
+        // next_ms is never more than BACKOFF_MAX_MS ahead of a sane clock; further means the clock went backwards
+        now_ms >= self.next_ms || now_ms < self.next_ms.saturating_sub(BACKOFF_MAX_MS)
     }
     pub fn failed(&mut self, now_ms: i64) {
         self.failures = self.failures.saturating_add(1);
@@ -298,7 +299,8 @@ impl SyncTicker {
     pub fn tick(&mut self, store: &mut Store, server: &str, home: &Path, now_ms: i64) -> bool {
         let interval_due = match self.last_tick_ms {
             None => true,
-            Some(t) => now_ms.saturating_sub(t) >= COMMIT_INTERVAL_MS,
+            // now < t: the clock went backwards (an earlier jump was corrected); don't wait for the wrong time
+            Some(t) => now_ms < t || now_ms - t >= COMMIT_INTERVAL_MS,
         };
         if !interval_due || !self.backoff.ready(now_ms) {
             return false;
@@ -371,5 +373,21 @@ mod tests {
         assert!(b.ready(now));
         b.unauthorized(now);
         assert_eq!(b.next_ms, now + BACKOFF_MAX_MS);
+    }
+
+    #[test]
+    fn clock_stepped_back_does_not_silence_sync() {
+        let t0: i64 = 1_800_000_000_000;
+        let jump = t0 + 30 * 86_400_000;
+        let mut b = Backoff::new();
+        b.failed(jump);
+        assert!(b.ready(t0 + 3_600_000));
+        let mut s = Store::open_in_memory().unwrap();
+        let home = std::env::temp_dir().join("tally-sync-clock-back");
+        std::fs::create_dir_all(&home).unwrap();
+        let mut t = SyncTicker::new();
+        assert!(t.tick(&mut s, "http://127.0.0.1:9", &home, t0));
+        assert!(t.tick(&mut s, "http://127.0.0.1:9", &home, jump));
+        assert!(t.tick(&mut s, "http://127.0.0.1:9", &home, t0 + 3_600_000));
     }
 }
