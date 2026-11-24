@@ -35,6 +35,9 @@ impl AgentCommitLookup for StoreLookup {
         let err = |e: crate::store::StoreError| SourceError::Other(e.to_string());
         let mut ids = self.store.project_group(&repo.local_id).map_err(err)?;
         ids.extend(crate::project::worktree_ids(&repo.root));
+        // An agent can commit into a sibling registered repo (`git -C ../b commit`): the marker then sits
+        // under the project Claude ran in, so any registered project's marker in the window counts.
+        ids.extend(self.store.projects().map_err(err)?.into_iter().map(|p| p.local_id));
         for p in ids {
             if self.store.has_agent_commit_marker(&p, commit_ts - AGENT_COMMIT_WINDOW_MS, commit_ts + AGENT_COMMIT_AFTER_MS).map_err(err)? {
                 return Ok(true);
@@ -454,6 +457,35 @@ mod tests {
         let mut st = BTreeMap::new();
         src.poll(T - 100_000, &mut st).unwrap();
         commit(&wt, T / 1000);
+        let p = src.poll(T + 61_000, &mut st).unwrap();
+        assert_eq!(p.events.len(), 1);
+        assert!(matches!(p.events[0].kind, Kind::Commit { by: Actor::Agent, .. }));
+    }
+
+    #[test]
+    fn agent_marker_stamped_under_a_sibling_registered_repo_marks_the_commit() {
+        if !git_available() { return; }
+        let t = tempfile::tempdir().unwrap();
+        let (a, b) = (t.path().join("a"), t.path().join("b"));
+        for d in [&a, &b] {
+            std::fs::create_dir_all(d).unwrap();
+            init(d);
+        }
+        let db = t.path().join("tally.db");
+        let mut store = Store::open(&db).unwrap();
+        let ida = crate::project::register_git_project(&mut store, &a, None).unwrap();
+        let idb = crate::project::register_git_project(&mut store, &b, None).unwrap();
+        // Claude ran in a and committed into b with `git -C ../b commit`
+        let marker = Event {
+            v: 1, id: "mk".into(), ts: T - 10_000, source: "claude-code".into(), project: Some(ida), session: None,
+            kind: Kind::Commit { sha: "claude:toolu_1".into(), by: Actor::Agent, lines_changed: 0 },
+        };
+        store.append_events(&[marker]).unwrap();
+        let lk = StoreLookup { store: Store::open(&db).unwrap(), claude_enabled: false };
+        let mut src = GitSource::new(vec![RepoRef { local_id: idb, root: b.clone() }], Box::new(lk));
+        let mut st = BTreeMap::new();
+        src.poll(T - 100_000, &mut st).unwrap();
+        commit(&b, T / 1000);
         let p = src.poll(T + 61_000, &mut st).unwrap();
         assert_eq!(p.events.len(), 1);
         assert!(matches!(p.events[0].kind, Kind::Commit { by: Actor::Agent, .. }));
