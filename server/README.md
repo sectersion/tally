@@ -9,6 +9,10 @@ Needs [Bun](https://bun.sh) 1.4.5 and Postgres 16.
 ```sh
 docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:16
 export DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres
+# Required (see Production settings); these placeholders are enough to start, but sign-in and GitHub need real values.
+export PUBLIC_BASE_URL=http://localhost:8080
+export HCA_CLIENT_ID=dev HCA_CLIENT_SECRET=dev
+export GITHUB_APP_SLUG=dev GITHUB_APP_CLIENT_ID=dev GITHUB_APP_CLIENT_SECRET=dev GITHUB_WEBHOOK_SECRET=dev
 cd server
 bun install
 bun run wasm     # needs Rust stable, the wasm32-unknown-unknown target and wasm-pack
@@ -16,7 +20,7 @@ bun run start    # migrations run at start; PORT defaults to 8080, LOG_LEVEL to 
 curl localhost:8080/healthz   # {"ok":true}
 ```
 
-`server/wasm/` is build output and is not committed. If port 8080 is taken, set `PORT`.
+The `docker run` line stays in the foreground: run the rest in a second terminal. `server/wasm/` is build output and is not committed. If port 8080 is taken, set `PORT` (and match it in `PUBLIC_BASE_URL`).
 
 ## Create a device token
 
