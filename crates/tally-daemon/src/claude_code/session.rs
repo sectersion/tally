@@ -104,12 +104,13 @@ impl Session {
                             exit_code: *is_error as i32,
                             initiator: Actor::Agent,
                         })),
-                        BashKind::Commit if !is_error => Some(("commit", Kind::Commit {
+                        // Marked even when the chain exits non-zero (`commit && push` failing): the commit may exist, and
+                        // a false positive only makes a commit agent-owned (the safe direction).
+                        BashKind::Commit => Some(("commit", Kind::Commit {
                             sha: format!("claude:{tool_use_id}"),
                             by: Actor::Agent,
                             lines_changed: 0,
                         })),
-                        BashKind::Commit => None,
                     };
                     // Id has no block index: two Bash blocks in one entry would collide (FORMAT.md: one block per entry).
                     if let Some((suffix, kind)) = kind {
@@ -310,11 +311,12 @@ mod tests {
         let c = out.last().unwrap();
         assert_eq!((c.id.as_str(), c.ts), ("claude:s:a2:commit", 3_000));
         assert_eq!(c.kind, Kind::Commit { sha: "claude:t2".into(), by: Actor::Agent, lines_changed: 0 });
-        // a failed commit gives nothing
+        // a commit chain that exits non-zero (e.g. failing push) is still marked (GIT-1)
         let n = out.len();
         s.feed(tool("a3", 4_000, "t3", "Bash", Some("git commit -m y"), None), &ctx, &mut out);
-        s.feed(result("r3", 4_100, "t3", true, "nothing to commit"), &ctx, &mut out);
-        assert_eq!(out.len(), n);
+        s.feed(result("r3", 4_100, "t3", true, "push failed"), &ctx, &mut out);
+        assert_eq!(out.len(), n + 1);
+        assert!(matches!(out.last().unwrap().kind, Kind::Commit { by: Actor::Agent, .. }));
         s.feed(tool("a4", 5_000, "t4", "Bash", Some("ls"), None), &ctx, &mut out);
         assert_eq!(s.limit(), i64::MAX);
         assert!(!serde_json::to_string(&out).unwrap().contains("cargo"));
