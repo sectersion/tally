@@ -45,7 +45,7 @@ pub fn diagnose(store: &Store) -> Result<Diagnosis, StoreError> {
             });
         }
         // A ruleset change is not a divergence of this ledger's data.
-        Err(FinalizeError::RulesetChanged { .. }) => {}
+        Err(FinalizeError::RulesetChanged { .. } | FinalizeError::Busy) => {}
     }
     Ok(match published::check(store) {
         Ok(()) => Diagnosis::Clean,
