@@ -24,6 +24,8 @@ pub enum FinalizeError {
     Divergence { index: usize, action_id: String, field: &'static str },
     #[error("ledger was written under ruleset {ledger} but this build scores with {current}; finalize will not append across a ruleset change")]
     RulesetChanged { ledger: String, current: String },
+    #[error("another finalize kept changing the ledger while this one ran; nothing is wrong with the ledger, try again")]
+    Busy,
 }
 
 /// A claim is final iff `ts + INTERRUPT_FOLLOW_MS <= horizon`. The stored ledger must be a
@@ -34,7 +36,7 @@ pub enum FinalizeError {
 /// never withdrawn and `finalized_through` never moves back; later claims wait for the new
 /// horizon. If another writer adds an event at or below the horizon while this runs (a new
 /// source with no watermark yet), the append is refused with `Conflict` and everything is
-/// re-read; up to 3 attempts in total on `Conflict` or `ChainBroken`.
+/// re-read; up to 8 attempts in total, with backoff on `Conflict` or `ChainBroken`.
 ///
 /// Presence guard ("live capture only"), active iff `store.presence_required()`; off, no
 /// claim is ever skipped:
@@ -59,15 +61,29 @@ pub fn finalize(store: &mut Store) -> Result<FinalizeSummary, FinalizeError> {
         let p = prepare(store)?;
         commit(store, p)
     })
+    .map_err(busy_if_contended)
 }
 
-const ATTEMPTS: usize = 3;
+/// `Conflict`/`ChainBroken` out of `retry` only mean a peer kept winning the race (the ledger prefix was
+/// verified in `prepare`), so say that instead of "ledger chain broken".
+fn busy_if_contended(e: FinalizeError) -> FinalizeError {
+    match e {
+        FinalizeError::Store(StoreError::Conflict | StoreError::ChainBroken) => FinalizeError::Busy,
+        e => e,
+    }
+}
+
+// A busy peer finalizer makes our read stale; back off so it can finish (about 1 s in total).
+const ATTEMPTS: usize = 8;
 
 fn retry<T>(mut attempt: impl FnMut() -> Result<T, FinalizeError>) -> Result<T, FinalizeError> {
     let mut n = 1;
     loop {
         match attempt() {
-            Err(FinalizeError::Store(StoreError::Conflict | StoreError::ChainBroken)) if n < ATTEMPTS => n += 1,
+            Err(FinalizeError::Store(StoreError::Conflict | StoreError::ChainBroken)) if n < ATTEMPTS => {
+                std::thread::sleep(std::time::Duration::from_millis(10 * n as u64));
+                n += 1
+            }
             r => return r,
         }
     }
@@ -511,11 +527,21 @@ mod tests {
         check_derivation(&s).unwrap();
         finalize(&mut s).unwrap();
     }
-    #[test] fn retry_gives_up_after_three_attempts_and_only_on_conflict_or_chain_broken() {
+    #[test] fn persistent_contention_reports_busy_not_chain_broken() {
+        assert!(matches!(busy_if_contended(FinalizeError::Store(StoreError::ChainBroken)), FinalizeError::Busy));
+        assert!(matches!(busy_if_contended(FinalizeError::Store(StoreError::Conflict)), FinalizeError::Busy));
+        assert!(matches!(busy_if_contended(FinalizeError::Divergence { index: 0, action_id: "x".into(), field: "ts" }), FinalizeError::Divergence { .. }));
+    }
+    #[test] fn retry_outlasts_a_busy_peer_that_breaks_the_chain_five_times() {
+        let mut calls = 0;
+        let r = retry(|| { calls += 1; if calls <= 5 { Err(FinalizeError::Store(StoreError::ChainBroken)) } else { Ok(()) } });
+        assert!(r.is_ok());
+    }
+    #[test] fn retry_gives_up_after_eight_attempts_and_only_on_conflict_or_chain_broken() {
         let mut calls = 0;
         let r: Result<(), _> = retry(|| { calls += 1; Err(FinalizeError::Store(StoreError::Conflict)) });
         assert!(matches!(r, Err(FinalizeError::Store(StoreError::Conflict))));
-        assert_eq!(calls, 3);
+        assert_eq!(calls, ATTEMPTS);
         calls = 0;
         let r: Result<(), _> = retry(|| { calls += 1; Err(FinalizeError::Divergence { index: 0, action_id: "x".into(), field: "ts" }) });
         assert!(r.is_err());
