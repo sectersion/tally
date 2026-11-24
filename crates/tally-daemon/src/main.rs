@@ -350,6 +350,7 @@ fn main() -> Result<()> {
                 Diagnosis::ScoringChanged { index, field, .. } => Some(format!("scoring changed at entry {index} ({field}): uploads are stopped; repair needs plan 10 Task 1b merged and server epoch support; see docs/superpowers/plans/2026-11-23-07-daemon-sync.md Task 9")),
                 Diagnosis::Diverged { index, field, .. } => Some(format!("ledger diverged at entry {index} ({field}): uploads are stopped for all projects; a new epoch needs tally repair --new-epoch (not yet available: needs plan 10 Task 1b merged and server epoch support)")),
                 Diagnosis::Published(e) => Some(format!("published chains are inconsistent: {e}")),
+                Diagnosis::RulesetChanged { ledger, current } => Some(format!("ledger was written under ruleset {ledger} but this build scores with {current}: it cannot be checked against a fresh derivation")),
             };
             if let Some(m) = msg {
                 println!("{m}");
