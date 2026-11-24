@@ -114,7 +114,7 @@ pub fn parse_full(text: &str, ctx: &dyn ParseCtx) -> (Parsed, ParseReport, Optio
         match ty {
             "user.message" => {
                 // Only `delivery == "idle"` is seen in real logs; any other value is not guessed to be human input.
-                let content = str_of("content").filter(|c| !c.is_empty());
+                let content = str_of("content").filter(|c| !c.trim().is_empty());
                 match (str_of("delivery"), content) {
                     (Some("idle"), Some(text)) => {
                         close!(None::<i64>);
@@ -305,6 +305,13 @@ mod tests {
         assert_eq!(p.events[1].kind, Kind::AgentOutput { chars: 4 });
         assert_eq!(p.events[2].kind, Kind::AgentBusy { end_ts: 2_999 });
         assert_eq!((r.format.as_str(), r.errors, open), ("cli-events-v1", 0, None));
+    }
+
+    #[test]
+    fn whitespace_only_prompt_is_not_a_prompt() {
+        let t = start(0, "C:/tallyproj") + &prompt(1_000, "m1", "   
+ ", "idle");
+        assert!(parse_full(&t, &StubCtx).0.events.is_empty());
     }
 
     #[test]
