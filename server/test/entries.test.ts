@@ -1,6 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { createServer } from "../src/app.ts";
 import { MAX_BATCH, MAX_BODY_BYTES, testConfig } from "../src/config.ts";
+import { checkBatch } from "../src/ledger.ts";
 import { connect } from "../src/db.ts";
 import { chains, seed, seedFixture, start } from "./helpers.ts";
 
@@ -244,4 +245,10 @@ test("invalid_body issue paths are capped", async () => {
   const text = await r.text();
   expect(text.length).toBeLessThan(500);
   expect(text).toContain("k".repeat(60));
+});
+
+test("checkBatch matches the project name case-insensitively", () => {
+  const e = (chains["acme/demo-3"] ?? []).slice(0, 1);
+  expect(checkBatch(e, GENESIS, "ACME/Demo-3", e[0]?.ruleset ?? "")).toBeNull();
+  expect(checkBatch(e, GENESIS, "acme/other", e[0]?.ruleset ?? "")?.reason).toBe("project_mismatch");
 });
