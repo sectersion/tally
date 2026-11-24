@@ -151,6 +151,7 @@ fn interrupt_followed_by_same_ts_prompt_regardless_of_id() {
         let mut i = mk(1000, Some("P"), Kind::Interrupt);
         i.id = "m".into();
         let c = score(&[i, p]);
-        assert!(c[0].reasons.contains(&"interrupt_followed".into()), "prompt id {pid}");
+        let c = c.iter().find(|c| c.action_id == "m").unwrap();
+        assert!(c.reasons.contains(&"interrupt_followed".into()), "prompt id {pid}");
     }
 }
