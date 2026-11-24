@@ -116,7 +116,8 @@ impl Api {
 
     /// POST a gzip body to `path` (relative to the base); returns the JSON reply.
     pub fn post_gzip(&self, path: &str, gz: &[u8]) -> Result<serde_json::Value, ApiError> {
-        let req = self.agent.post(&format!("{}{path}", self.base)).set("Authorization", &format!("Bearer {}", self.token));
+        // a bundle can be 16 MiB: the agent's 30 s total timeout is too short for a slow uplink
+        let req = self.agent.post(&format!("{}{path}", self.base)).timeout(Duration::from_secs(600)).set("Authorization", &format!("Bearer {}", self.token));
         let r = req.set("Content-Type", "application/json").set("Content-Encoding", "gzip").send_bytes(gz).map_err(classify)?;
         Self::json(r)
     }

@@ -514,7 +514,7 @@ fn submit(home: &std::path::Path, store: &mut Store, project: &str, from: Option
             std::process::exit(1);
         }
         _ => {
-            eprintln!("two local projects named {project} are linked to different server ids");
+            eprintln!("{}", tally_daemon::sync::SyncError::ConflictingLink { project: project.into() });
             std::process::exit(1);
         }
     };
@@ -541,13 +541,19 @@ fn submit(home: &std::path::Path, store: &mut Store, project: &str, from: Option
     let dir = home.join("submissions").join(format!("{}-{created}", project.replace('/', "-")));
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let (bundle_json, preview) = (dir.join("bundle.json"), dir.join("preview.txt"));
-    std::fs::write(&bundle_json, serde_json::to_vec(&bundle)?)?;
-    std::fs::write(&preview, tally_daemon::submit::preview_text(&bundle))?;
     let cleanup = || {
         let _ = std::fs::remove_file(&bundle_json);
         let _ = std::fs::remove_file(&preview);
         let _ = std::fs::remove_dir(&dir);
     };
+    let written = serde_json::to_vec(&bundle)
+        .map_err(anyhow::Error::from)
+        .and_then(|j| Ok(std::fs::write(&bundle_json, j)?))
+        .and_then(|_| Ok(std::fs::write(&preview, tally_daemon::submit::preview_text(&bundle))?));
+    if let Err(e) = written {
+        cleanup(); // never leave bundle.json (it holds text) behind a failed preview
+        return Err(e);
+    }
     print!("{}", tally_daemon::submit::summary_text(&bundle));
     println!("full text: {}", preview.display());
     print!("type yes to upload: ");
