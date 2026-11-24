@@ -87,6 +87,13 @@ enum Cmd {
     },
     /// Print the two `.wakatime.cfg` lines that point an editor plugin at the local heartbeat server.
     HeartbeatConfig,
+    /// Re-derive a project's claims from a RederiveInput JSON file (plain or .gz); needs no home or database.
+    Rederive {
+        file: PathBuf,
+        /// Print the RederiveOutput JSON.
+        #[arg(long)]
+        json: bool,
+    },
     Status,
     Verify,
     /// Check downloaded published chain files; needs no home or database. Exits 1 if any fail.
@@ -155,6 +162,37 @@ enum ProjectCmd {
     },
 }
 
+fn rederive(file: &std::path::Path, json: bool) -> Result<()> {
+    use std::io::Read;
+    let f = std::fs::File::open(file).with_context(|| format!("reading {}", file.display()))?;
+    let mut text = String::new();
+    if file.extension().is_some_and(|e| e == "gz") {
+        flate2::read::GzDecoder::new(f).read_to_string(&mut text)
+    } else {
+        std::io::BufReader::new(f).read_to_string(&mut text)
+    }
+    .with_context(|| format!("reading {}", file.display()))?;
+    let input: tally_scoring::RederiveInput = serde_json::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
+    let o = match tally_scoring::rederive(&input) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
+    if json {
+        println!("{}", serde_json::to_string(&o)?);
+    } else {
+        let ids = if o.unknown_ids.is_empty() { "none".to_string() } else { o.unknown_ids.join(",") };
+        println!("ruleset: {}
+claims: {}
+verified_s: {}
+unverified_s: {}
+unknown_ids: {ids}", o.ruleset, o.claims.len(), o.verified_s, o.unverified_s);
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     if let Cmd::VerifyPublished { files } = &cli.cmd {
@@ -174,6 +212,9 @@ fn main() -> Result<()> {
             }
         }
         std::process::exit(i32::from(failed));
+    }
+    if let Cmd::Rederive { file, json } = &cli.cmd {
+        return rederive(file, *json);
     }
     let home = match cli.home {
         Some(h) => h,
@@ -245,7 +286,7 @@ fn main() -> Result<()> {
             println!("added {}, duplicates {}", s.added, s.duplicates);
         }
         Cmd::HeartbeatConfig => unreachable!("handled before the store opens"),
-        Cmd::Hook { .. } | Cmd::VerifyPublished { .. } | Cmd::Login { .. } | Cmd::Logout { .. } => {
+        Cmd::Hook { .. } | Cmd::VerifyPublished { .. } | Cmd::Rederive { .. } | Cmd::Login { .. } | Cmd::Logout { .. } => {
             unreachable!("handled before the store is opened")
         }
         Cmd::Project { cmd: ProjectCmd::Add { path, name } } => {

@@ -13,5 +13,5 @@ pub mod text;
 pub use event::{Actor, Decision, Event, Kind};
 pub use ledger::{chain, verify_chain, ChainError, LedgerEntry, GENESIS_HASH};
 pub use ruleset::RULESET_VERSION;
-pub use review::{score_with_labels, Adjustment, Label, Review, Reviewed};
+pub use review::{rederive, score_with_labels, RederiveInput, RederiveOutput, Adjustment, Label, Review, Reviewed};
 pub use score::{score, Claim};

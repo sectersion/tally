@@ -515,3 +515,36 @@ fn doctor_lists_heartbeat_counters() {
     let o = tally(&home, &["doctor", "--json"]);
     assert!(out(&o).contains("\"dropped_agent\""), "{}", out(&o));
 }
+
+#[test]
+fn rederive_runs_without_a_database() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("nope");
+    let mut events = vec![ev("1", 0, prompt()), ev("2", 60, Kind::Idle { end_ts: 1_860_000 }), ev("3", 1900, prompt())];
+    for e in &mut events {
+        e.project = Some("P".into());
+    }
+    let input = |ruleset: &str| serde_json::json!({
+        "ruleset": ruleset, "project": "P", "from_ms": 0, "to_ms": 10_000_000, "events": events, "review": {}
+    });
+    let f = t.path().join("in.json");
+    std::fs::write(&f, input(tally_scoring::RULESET_VERSION).to_string()).unwrap();
+    let o = tally(&home, &["rederive", f.to_str().unwrap()]);
+    assert!(o.status.success(), "{}", err(&o));
+    let s = out(&o);
+    assert!(s.lines().any(|l| l == "verified_s: 660") && s.lines().any(|l| l == "unknown_ids: none"), "{s}");
+    assert!(!home.exists());
+
+    let gz = t.path().join("in.json.gz");
+    let mut w = flate2::write::GzEncoder::new(std::fs::File::create(&gz).unwrap(), flate2::Compression::default());
+    std::io::Write::write_all(&mut w, input(tally_scoring::RULESET_VERSION).to_string().as_bytes()).unwrap();
+    w.finish().unwrap();
+    let o = tally(&home, &["rederive", gz.to_str().unwrap(), "--json"]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&out(&o)).unwrap()["verified_s"], 660);
+
+    std::fs::write(&f, input("2026.11-0").to_string()).unwrap();
+    let o = tally(&home, &["rederive", f.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(err(&o).contains("ruleset mismatch"), "{}", err(&o));
+}

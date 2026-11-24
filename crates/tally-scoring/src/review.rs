@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::event::{Event, Kind};
+use crate::ruleset::RULESET_VERSION;
 use crate::score::{score, sort_dedup, Claim};
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -124,6 +125,54 @@ pub fn score_with_labels(events: &[Event], review: &Review) -> Reviewed {
     Reviewed { claims, unknown_ids: unknown.into_iter().collect() }
 }
 
+/// The re-derivation file: events plus the review, for one project and time range.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RederiveInput {
+    pub ruleset: String,
+    pub project: String,
+    pub from_ms: i64,
+    pub to_ms: i64,
+    pub events: Vec<Event>,
+    #[serde(default)]
+    pub excluded_action_ids: Vec<String>,
+    pub review: Review,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct RederiveOutput {
+    pub ruleset: String,
+    pub claims: Vec<Claim>,
+    pub verified_s: u64,
+    pub unverified_s: u64,
+    pub unknown_ids: Vec<String>,
+}
+
+/// Re-score `input.events` with the review and keep the project's claims in range, minus the excluded ones.
+pub fn rederive(input: &RederiveInput) -> Result<RederiveOutput, String> {
+    if input.ruleset != RULESET_VERSION {
+        return Err(format!(
+            "ruleset mismatch: input {}, this build {} (re-derive an older ruleset with the tagged build of that ruleset)",
+            input.ruleset, RULESET_VERSION
+        ));
+    }
+    let Reviewed { claims, unknown_ids } = score_with_labels(&input.events, &input.review);
+    let mut unknown: BTreeSet<String> = unknown_ids.into_iter().collect();
+    let mut kept: Vec<Claim> = claims
+        .into_iter()
+        .filter(|c| c.project.as_deref() == Some(input.project.as_str()) && (input.from_ms..=input.to_ms).contains(&c.ts))
+        .collect();
+    for id in &input.excluded_action_ids {
+        if !kept.iter().any(|c| &c.action_id == id) {
+            unknown.insert(id.clone());
+        }
+    }
+    kept.retain(|c| !input.excluded_action_ids.contains(&c.action_id));
+    let verified_s = kept.iter().map(|c| u64::from(c.verified_s)).sum();
+    let unverified_s = kept.iter().map(|c| u64::from(c.unverified_s)).sum();
+    Ok(RederiveOutput { ruleset: input.ruleset.clone(), claims: kept, verified_s, unverified_s, unknown_ids: unknown.into_iter().collect() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +198,49 @@ mod tests {
         for (g, p) in got.iter().zip(&plain) {
             assert_eq!(g.verified_s + g.unverified_s, p.verified_s + p.unverified_s);
         }
+    }
+
+    fn mk(id: &str, s: i64, project: &str, kind: Kind) -> Event {
+        Event { v: 1, id: id.into(), ts: s * 1000, source: "test".into(), project: Some(project.into()), session: Some("s".into()), kind }
+    }
+    fn p(id: &str, s: i64, project: &str) -> Event {
+        mk(id, s, project, Kind::Prompt { chars: 200, relevance_pm: 600, novelty_bytes: 100 })
+    }
+    fn turn() -> Vec<Event> {
+        vec![
+            p("a", 0, "P"),
+            mk("t", 60, "P", Kind::ToolDecision { decision: crate::event::Decision::Approve }),
+            { let mut u = mk("u", 90, "P", Kind::ToolDecision { decision: crate::event::Decision::Approve }); u.session = Some("other".into()); u },
+            p("b", 300, "P"),
+        ]
+    }
+    fn input(events: Vec<Event>) -> RederiveInput {
+        RederiveInput { ruleset: RULESET_VERSION.into(), project: "P".into(), from_ms: 0, to_ms: i64::MAX, events,
+            excluded_action_ids: vec![], review: Review::default() }
+    }
+
+    #[test]
+    fn rederive_filters_project_and_range_and_rejects_other_rulesets() {
+        let mut ev = turn();
+        ev.push(p("x", 1000, "Q"));
+        let mut i = input(ev);
+        let all = rederive(&i).unwrap();
+        assert_eq!(all.claims.iter().map(|c| c.action_id.as_str()).collect::<Vec<_>>(), ["a", "t", "u", "b"]);
+        assert_eq!(all.verified_s, all.claims.iter().map(|c| u64::from(c.verified_s)).sum::<u64>());
+        i.from_ms = 60_000;
+        i.to_ms = 60_000;
+        assert_eq!(rederive(&i).unwrap().claims.len(), 1);
+        i.ruleset = "2026.11-0".into();
+        assert!(rederive(&i).unwrap_err().starts_with("ruleset mismatch: input 2026.11-0, this build "));
+    }
+
+    #[test]
+    fn excluded_ids_drop_claims_but_keep_interval_starts() {
+        let mut i = input(turn());
+        i.excluded_action_ids = vec!["t".into(), "zzz".into()];
+        let o = rederive(&i).unwrap();
+        let s: Vec<_> = o.claims.iter().map(|c| (c.action_id.as_str(), c.verified_s, c.unverified_s)).collect();
+        assert_eq!(s, [("a", 120, 0), ("u", 30, 0), ("b", 210, 0)]);
+        assert_eq!(o.unknown_ids, ["zzz"]);
     }
 }
