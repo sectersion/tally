@@ -47,13 +47,18 @@ pub enum LineError {
 const INTERRUPT_PREFIX: &str = "[Request interrupted by user";
 
 pub fn classify(line: &[u8]) -> Result<Vec<Entry>, LineError> {
+    classify_with(line, false)
+}
+
+/// `sidechain`: keep subagent entries (their files are read only for agent writes, never for events).
+pub fn classify_with(line: &[u8], sidechain: bool) -> Result<Vec<Entry>, LineError> {
     let s = std::str::from_utf8(line).map_err(|_| LineError::Utf8)?;
     let v: Value = serde_json::from_str(s).map_err(|_| LineError::Json)?;
     if !v.is_object() {
         return Err(LineError::Json);
     }
     let ty = v["type"].as_str().unwrap_or("");
-    if !matches!(ty, "user" | "assistant" | "system") || v["isSidechain"].as_bool() == Some(true) {
+    if !matches!(ty, "user" | "assistant" | "system") || (!sidechain && v["isSidechain"].as_bool() == Some(true)) {
         return Ok(vec![]);
     }
     let meta = Meta {

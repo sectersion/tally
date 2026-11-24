@@ -1,5 +1,5 @@
-//! The Claude Code session-log source: tails `<projects_dir>/*/*.jsonl` (main sessions only; subagent
-//! files under `<session>/subagents/` are never read). Text stays in memory; state keys per file are
+//! The Claude Code session-log source: tails `<projects_dir>/*/*.jsonl`. Subagent files under
+//! `<dir>/<session>/subagents/` are read only for their file writes (agent-write filter): no events, no watermark. Text stays in memory; state keys per file are
 //! `off:<rel>` (byte cursor), `last_ts:<rel>` (newest event ts sent), `open:<rel>` (`"<uuid> <ts>"` or `-`).
 pub mod features;
 pub mod line;
@@ -36,12 +36,14 @@ struct File {
     /// Byte offset the in-memory session has consumed up to. If the saved `off:` differs (the last tick's
     /// state was not persisted, or another process moved it), the session is rebuilt from the saved cursor.
     fed_to: u64,
+    /// A subagent file: only `agent_writes` are kept.
+    sub: bool,
 }
 
 impl File {
-    fn new(path: &Path) -> Self {
+    fn new(path: &Path, sub: bool) -> Self {
         let sid = path.file_stem().map_or(String::new(), |s| s.to_string_lossy().into_owned());
-        File { session: Session::default(), sid, project: None, root: None, floor: None, fed_to: 0 }
+        File { session: Session::default(), sid, project: None, root: None, floor: None, fed_to: 0, sub }
     }
 }
 
@@ -101,11 +103,11 @@ impl ClaudeCode {
     }
 
     /// Feeds lines to the file's session; returns the number of unreadable lines.
-    fn feed<'a>(&mut self, rel: &str, lines: impl Iterator<Item = &'a [u8]>, out: &mut Vec<Event>) -> usize {
+    fn feed<'a>(&mut self, rel: &str, sub: bool, lines: impl Iterator<Item = &'a [u8]>, out: &mut Vec<Event>) -> usize {
         let empty = Vocab::default();
         let mut skipped = 0;
         for l in lines {
-            let Ok(entries) = line::classify(l) else {
+            let Ok(entries) = line::classify_with(l, sub) else {
                 skipped += 1;
                 continue;
             };
@@ -138,7 +140,7 @@ impl ClaudeCode {
                 (_, None) => &buf[..0],
             };
             let lines = body.split(|b| *b == b'\n').map(|l| l.strip_suffix(b"\r").unwrap_or(l)).filter(|l| !l.is_empty());
-            self.feed(rel, lines, &mut Vec::new());
+            self.feed(rel, rel.contains("/subagents/"), lines, &mut Vec::new());
         }
         self.files.get_mut(rel).expect("registered").session.agent_writes.clear(); // warm-up writes are old news
         let s = &mut self.files.get_mut(rel).expect("registered").session;
@@ -166,8 +168,17 @@ fn session_files(dir: &Path) -> Vec<(String, PathBuf)> {
     for d in std::fs::read_dir(dir).into_iter().flatten().flatten().filter(|d| d.path().is_dir()) {
         for f in std::fs::read_dir(d.path()).into_iter().flatten().flatten() {
             let p = f.path();
+            let rel = format!("{}/{}", d.file_name().to_string_lossy(), f.file_name().to_string_lossy());
             if p.extension().is_some_and(|e| e == "jsonl") && p.is_file() {
-                v.push((format!("{}/{}", d.file_name().to_string_lossy(), f.file_name().to_string_lossy()), p));
+                v.push((rel, p));
+            } else if p.is_dir() {
+                // <dir>/<session>/subagents/agent-*.jsonl
+                for a in std::fs::read_dir(p.join("subagents")).into_iter().flatten().flatten() {
+                    let ap = a.path();
+                    if ap.extension().is_some_and(|e| e == "jsonl") && ap.is_file() {
+                        v.push((format!("{rel}/subagents/{}", a.file_name().to_string_lossy()), ap));
+                    }
+                }
             }
         }
     }
@@ -204,6 +215,7 @@ impl Source for ClaudeCode {
             cap = cap.and_then(|c| seen.map(|t| c.min(t.saturating_sub(1 + WRITE_SLACK_MS)).min(open)));
         };
         for (rel, path) in &files {
+            let sub = rel.contains("/subagents/");
             let (off_key, last_key, open_key) = (format!("off:{rel}"), format!("last_ts:{rel}"), format!("open:{rel}"));
             let off: u64 = state.get(&off_key).and_then(|v| v.parse().ok()).unwrap_or(0);
             let last_ts: Option<i64> = state.get(&last_key).and_then(|v| v.parse().ok());
@@ -217,22 +229,24 @@ impl Source for ClaudeCode {
                 }
             };
             if chunk.rotated {
-                self.files.insert(rel.clone(), File { floor: last_ts, ..File::new(path) });
+                self.files.insert(rel.clone(), File { floor: last_ts, ..File::new(path, sub) });
             } else if self.files.get(rel).is_none_or(|f| {
                 // Saved state differs from memory (last tick not persisted, e.g. an expiry with no new lines).
                 f.fed_to != off || open_str(&f.session) != state.get(&open_key).unwrap_or_else(|| "-".into())
             }) {
                 let floor = self.files.get(rel).and_then(|f| f.floor);
-                self.files.insert(rel.clone(), File { floor, ..File::new(path) });
+                self.files.insert(rel.clone(), File { floor, ..File::new(path, sub) });
                 if off > 0 {
                     self.warm_up(rel, path, off, state.get(&open_key));
                 }
             }
             let mut out = Vec::new();
-            skipped += self.feed(rel, chunk.lines.iter().map(Vec::as_slice), &mut out);
+            skipped += self.feed(rel, sub, chunk.lines.iter().map(Vec::as_slice), &mut out);
             let f = self.files.get_mut(rel).expect("registered");
             f.fed_to = chunk.end;
-            if chunk.budget_hit {
+            if sub {
+                out.clear(); // subagent files feed the agent-write filter only
+            } else if chunk.budget_hit {
                 // The session's own limit() covers its open turn. No expiry: the rest of the turn may be unread.
                 hold(Some(f), last_ts, None);
             } else {
@@ -255,7 +269,7 @@ impl Source for ClaudeCode {
         if skipped > 0 {
             eprintln!("source claude-code: skipped {skipped} unreadable lines");
         }
-        let w = self.files.values().map(|f| f.session.limit()).fold(now_ms - WRITE_SLACK_MS, i64::min);
+        let w = self.files.values().filter(|f| !f.sub).map(|f| f.session.limit()).fold(now_ms - WRITE_SLACK_MS, i64::min);
         Ok(Poll { events, watermark: cap.map(|c| c.min(w)) })
     }
 
@@ -321,6 +335,28 @@ mod tests {
         let batch = [Received { hb, received_ms: at + 2_000 }];
         let m = map_heartbeats(&batch, &project_for_dir, &|h, from, to| w.iter().any(|(wh, t)| wh == h && *t >= from && *t <= to), 0, &mut BTreeMap::new());
         assert_eq!((m.stats.dropped_agent, m.events.len()), (1, 0));
+    }
+
+    #[test]
+    fn a_subagent_write_is_an_agent_write_but_makes_no_events() {
+        let d = tempfile::tempdir().unwrap();
+        let repo = std::fs::canonicalize(d.path()).unwrap().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let sub = d.path().join("p/s/subagents");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(d.path().join("p/s.jsonl"), "\n").unwrap();
+        let file = crate::project::normalize_path(&repo.join("src/a.rs").to_string_lossy());
+        let cwd = crate::project::normalize_path(&repo.to_string_lossy());
+        let t0 = ts(0);
+        let line = format!(
+            r#"{{"type":"assistant","uuid":"a1","sessionId":"s","isSidechain":true,"timestamp":"{t0}","cwd":"{cwd}","message":{{"content":[{{"type":"tool_use","id":"t1","name":"Write","input":{{"file_path":"{file}"}}}}]}}}}"#
+        );
+        std::fs::write(sub.join("agent-a1.jsonl"), line + "\n").unwrap();
+        let mut src = ClaudeCode::new(d.path().to_path_buf());
+        let mut st = BTreeMap::from([("started".to_owned(), "1".to_owned())]);
+        let p = src.poll(parse_rfc3339_ms(&t0).unwrap() + 3_600_000, &mut st).unwrap();
+        assert!(p.events.is_empty());
+        assert_eq!(src.take_agent_writes().len(), 1);
     }
 
     #[test]
