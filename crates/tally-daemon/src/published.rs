@@ -313,19 +313,16 @@ mod tests {
     #[test] fn a_new_ruleset_starts_a_new_published_chain() {
         let mut s = Store::open_in_memory().unwrap();
         s.register_project("p1", "C:/r", Some("owner/repo")).unwrap();
-        let mut prev = GENESIS_HASH.to_string();
-        let mut entries = Vec::new();
+        // the main ledger holds one chain per ruleset, each starting at genesis
         for (i, rs) in ["r1", "r2"].into_iter().enumerate() {
             let mut e = LedgerEntry {
                 v: 1, ruleset: rs.into(), action_id: format!("a{i}"), ts: i as i64, project: Some("owner/repo".into()),
                 kind: "prompt".into(), verified_s: 10, unverified_s: 0, reasons: vec![], features: Default::default(),
-                prev_hash: prev.clone(), hash: String::new(),
+                prev_hash: GENESIS_HASH.into(), hash: String::new(),
             };
             e.hash = entry_hash(&e);
-            prev = e.hash.clone();
-            entries.push(e);
+            s.append_ledger(&[e], 0, 0, &[]).unwrap();
         }
-        s.append_ledger(&entries, 0, 0, &[]).unwrap();
         let rows = sync(&mut s, true).unwrap();
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|r| r.entry.prev_hash == GENESIS_HASH));

@@ -81,14 +81,23 @@ mod tests {
     #[test] fn clean_store_is_clean() {
         assert!(matches!(diagnose(&finalized()).unwrap(), Diagnosis::Clean));
     }
-    #[test] fn a_ledger_under_another_ruleset_is_not_clean() {
-        let mut s = Store::open_in_memory().unwrap();
-        let mut e = tally_scoring::LedgerEntry { v: 1, ruleset: "old-0".into(), action_id: "a".into(), ts: 1, project: None,
+    fn entry_under(ruleset: &str, id: &str) -> tally_scoring::LedgerEntry {
+        let mut e = tally_scoring::LedgerEntry { v: 1, ruleset: ruleset.into(), action_id: id.into(), ts: 1, project: None,
             kind: "k".into(), verified_s: 1, unverified_s: 0, reasons: vec![], features: Default::default(),
             prev_hash: tally_scoring::GENESIS_HASH.into(), hash: String::new() };
         e.hash = tally_scoring::ledger::entry_hash(&e);
-        s.append_ledger(&[e], 5, 0, &[]).unwrap();
-        assert!(matches!(diagnose(&s).unwrap(), Diagnosis::RulesetChanged { ledger, .. } if ledger == "old-0"));
+        e
+    }
+    #[test] fn an_older_chain_is_not_compared_and_does_not_block_diagnosis() {
+        // a bump leaves the old chain alone: it was scored under other rules
+        let mut s = Store::open_in_memory().unwrap();
+        s.append_ledger(&[entry_under("old-0", "a")], 5, 0, &[]).unwrap();
+        assert!(matches!(diagnose(&s).unwrap(), Diagnosis::Clean));
+    }
+    #[test] fn going_back_to_an_older_build_is_not_clean() {
+        let mut s = finalized();
+        s.append_ledger(&[entry_under("zzz-0", "z")], 1_000_000, 2, &[]).unwrap();   // both events are at or below it
+        assert!(matches!(diagnose(&s).unwrap(), Diagnosis::RulesetChanged { ledger, .. } if ledger == "zzz-0"));
     }
     #[test] fn a_changed_feature_is_scoring_changed() {
         let s = finalized();
