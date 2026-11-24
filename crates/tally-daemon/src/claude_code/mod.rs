@@ -56,6 +56,8 @@ pub struct ClaudeCode {
     budget: usize,
     /// Hashed agent file writes `(file_hash, ts)` since the last `take_agent_writes`; never a path.
     agent_writes: Vec<(String, i64)>,
+    /// `now_ms` of the poll in progress; entry timestamps past it (plus slack) do not count as seen.
+    now_ms: i64,
 }
 
 /// `(file_hash, ts)` for each write under `root`; paths outside it are dropped, the path text is not kept.
@@ -80,6 +82,7 @@ impl ClaudeCode {
             vocabs: HashMap::new(),
             vocab_failed: HashSet::new(),
             agent_writes: Vec::new(),
+            now_ms: i64::MAX,
         }
     }
 
@@ -116,6 +119,7 @@ impl ClaudeCode {
                 f.sid.clone_from(&e.meta().session);
                 f.project.clone_from(&project);
                 f.root.clone_from(&root);
+                f.session.ts_ceiling = self.now_ms.saturating_add(WRITE_SLACK_MS);
                 f.session.feed(e, &Ctx { project, vocab }, out);
             }
         }
@@ -181,6 +185,7 @@ impl Source for ClaudeCode {
     }
 
     fn poll(&mut self, now_ms: i64, state: &mut dyn SourceState) -> Result<Poll, SourceError> {
+        self.now_ms = now_ms;
         let files = session_files(&self.projects_dir);
         if state.get("started").is_none() {
             // Live capture: history before the first run is not read. Nothing read, so no promise either.
