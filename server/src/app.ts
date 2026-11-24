@@ -205,7 +205,11 @@ export function createServer(deps: Deps) {
     limit(`tok:${tokenId}`);
   };
   /** Read the body once per request. */
-  const formOf = (req: Request) => req.formData().catch(() => new FormData());
+  const formOf = async (req: Request) => {
+    const bytes = await readCapped(req); // 413 past MAX_BODY_BYTES, before parsing
+    const headers = { "content-type": req.headers.get("content-type") ?? "" };
+    return new Response(bytes as BodyInit, { headers }).formData().catch(() => new FormData());
+  };
   /** Every session POST: the signed-in user, their form:<user_id> bucket, then CSRF. */
   const sessionForm = async (req: Request) => {
     const s = await requireUser(sql, req);
