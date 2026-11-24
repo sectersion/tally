@@ -45,7 +45,11 @@ test("a repeated action_id is rejected, in one batch and across batches", async 
     });
   const inBatch = await post(G, mk(name, G, ["a", "a"]));
   expect(inBatch.status).toBe(422);
-  expect(await inBatch.json()).toEqual({ error: "broken_chain", index: 1, reason: "duplicate_action" });
+  expect(await inBatch.json()).toEqual({
+    error: "broken_chain",
+    index: 1,
+    reason: "duplicate_action",
+  });
 
   const first = mk(name, G, ["a"]);
   expect((await post(G, first)).status).toBe(200);
