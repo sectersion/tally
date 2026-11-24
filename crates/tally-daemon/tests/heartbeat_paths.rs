@@ -43,18 +43,19 @@ fn agent_filter_survives_path_spelling_variants() {
     let agent = [(file_hash(&pid, "src/a.rs"), T)];
     let af = |h: &str, a: i64, b: i64| agent.iter().any(|(x, t)| x == h && *t >= a && *t <= b);
     let mut leaked = vec![];
-    for (name, p) in [
+    let mut cases = vec![
         ("exact", format!("{base}/src/a.rs")),
         ("dotdot", format!("{base}/sub/../src/a.rs")),
         ("dot", format!("{base}/src/./a.rs")),
         ("doubleslash", format!("{base}/src//a.rs")),
-        (
-            "upper-case dir (win/mac FS case-insensitive)",
-            format!("{base}/SRC/a.rs"),
-        ),
-        ("upper-case file", format!("{base}/src/A.rs")),
         ("backslashes", p_back(&base)),
-    ] {
+    ];
+    // Case variants name the same file only where the filesystem folds case.
+    if cfg!(any(windows, target_os = "macos")) {
+        cases.push(("upper-case dir", format!("{base}/SRC/a.rs")));
+        cases.push(("upper-case file", format!("{base}/src/A.rs")));
+    }
+    for (name, p) in cases {
         let m = map_heartbeats(
             &[hb(&p, T + 1_000)],
             &project_for_dir,
