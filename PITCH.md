@@ -123,7 +123,7 @@ The judge routes work to humans. Reviewers can overturn any label, and the least
 | Planting a failing test, Esc spam, trivial commits | Each is neutralized by its own rule |
 | Hourly bot pushes | Server-witnessed time without human actions earns nothing |
 | Prompt injection inside the transcript | The judge only routes to humans; red-teamed with published results |
-| **Hardware input faker, fully modified client** | **Out of scope.** Faking work live costs real time, and sampling remains |
+| **Hardware input faker, software input jiggler (e.g. `mouse_event`), fully modified client** | **Out of scope.** Idle is read from `GetLastInputInfo`, which any process in the session can reset; detecting that needs input hooks, which Tally promises not to use. Faking work live costs real time, and sampling remains |
 
 ## Privacy
 
