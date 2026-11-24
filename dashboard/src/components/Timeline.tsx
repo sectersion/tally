@@ -29,7 +29,7 @@ export function Timeline({ items }: { items: Item[] }) {
     <ol class="timeline">
       {items.map((i) => (
         <li>
-          <time>{formatClock(i.ts)}</time> <span aria-hidden="true">{ICON[i.kind]}</span> <strong>{LABEL[i.kind]}</strong>
+          <time>{formatClock(i.ts)}</time> <span class={`chip k-${i.kind}`} aria-hidden="true">{ICON[i.kind]}</span> <strong>{LABEL[i.kind]}</strong>
           {detail(i) && <span class="muted">{` (${detail(i)})`}</span>}
         </li>
       ))}

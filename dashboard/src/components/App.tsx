@@ -45,10 +45,12 @@ export function App({ api, pollMs = 15000, now = Date.now, hintAfterMs = 300_000
   return (
     <>
       <header>
-        <h1>Tally</h1>
-        <nav aria-label="Views">
-          {NAV.map(([h, l]) => <a href={h} aria-current={route === h ? "page" : undefined}>{l}</a>)}
-        </nav>
+        <div class="topbar">
+          <h1>Tally</h1>
+          <nav aria-label="Views">
+            {NAV.map(([h, l]) => <a href={h} aria-current={route === h ? "page" : undefined}>{l}</a>)}
+          </nav>
+        </div>
         <StatusBanner failing={failing} failingForMs={failSince === null ? 0 : now() - failSince} hintAfterMs={hintAfterMs} lastLoaded={st?.as_of.finalized_through ?? null} finalizedThrough={st?.as_of.finalized_through ?? null} />
       </header>
       <main ref={main}>{body}</main>

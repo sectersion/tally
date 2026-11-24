@@ -25,7 +25,8 @@ export function TimeView(p: ViewProps) {
   return (
     <div>
       <h2 id="time-h" tabIndex={-1}>Hours per day</h2>
-      <Period days={days} onChange={setDays} />{" "}
+      <div class="controls">
+      <Period days={days} onChange={setDays} />
       <label>
         Project{" "}
         <select value={project} onChange={(e) => setProject((e.target as HTMLSelectElement).value)}>
@@ -33,13 +34,15 @@ export function TimeView(p: ViewProps) {
           {projectsSeen.map((k) => <option value={k}>{projectLabel(k || null, p.projects)}</option>)}
         </select>
       </label>
+      </div>
       {h.data ? (
         <>
           <p class="muted">
             Solid bars are verified time, hatched bars are unverified time. They are never added together.
             An action counts on the day it ended, even if its interval began before midnight.
           </p>
-          <BarChart id="hours" title="Verified and unverified time per day" labels={Array.from({ length: n }, (_, i) => label(i))} verified={v} unverified={u} />
+          <p class="legend" aria-hidden="true"><span class="swatch solid" /> Verified <span class="swatch hatch" /> Unverified</p>
+          <div class="chart"><BarChart id="hours" title="Verified and unverified time per day" labels={Array.from({ length: n }, (_, i) => label(i))} verified={v} unverified={u} /></div>
           <DataTable
             id="hours-table"
             caption="Time per day and project"

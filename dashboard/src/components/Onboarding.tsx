@@ -18,18 +18,24 @@ export function Onboarding({ status }: { status: StatusData | null }) {
           ))}
         </ul>
       )}
+      <div class="two">
+      <div class="card soft">
       <h3>What Tally records</h3>
       <ul>
         <li>The kind and time of each action (prompt, run, edit, commit)</li>
         <li>Numbers: sizes, exit codes, lines changed, how much a prompt drew on what you saw</li>
         <li>Hashes of commands and files, so repeats can be matched</li>
       </ul>
+      </div>
+      <div class="card cream">
       <h3>What it never records</h3>
       <ul>
         <li>What you typed or what the agent said</li>
         <li>Commands, file names or file contents</li>
         <li>Window titles or web addresses</li>
       </ul>
+      </div>
+      </div>
     </section>
   );
 }

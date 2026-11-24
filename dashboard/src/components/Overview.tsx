@@ -26,7 +26,7 @@ const REASON: Record<string, string> = {
 
 function BugsCard({ b, projects }: { b: Bugs; projects: ViewProps["projects"] }) {
   return (
-    <section class="card" aria-labelledby="bugs-h">
+    <section class="card peach" aria-labelledby="bugs-h">
       <h3 id="bugs-h">Bugs fixed</h3>
       <p class="big">{b.fixed}</p>
       {b.avg_ms_to_fix === null ? (
@@ -56,7 +56,7 @@ function BugsCard({ b, projects }: { b: Bugs; projects: ViewProps["projects"] })
 
 function PromptsCard({ p }: { p: PromptsAfterFailure }) {
   return (
-    <section class="card" aria-labelledby="prompts-h">
+    <section class="card soft" aria-labelledby="prompts-h">
       <h3 id="prompts-h">Prompts that used what you saw</h3>
       <Group name="after a failing run" g={p.after_failure} />
       <Group name="other prompts" g={p.other} />
@@ -75,7 +75,7 @@ function PromptsCard({ p }: { p: PromptsAfterFailure }) {
 
 function RemovedCard({ h }: { h: Hours }) {
   return (
-    <section class="card" aria-labelledby="removed-h">
+    <section class="card mint" aria-labelledby="removed-h">
       <h3 id="removed-h">Time Tally removed</h3>
       <p>Of the time between your actions, {formatDuration(h.totals.removed_s)} was not counted.</p>
       {h.removed_by.length > 0 && (
@@ -102,6 +102,24 @@ function RemovedCard({ h }: { h: Hours }) {
   );
 }
 
+/** Verified and unverified time as two separate colour blocks; they are never added together. */
+function TimeCards({ h, days }: { h: Hours; days: number }) {
+  return (
+    <>
+      <section class="card forest" aria-label="Verified time">
+        <p class="eyebrow">Verified time, last {days} days</p>
+        <p class="stat">{formatDuration(h.totals.verified_s)}</p>
+        <p class="muted">Counted toward your hours.</p>
+      </section>
+      <section class="card cream" aria-label="Unverified time">
+        <p class="eyebrow"><span class="swatch hatch" aria-hidden="true" /> Unverified time, last {days} days</p>
+        <p class="stat">{formatDuration(h.totals.unverified_s)}</p>
+        <p class="muted">Kept apart and never added to verified time.</p>
+      </section>
+    </>
+  );
+}
+
 export function Overview(p: ViewProps) {
   const [days, setDays] = useState(28);
   const range = () => { const e = dayEdges(p.now(), days); return [e[0], e[e.length - 1]] as const; };
@@ -112,8 +130,11 @@ export function Overview(p: ViewProps) {
     <div>
       <h2 id="overview-h" tabIndex={-1}>Overview</h2>
       <Period days={days} onChange={setDays} />
-      <div class="grid">
+      <div class="stats">
+        {hours.data && <TimeCards h={hours.data.data} days={days} />}
         {bugs.data ? <BugsCard b={bugs.data.data} projects={p.projects} /> : <p>Loading bugs</p>}
+      </div>
+      <div class="grid">
         {prompts.data ? <PromptsCard p={prompts.data.data} /> : <p>Loading prompts</p>}
         {hours.data ? <RemovedCard h={hours.data.data} /> : <p>Loading time</p>}
       </div>
