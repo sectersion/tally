@@ -21,7 +21,7 @@ pub struct Claim {
     pub features: BTreeMap<String, i64>,
 }
 
-/// Claims for every human action, in `(ts, id)` order. Input order and duplicate ids do not matter.
+/// Claims for every human action, in `(ts, kind, id)` order. Input order and duplicate ids do not matter.
 pub fn score(events: &[Event]) -> Vec<Claim> {
     let sorted = sort_dedup(events);
     let mut prev = None;
