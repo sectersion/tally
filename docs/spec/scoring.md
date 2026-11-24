@@ -51,7 +51,7 @@ Input: all events for one user, sorted by `ts`, across all projects.
 For each human action `a` at time `t`, with the previous human action (any project) at `t_prev`:
 
 1. **Interval.** `I = [max(t_prev, t − MAX_INTERVAL), t]`. A run starts at the first action ever and at any action more than `MAX_INTERVAL` after the previous human action; for the first action of a run, `I = [t − FIRST_ACTION_S, t]`. Time away longer than `MAX_INTERVAL` is never credited, even when the machine produced no idle samples (asleep, daemon off).
-2. **Reading allowance.** For each `agent_output` inside `I`, the window `[output_ts, output_ts + min(chars / READ_CPS, MAX_READ_S)]` is protected from idle subtraction.
+2. **No reading allowance.** `agent_output` events never protect time from idle or agent-busy subtraction, so a stretch away stays bounded (section 9.1) however much the agent writes.
 3. **Thinking allowance.** If `a` is a substantive prompt (`relevance_pm ≥ THINK_RELEVANCE_PM`), the last `THINK_MAX_S` seconds before `t` are also protected. Deep thinking counts only when it ends in a substantive decision.
 4. **Idle subtraction.** For each `idle` span inside `I`, subtract the part beyond the first `IDLE_GRACE_S` seconds, excluding protected windows.
 5. **Agent-busy subtraction.** For each `agent_busy` span inside `I`, subtract the overlap with idle time beyond `AGENT_IDLE_S`.
@@ -125,8 +125,6 @@ The `project` field is the public project name, set before chaining, and is neve
 | `THINK_MAX_S` | 300 s |
 | `THINK_RELEVANCE_PM` | 500 |
 | `AGENT_IDLE_S` | 45 s |
-| `READ_CPS` | 25 chars/s |
-| `MAX_READ_S` | 600 s |
 | `LOOP_WINDOW_S` | 3600 s |
 | `NOVELTY_MIN` | 24 bytes |
 | `VOCAB_MAX` | 50,000 tokens |
@@ -143,7 +141,7 @@ All values are starting points, to be calibrated against human-labeled sessions.
 
 ## 9. Decisions
 
-1. **Silent thinking:** idle time beyond `IDLE_GRACE_S` is subtracted, except reading windows and a thinking allowance of up to `THINK_MAX_S` before a substantive prompt. Thinking that leads nowhere isn't counted; a stretch away from the keyboard can earn at most 5 minutes, and only when followed by a substantive prompt.
+1. **Silent thinking:** idle time beyond `IDLE_GRACE_S` is subtracted, except a thinking allowance of up to `THINK_MAX_S` before a substantive prompt. Thinking that leads nowhere isn't counted; a stretch away from the keyboard can earn at most 5 minutes, and only when followed by a substantive prompt.
 2. **Plain-language prompts:** project vocabulary includes comments and prose files, and the trivial threshold is 150‰.
 3. **Unverified seconds:** never credited automatically. Every project gets a human review before it ships.
 4. **Event ids:** stable derived strings, not ULIDs, so a re-read log is deduplicated by id. Nothing orders by id except as the tie-break in (ts, id).

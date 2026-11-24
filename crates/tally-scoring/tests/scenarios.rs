@@ -67,11 +67,11 @@ fn watching_generation_earns_nothing_reading_does() {
     assert!(c[1].reasons.contains(&"agent_busy_subtracted".into()));
 }
 #[test]
-fn reading_output_protects_idle_time_and_says_so() {
-    // idle 10..300 would remove 190..300 (110 s); reading 100..200 protects 190..200, so only 100 s go
-    let c = score(&[prompt_at(0, 600), idle(10, 300), output(100, 2500), prompt_at(420, 300)]);
-    assert_eq!(c[1].verified_s, 320);
-    assert!(c[1].reasons.contains(&"read_protected".into()));
+fn agent_output_does_not_cancel_idle_subtraction() {
+    // idle 10..2000, huge replies at 100 and 700; prompt rel 300 at 1780: away stretch stays bounded
+    let c = score(&[prompt_at(0, 600), idle(10, 2000), output(100, 15000), output(700, 15000), prompt_at(1780, 300)]);
+    assert_eq!(c[1].verified_s, 190);
+    assert!(!c[1].reasons.contains(&"read_protected".into()));
     assert!(c[1].reasons.contains(&"idle_subtracted".into()));
 }
 #[test]
