@@ -148,7 +148,7 @@ test("a taken handle is reported, ignoring case", async () => {
 
 test("projectHours keeps unverified apart and sums across chains", async () => {
   const { id } = await newProject();
-  await ledgerRows(sql, id, "2026.11-0", [
+  await ledgerRows(sql, id, "2026.12-0", [
     [60, 20],
     [40, 30],
   ]);

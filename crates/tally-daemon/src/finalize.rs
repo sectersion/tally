@@ -253,6 +253,15 @@ mod tests {
         assert_eq!((c.len(), c[1].entries.len()), (2, 2));
         assert_eq!(c[1].entries[1].prev_hash, c[1].entries[0].hash);
     }
+    #[test] fn a_2026_11_ledger_finalizes_into_a_new_2026_12_chain() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.append_ledger(&[entry_of("2026.11-0", "a", GENESIS_HASH)], 5, 0, &[]).unwrap();
+        s.append_events(&[prompt("b", 10, 600), edit("c", 100_000)]).unwrap();
+        s.set_watermark("src", 1_000_000).unwrap();
+        assert_eq!(finalize(&mut s).unwrap().appended, 1);
+        let l = s.ledger().unwrap();
+        assert_eq!((l[1].ruleset.as_str(), l[1].prev_hash.as_str()), ("2026.12-0", GENESIS_HASH));
+    }
     #[test] fn divergence_only_compares_the_current_chain() {
         let mut s = Store::open_in_memory().unwrap();
         s.append_ledger(&[old_ruleset_entry()], -1, 0, &[]).unwrap();   // 1s, unlike what score gives now

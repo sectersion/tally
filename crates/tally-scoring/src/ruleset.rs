@@ -1,6 +1,6 @@
 //! Ruleset constants (spec section 7). Durations are in milliseconds.
 
-pub const RULESET_VERSION: &str = "2026.11-0";
+pub const RULESET_VERSION: &str = "2026.12-0";
 
 pub const MAX_INTERVAL_MS: i64 = 3_600_000;
 pub const FIRST_ACTION_MS: i64 = 120_000;

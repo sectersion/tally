@@ -53,7 +53,7 @@ pub fn score(events: &[Event]) -> Vec<Claim> {
 }
 
 /// Sorted by `(ts, id)`, first occurrence of each id kept.
-fn sort_dedup(events: &[Event]) -> Vec<Event> {
+pub(crate) fn sort_dedup(events: &[Event]) -> Vec<Event> {
     let mut sorted = events.to_vec();
     sorted.sort_by(|a, b| (a.ts, &a.id).cmp(&(b.ts, &b.id)));
     let mut seen = BTreeSet::new();
@@ -178,7 +178,7 @@ fn kind_features(k: &Kind) -> (&'static str, Vec<(&'static str, i64)>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::event::ev;
 
@@ -203,7 +203,7 @@ mod tests {
 
     /// Deterministic synthetic history: prompts, edits, tests, interrupts, idle/busy spans (some
     /// hours long, overlapping), outputs, same-ts ties and multi-hour gaps.
-    fn synthetic(n: usize) -> Vec<Event> {
+    pub(crate) fn synthetic(n: usize) -> Vec<Event> {
         use crate::event::Actor;
         let mut x: u64 = 0x2545_f491_4f6c_dd1d;
         let mut r = move |m: u64| {
