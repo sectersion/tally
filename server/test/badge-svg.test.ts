@@ -254,3 +254,10 @@ test("private never answers 304", async () => {
   for (const inm of [etag, "*"])
     expect((await get(`/badge/${p.name}.svg`, { "if-none-match": inm })).status).toBe(200);
 });
+
+test("private project badge carries no etag (no project id or change_seq leak)", async () => {
+  const p = await project({ public: false });
+  const r = await get(`/badge/${p.name}.json`);
+  expect(r.status).toBe(200);
+  expect(r.headers.get("etag")).toBeNull();
+});
