@@ -86,6 +86,7 @@ pub fn parse_full(text: &str, ctx: &dyn ParseCtx) -> (Parsed, ParseReport, Optio
         };
         let str_of = |k: &str| data.and_then(|d| d.get(k)).and_then(Value::as_str);
         if ty == "session.start" {
+            close!(None::<i64>); // book the open turn to the session it began in
             session = str_of("sessionId").map(str::to_string);
             if session.is_some() {
                 rep.format = match data.and_then(|d| d.get("version")).and_then(Value::as_u64) {
@@ -297,6 +298,15 @@ mod tests {
         let t = start(0, "C:/tallyproj") + &prompt(1_000, "m1", "queued text", "queued") + &prompt(2_000, "m2", "", "idle");
         let (p, r, _) = parse_full(&t, &StubCtx);
         assert!(p.events.is_empty() && r.skipped >= 3 && r.errors == 0);
+    }
+
+    #[test]
+    fn second_session_start_keeps_open_turn_on_its_own_session() {
+        let s2 = line("session.start", 60_000, serde_json::json!({"sessionId": "s2", "version": 1, "context": {"cwd": "D:/other"}}));
+        let t = start(0, "C:/tallyproj") + &prompt(1_000, "m1", "hello", "idle") + &line("assistant.turn_end", 9_000, serde_json::json!({})) + &s2;
+        let (p, _, _) = parse_full(&t, &StubCtx);
+        let busy = p.events.iter().find(|e| matches!(e.kind, Kind::AgentBusy { .. })).unwrap();
+        assert_eq!((busy.session.as_deref(), busy.project.as_deref()), (Some("s1"), Some("proj")));
     }
 
     #[test]
