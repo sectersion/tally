@@ -19,6 +19,7 @@ pub mod repair;
 pub mod run;
 pub mod source;
 pub mod status;
+pub mod submit;
 pub mod store;
 pub mod sync;
 pub mod testrun;
