@@ -153,6 +153,7 @@ pub fn publish_once(
     let mut pushed_entries = 0;
     for (remote, group) in by_remote {
         let host = Hosting::new(home, &remote, &cfg.branch);
+        let _lock = host.lock()?;
         host.sync_down()?;
         let mut count = 0;
         let mut files = Vec::new();
