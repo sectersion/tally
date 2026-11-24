@@ -38,7 +38,7 @@ Kinds and their extra fields:
 | `commit` | yes, if `by = user` | `sha`, `by`: `user` \| `agent`, `lines_changed` |
 | `agent_busy` | no | `end_ts` (span) |
 | `idle` | no | `end_ts` (span where OS idle time exceeded `IDLE_SAMPLE_MIN`) |
-| `agent_output` | no | `chars` (used for the reading allowance) |
+| `agent_output` | no | `chars` (informational; no scoring effect) |
 
 Prompt text, file contents, and commands never appear in events. Only hashes and derived numbers do.
 
