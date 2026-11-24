@@ -67,7 +67,7 @@ pub fn parse_full(text: &str, ctx: &dyn ParseCtx) -> (Parsed, ParseReport, Optio
             }
         };
     }
-    for (i, line) in text.lines().enumerate() {
+    for (i, line) in text.trim_start_matches('\u{feff}').lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
@@ -295,6 +295,14 @@ mod tests {
         assert_eq!(p.events[1].kind, Kind::AgentOutput { chars: 4 });
         assert_eq!(p.events[2].kind, Kind::AgentBusy { end_ts: 2_999 });
         assert_eq!((r.format.as_str(), r.errors, open), ("cli-events-v1", 0, None));
+    }
+
+    #[test]
+    fn leading_utf8_bom_is_ignored() {
+        let t = format!("\u{feff}{}", start(0, "C:/tallyproj") + &prompt(1_000, "m1", "hello", "idle"));
+        let (p, r, _) = parse_full(&t, &StubCtx);
+        assert_eq!(kinds(&p), ["prompt"]);
+        assert_eq!(r.errors, 0);
     }
 
     #[test]

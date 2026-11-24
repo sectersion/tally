@@ -25,7 +25,7 @@ pub fn ingest_ndjson(
     watermark: Option<i64>,
 ) -> Result<AppendSummary, IngestError> {
     let mut events = Vec::new();
-    for (i, line) in text.lines().enumerate() {
+    for (i, line) in text.trim_start_matches('\u{feff}').lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
@@ -64,6 +64,13 @@ mod tests {
         assert!(e.to_string().starts_with("line 3: "), "{e}");
         assert!(s.events().unwrap().is_empty());
         assert_eq!(s.horizon().unwrap(), None);
+    }
+
+    #[test]
+    fn leading_utf8_bom_is_ignored() {
+        let mut s = Store::open_in_memory().unwrap();
+        let text = format!("\u{feff}{}\n", line("1", 5));
+        assert_eq!(ingest_ndjson(&mut s, &text, "x", None).unwrap().added, 1);
     }
 
     #[test]

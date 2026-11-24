@@ -52,7 +52,7 @@ pub fn classify(line: &[u8]) -> Result<Vec<Entry>, LineError> {
 
 /// `sidechain`: keep subagent entries (their files are read only for agent writes, never for events).
 pub fn classify_with(line: &[u8], sidechain: bool) -> Result<Vec<Entry>, LineError> {
-    let s = std::str::from_utf8(line).map_err(|_| LineError::Utf8)?;
+    let s = std::str::from_utf8(line).map_err(|_| LineError::Utf8)?.trim_start_matches('\u{feff}');
     let v: Value = serde_json::from_str(s).map_err(|_| LineError::Json)?;
     if !v.is_object() {
         return Err(LineError::Json);
@@ -225,6 +225,12 @@ mod tests {
         assert_eq!(parse_rfc3339_ms("2026-11-22T12:34:56.7891Z"), Some(1_795_350_896_789));
         assert_eq!(parse_rfc3339_ms("2026-11-22T12:34:56+01:00"), None);
         assert_eq!(parse_rfc3339_ms("garbage"), None);
+    }
+
+    #[test]
+    fn leading_utf8_bom_is_ignored() {
+        let l = format!("\u{feff}{}", human(r#","turnOrigin":"human""#));
+        assert!(matches!(&cls(&l)[..], [Entry::HumanPrompt { .. }]));
     }
 
     #[test]
