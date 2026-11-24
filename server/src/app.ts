@@ -154,6 +154,9 @@ function handle<P extends string>(
     const t0 = performance.now();
     let res: Response;
     try {
+      // A decoded NUL in a path parameter can never match a row and makes Postgres throw.
+      if (Object.values(req.params as Record<string, string>).some((v) => v.includes("\0")))
+        throw new HttpError(404, { error: "not_found" });
       res = await f(req, server);
     } catch (e) {
       if (e instanceof HttpError && e.location) res = redirect(e.location);
