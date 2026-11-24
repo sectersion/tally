@@ -64,7 +64,9 @@ export function checkBatch(
 ): { index: number; reason: string } | null {
   const r = entries.findIndex((e) => e.ruleset !== ruleset);
   if (r >= 0) return { index: r, reason: "unknown_ruleset" };
-  const p = entries.findIndex((e) => typeof e.project !== "string" || e.project.toLowerCase() !== publicName.toLowerCase());
+  const p = entries.findIndex(
+    (e) => typeof e.project !== "string" || e.project.toLowerCase() !== publicName.toLowerCase(),
+  );
   if (p >= 0) return { index: p, reason: "project_mismatch" };
   const f = entries.findIndex((e) => e.ts > Date.now() + FUTURE_SLACK_MS);
   if (f >= 0) return { index: f, reason: "future_ts" };

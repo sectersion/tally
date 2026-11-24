@@ -1,8 +1,8 @@
 import { afterAll, expect, test } from "bun:test";
 import { createServer } from "../src/app.ts";
 import { MAX_BATCH, MAX_BODY_BYTES, testConfig } from "../src/config.ts";
-import { checkBatch } from "../src/ledger.ts";
 import { connect } from "../src/db.ts";
+import { checkBatch } from "../src/ledger.ts";
 import { chains, seed, seedFixture, start } from "./helpers.ts";
 
 // Fixture names are single-use per database. Tests that need a fresh chain own their name (demo-10,
@@ -250,5 +250,7 @@ test("invalid_body issue paths are capped", async () => {
 test("checkBatch matches the project name case-insensitively", () => {
   const e = (chains["acme/demo-3"] ?? []).slice(0, 1);
   expect(checkBatch(e, GENESIS, "ACME/Demo-3", e[0]?.ruleset ?? "")).toBeNull();
-  expect(checkBatch(e, GENESIS, "acme/other", e[0]?.ruleset ?? "")?.reason).toBe("project_mismatch");
+  expect(checkBatch(e, GENESIS, "acme/other", e[0]?.ruleset ?? "")?.reason).toBe(
+    "project_mismatch",
+  );
 });
