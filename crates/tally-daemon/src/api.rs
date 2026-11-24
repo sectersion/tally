@@ -113,4 +113,22 @@ impl Api {
         let url = format!("{}/v1/ledger/{server_id}/commit", self.base);
         self.send(self.agent.post(&url), Some(serde_json::json!({"hash": hash, "ts": ts}))).map(|_| ())
     }
+
+    /// POST a gzip body to `path` (relative to the base); returns the JSON reply.
+    pub fn post_gzip(&self, path: &str, gz: &[u8]) -> Result<serde_json::Value, ApiError> {
+        let req = self.agent.post(&format!("{}{path}", self.base)).set("Authorization", &format!("Bearer {}", self.token));
+        let r = req.set("Content-Type", "application/json").set("Content-Encoding", "gzip").send_bytes(gz).map_err(classify)?;
+        Self::json(r)
+    }
+
+    pub fn get_json(&self, path: &str) -> Result<serde_json::Value, ApiError> {
+        Self::json(self.send(self.agent.get(&format!("{}{path}", self.base)), None)?)
+    }
+
+    fn json(r: ureq::Response) -> Result<serde_json::Value, ApiError> {
+        match r.status() {
+            200..=299 => serde_json::from_reader(r.into_reader()).map_err(|_| ApiError::Network("BadBody".into())),
+            c => Err(ApiError::Server(c)),
+        }
+    }
 }

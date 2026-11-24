@@ -94,6 +94,18 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Preview a project's claims and session text for a range, and upload them to the server only after you type `yes`.
+    ///
+    /// PROJECT is the public name (owner/repo). `--from`/`--to` take YYYY-MM-DD (UTC; `--to` is the end of that day) or ms.
+    /// Default `--from`: end of the last completed submission (asked of the server, best effort), else the project's first claim.
+    /// Default `--to`: the project's latest final claim.
+    Submit {
+        project: String,
+        #[arg(long)]
+        from: Option<String>,
+        #[arg(long)]
+        to: Option<String>,
+    },
     Status,
     Verify,
     /// Check downloaded published chain files; needs no home or database. Exits 1 if any fail.
@@ -286,6 +298,7 @@ fn main() -> Result<()> {
             println!("added {}, duplicates {}", s.added, s.duplicates);
         }
         Cmd::HeartbeatConfig => unreachable!("handled before the store opens"),
+        Cmd::Submit { project, from, to } => submit(&home, &mut store, &project, from.as_deref(), to.as_deref())?,
         Cmd::Hook { .. } | Cmd::VerifyPublished { .. } | Cmd::Rederive { .. } | Cmd::Login { .. } | Cmd::Logout { .. } => {
             unreachable!("handled before the store is opened")
         }
@@ -479,4 +492,83 @@ fn test_run(home: &std::path::Path, db: &std::path::Path, args: &[String]) -> i3
         eprintln!("tally: warning: test run not recorded: {e}");
     }
     code
+}
+
+/// ms, or YYYY-MM-DD in UTC (`end_of_day`: the last ms of that day).
+fn parse_time(s: &str, end_of_day: bool) -> Result<i64> {
+    if let Ok(ms) = s.parse::<i64>() {
+        return Ok(ms);
+    }
+    let d = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| anyhow!("{s:?} is neither ms nor YYYY-MM-DD"))?;
+    let start = d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
+    Ok(if end_of_day { start + 86_400_000 - 1 } else { start })
+}
+
+/// Build, write the files for review, ask, and upload only on the exact line `yes`.
+fn submit(home: &std::path::Path, store: &mut Store, project: &str, from: Option<&str>, to: Option<&str>) -> Result<()> {
+    let ids = store.server_ids()?.remove(project).unwrap_or_default();
+    let server_id = match &ids[..] {
+        [one] => one.clone(),
+        [] => {
+            eprintln!("{project} has no server id; run tally project link <path> --server-id <id>");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("two local projects named {project} are linked to different server ids");
+            std::process::exit(1);
+        }
+    };
+    let cfg = config::load(home)?;
+    let Some(server) = cfg.sync.server.clone() else { bail!("no [sync] server in config.toml") };
+    let Some(token) = tally_daemon::credentials::load_tokens(home).context("reading device tokens")?.remove(&server_id) else {
+        eprintln!("no device token; run tally login --server-id {server_id}");
+        std::process::exit(1);
+    };
+    tally_daemon::published::sync(store, true)?;
+    let rows = store.published_rows(project)?;
+    let (Some(first), Some(last)) = (rows.first(), rows.last()) else { bail!("{project} has no final claims yet") };
+    let to_ms = match to {
+        Some(t) => parse_time(t, true)?,
+        None => last.entry.ts,
+    };
+    let from_ms = match from {
+        Some(f) => parse_time(f, false)?,
+        None => tally_daemon::submit::upload::last_submitted_to(&server, &server_id, &token).unwrap_or(first.entry.ts),
+    };
+    let logs_dir = cfg.claude_code.projects_dir.clone().or_else(|| dirs::home_dir().map(|h| h.join(".claude").join("projects"))).unwrap_or_default();
+    let created = now_ms();
+    let bundle = tally_daemon::submit::build_bundle(store, &logs_dir, project, from_ms, to_ms, created)?;
+    let dir = home.join("submissions").join(format!("{}-{created}", project.replace('/', "-")));
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let (bundle_json, preview) = (dir.join("bundle.json"), dir.join("preview.txt"));
+    std::fs::write(&bundle_json, serde_json::to_vec(&bundle)?)?;
+    std::fs::write(&preview, tally_daemon::submit::preview_text(&bundle))?;
+    let cleanup = || {
+        let _ = std::fs::remove_file(&bundle_json);
+        let _ = std::fs::remove_file(&preview);
+        let _ = std::fs::remove_dir(&dir);
+    };
+    print!("{}", tally_daemon::submit::summary_text(&bundle));
+    println!("full text: {}", preview.display());
+    print!("type yes to upload: ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let mut line = String::new();
+    // EOF or a read error is the same as declining
+    let _ = std::io::stdin().read_line(&mut line);
+    if line.trim_end_matches(['\r', '\n']) != "yes" {
+        cleanup();
+        println!("not submitted");
+        return Ok(());
+    }
+    match tally_daemon::submit::upload::upload(&server, &server_id, &token, &bundle) {
+        Ok(id) => {
+            cleanup();
+            println!("submitted {id}");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("upload failed: {e}\nfiles kept in {}; retry or delete them", dir.display());
+            std::process::exit(1);
+        }
+    }
 }
