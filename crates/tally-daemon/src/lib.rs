@@ -7,6 +7,7 @@ pub mod config;
 pub mod credentials;
 pub mod dash_api;
 pub mod doctor;
+pub mod ensure;
 pub mod finalize;
 pub mod git;
 pub mod heartbeat;

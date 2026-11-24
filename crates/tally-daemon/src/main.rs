@@ -88,6 +88,16 @@ enum Cmd {
     },
     /// Print the two `.wakatime.cfg` lines that point an editor plugin at the local heartbeat server.
     HeartbeatConfig,
+    /// For extensions: record consent once, register the repo (local only) and start the daemon if it is not running. Always exits 0.
+    Ensure {
+        #[arg(long)]
+        client: Option<String>,
+        #[arg(long)]
+        register_cwd: Option<PathBuf>,
+        /// Print `{"systemMessage": ...}` with the explainer on the first run (for host hooks).
+        #[arg(long)]
+        hook_json: bool,
+    },
     Status,
     Verify,
     /// Check downloaded published chain files; needs no home or database. Exits 1 if any fail.
@@ -220,6 +230,14 @@ fn main() -> Result<()> {
         println!("{}", if gone { "logged out" } else { "not logged in" });
         return Ok(());
     }
+    if let Cmd::Ensure { client, register_cwd, hook_json } = cli.cmd {
+        let o = tally_daemon::ensure::EnsureOpts { client, register_cwd };
+        let r = tally_daemon::ensure::ensure(&home, &o, &tally_daemon::ensure::spawn_daemon);
+        if let (true, Some(n)) = (hook_json, r.notice) {
+            println!("{}", serde_json::json!({ "systemMessage": n }));
+        }
+        return Ok(());
+    }
     if let Cmd::HeartbeatConfig = &cli.cmd {
         std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
         let cfg = config::load(&home)?;
@@ -299,7 +317,7 @@ fn main() -> Result<()> {
             let s = ingest_ndjson(&mut store, &text, &source, watermark)?;
             println!("added {}, duplicates {}", s.added, s.duplicates);
         }
-        Cmd::HeartbeatConfig => unreachable!("handled before the store opens"),
+        Cmd::HeartbeatConfig | Cmd::Ensure { .. } => unreachable!("handled before the store opens"),
         Cmd::Hook { .. } | Cmd::Doctor { .. } | Cmd::VerifyPublished { .. } | Cmd::Login { .. } | Cmd::Logout { .. } | Cmd::Dashboard { .. } => {
             unreachable!("handled before the store is opened")
         }
