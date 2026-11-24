@@ -51,9 +51,22 @@ async function fetchList(fetchFn: typeof fetch): Promise<Slim[]> {
       signal: AbortSignal.timeout(updLimits.timeoutMs),
     });
     if (!res.ok || Number(res.headers.get("content-length")) > MAX_BYTES) throw unavailable();
-    const text = await res.text();
-    if (text.length > MAX_BYTES) throw unavailable();
-    raw = JSON.parse(text);
+    // Count bytes while streaming and cancel past the cap; res.text() would buffer it all first.
+    const reader = res.body?.getReader();
+    if (!reader) throw unavailable();
+    const chunks: BlobPart[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_BYTES) {
+        await reader.cancel().catch(() => {});
+        throw unavailable();
+      }
+      chunks.push(value);
+    }
+    raw = JSON.parse(await new Blob(chunks).text());
   } catch {
     throw unavailable(); // network, timeout, non-JSON and oversize all look the same to callers
   }

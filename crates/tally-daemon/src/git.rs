@@ -35,6 +35,9 @@ impl AgentCommitLookup for StoreLookup {
         let err = |e: crate::store::StoreError| SourceError::Other(e.to_string());
         let mut ids = self.store.project_group(&repo.local_id).map_err(err)?;
         ids.extend(crate::project::worktree_ids(&repo.root));
+        // An agent can commit into a sibling registered repo (`git -C ../b commit`): the marker then sits
+        // under the project Claude ran in, so any registered project's marker in the window counts.
+        ids.extend(self.store.projects().map_err(err)?.into_iter().map(|p| p.local_id));
         for p in ids {
             if self.store.has_agent_commit_marker(&p, commit_ts - AGENT_COMMIT_WINDOW_MS, commit_ts + AGENT_COMMIT_AFTER_MS).map_err(err)? {
                 return Ok(true);
@@ -96,6 +99,9 @@ impl GitSource {
         GitSource { repos, lookup, program: "git".into(), warned: Default::default() }
     }
 }
+
+/// How long a failing (but existing) repo may hold the git watermark back before it is skipped.
+const FAILING_REPO_GRACE_MS: i64 = 24 * 3_600_000;
 
 pub(crate) enum GitFail {
     Missing,
@@ -183,7 +189,15 @@ impl Source for GitSource {
                         }
                         wm.max(cutoff)
                     }
-                    Err(GitFail::Failed) => wm, // retried next poll; holds the source watermark back
+                    // Retried next poll, holding the source watermark back, but only for a day: a repo that
+                    // stays broken (corrupt HEAD, dubious ownership) must not cap finalization forever.
+                    Err(GitFail::Failed) if cutoff - wm <= FAILING_REPO_GRACE_MS => wm,
+                    Err(GitFail::Failed) => {
+                        if self.warned.insert(repo.local_id.clone()) {
+                            eprintln!("git: repository {} keeps failing; skipping commits until it works again", repo.root.display());
+                        }
+                        wm.max(cutoff)
+                    }
                 },
             };
             state.set(&key, &new_wm.to_string());
@@ -460,6 +474,35 @@ mod tests {
     }
 
     #[test]
+    fn agent_marker_stamped_under_a_sibling_registered_repo_marks_the_commit() {
+        if !git_available() { return; }
+        let t = tempfile::tempdir().unwrap();
+        let (a, b) = (t.path().join("a"), t.path().join("b"));
+        for d in [&a, &b] {
+            std::fs::create_dir_all(d).unwrap();
+            init(d);
+        }
+        let db = t.path().join("tally.db");
+        let mut store = Store::open(&db).unwrap();
+        let ida = crate::project::register_git_project(&mut store, &a, None).unwrap();
+        let idb = crate::project::register_git_project(&mut store, &b, None).unwrap();
+        // Claude ran in a and committed into b with `git -C ../b commit`
+        let marker = Event {
+            v: 1, id: "mk".into(), ts: T - 10_000, source: "claude-code".into(), project: Some(ida), session: None,
+            kind: Kind::Commit { sha: "claude:toolu_1".into(), by: Actor::Agent, lines_changed: 0 },
+        };
+        store.append_events(&[marker]).unwrap();
+        let lk = StoreLookup { store: Store::open(&db).unwrap(), claude_enabled: false };
+        let mut src = GitSource::new(vec![RepoRef { local_id: idb, root: b.clone() }], Box::new(lk));
+        let mut st = BTreeMap::new();
+        src.poll(T - 100_000, &mut st).unwrap();
+        commit(&b, T / 1000);
+        let p = src.poll(T + 61_000, &mut st).unwrap();
+        assert_eq!(p.events.len(), 1);
+        assert!(matches!(p.events[0].kind, Kind::Commit { by: Actor::Agent, .. }));
+    }
+
+    #[test]
     fn commit_in_a_linked_worktree_is_seen_from_the_main_checkout_exactly_once() {
         if !git_available() { return; }
         let (dir, mut src, _lk, mut st) = setup();
@@ -560,6 +603,19 @@ mod tests {
         let p = src.poll(T + 500_000, &mut st).unwrap();
         assert!(p.events.is_empty());
         assert_eq!(p.watermark, Some(T - GIT_LAG_MS));
+    }
+
+    #[test]
+    fn a_repo_failing_for_over_a_day_stops_holding_the_watermark() {
+        if !git_available() { return; }
+        let (dir, mut src, _lk, mut st) = setup();
+        src.poll(T, &mut st).unwrap();
+        std::fs::write(dir.path().join(".git").join("HEAD"), "garbage
+").unwrap();
+        let later = T + 30 * 86_400_000;
+        let p = src.poll(later, &mut st).unwrap();
+        assert_eq!(p.watermark, Some(later - GIT_LAG_MS));
+        assert_eq!(src.warned.len(), 1);
     }
 
     #[test]

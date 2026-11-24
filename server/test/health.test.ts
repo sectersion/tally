@@ -95,3 +95,11 @@ test("log redacts secrets", () => {
   expect(out).not.toContain("abc");
   expect(JSON.parse(out).ok).toBe(1);
 });
+
+test("NUL in a public path parameter is a 404, not a database error", async () => {
+  const s = createServer({ cfg: testConfig(), sql: null as never, port: 0 });
+  for (const p of ["/p/%00/a", "/u/%00", "/v1/projects/%00/summary", "/badge/%00/x.svg"]) {
+    expect((await fetch(`http://localhost:${s.port}${p}`)).status).toBe(404);
+  }
+  s.stop(true);
+});

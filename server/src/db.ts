@@ -2,7 +2,8 @@ import { readdirSync } from "node:fs";
 import { SQL } from "bun";
 
 export function connect(url: string): SQL {
-  return new SQL(url);
+  // Fail fast instead of queueing on a held chain lock with a pool connection (R2E-2).
+  return new SQL(url, { connection: { lock_timeout: "2000", statement_timeout: "10000" } });
 }
 
 export async function migrate(

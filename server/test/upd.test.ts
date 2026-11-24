@@ -305,3 +305,20 @@ test("unlink-repo clears upd_record_id and bumps; upd-unlink with nothing linked
   expect((await post(`${p.path}/upd-unlink`, u, {})).status).toBe(303);
   expect(await seq(p.id)).toBe(b0 + 1);
 });
+
+test("an oversize chunked list is cancelled while streaming, not buffered in full", async () => {
+  resetUpdCache();
+  let sent = 0;
+  const fetchFn = (async () =>
+    new Response(
+      new ReadableStream({
+        pull(c) {
+          if (sent >= 400) return c.close();
+          sent++;
+          c.enqueue(new Uint8Array(1024 * 1024).fill(0x20)); // no content-length
+        },
+      }),
+    )) as unknown as typeof fetch;
+  await expect(findUpdEntries("a/b", fetchFn)).rejects.toThrow();
+  expect(sent).toBeLessThan(40);
+});

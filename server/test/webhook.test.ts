@@ -349,3 +349,21 @@ test("summary last_commit_at is the newest receipt's server time", async () => {
   };
   expect(new Date(body.last_commit_at).getTime()).toBe(t.t.getTime());
 });
+
+test("a stale out-of-order rename is ignored", async () => {
+  await linked();
+  await sql`update github_repos set gh_updated_at = null where id = ${REPO}`;
+  const at = (name: string, ts: string) => {
+    const b = JSON.parse(fx("repository.renamed.json").body);
+    b.repository.full_name = name;
+    b.repository.updated_at = ts;
+    return JSON.stringify(b);
+  };
+  await deliver("repository.renamed.json", { body: at("octo/newest", "2026-01-02T00:00:00Z") });
+  await deliver("repository.renamed.json", { body: at("octo/stale", "2026-01-01T00:00:00Z") });
+  const [r] = await sql`select full_name from github_repos where id = ${REPO}`;
+  expect(r.full_name).toBe("octo/newest");
+  const ev =
+    await sql`select 1 from repo_events where github_repo_id = ${REPO} and detail like '%octo/stale'`;
+  expect(ev.length).toBe(0);
+});

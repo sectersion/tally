@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { createServer } from "../src/app.ts";
 import { hashToken } from "../src/auth.ts";
-import { testConfig } from "../src/config.ts";
+import { MAX_BODY_BYTES, testConfig } from "../src/config.ts";
 import { connect } from "../src/db.ts";
 import { createDeviceCode } from "../src/device.ts";
 import { createProject } from "../src/projects.ts";
@@ -83,4 +83,14 @@ test("every session POST is 403 and writes nothing without csrf or with a foreig
     }
   }
   expect(await snapshot()).toEqual(before);
+});
+
+test("a session form POST over MAX_BODY_BYTES is 413 before parsing", async () => {
+  const res = await fetch(`${base}/settings/profile`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { cookie, origin: ORIGIN },
+    body: new URLSearchParams({ csrf, display_name: "x".repeat(2 * MAX_BODY_BYTES) }),
+  });
+  expect(res.status).toBe(413);
 });

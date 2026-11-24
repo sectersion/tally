@@ -47,13 +47,18 @@ pub enum LineError {
 const INTERRUPT_PREFIX: &str = "[Request interrupted by user";
 
 pub fn classify(line: &[u8]) -> Result<Vec<Entry>, LineError> {
-    let s = std::str::from_utf8(line).map_err(|_| LineError::Utf8)?;
+    classify_with(line, false)
+}
+
+/// `sidechain`: keep subagent entries (their files are read only for agent writes, never for events).
+pub fn classify_with(line: &[u8], sidechain: bool) -> Result<Vec<Entry>, LineError> {
+    let s = std::str::from_utf8(line).map_err(|_| LineError::Utf8)?.trim_start_matches('\u{feff}');
     let v: Value = serde_json::from_str(s).map_err(|_| LineError::Json)?;
     if !v.is_object() {
         return Err(LineError::Json);
     }
     let ty = v["type"].as_str().unwrap_or("");
-    if !matches!(ty, "user" | "assistant" | "system") || v["isSidechain"].as_bool() == Some(true) {
+    if !matches!(ty, "user" | "assistant" | "system") || (!sidechain && v["isSidechain"].as_bool() == Some(true)) {
         return Ok(vec![]);
     }
     let meta = Meta {
@@ -184,7 +189,12 @@ pub fn parse_rfc3339_ms(s: &str) -> Option<i64> {
             ms = ms * 10 + b.get(20 + k).map_or(0, |c| (c - b'0') as i64);
         }
     }
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
+    let dim = |y: i64, m: i64| match m {
+        2 => 28 + (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)) as i64,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if !(1..=12).contains(&m) || d < 1 || d > dim(y, m) || hh > 23 || mm > 59 || ss > 60 {
         return None;
     }
     // days-from-civil (Howard Hinnant)
@@ -220,6 +230,16 @@ mod tests {
         assert_eq!(parse_rfc3339_ms("2026-11-22T12:34:56.7891Z"), Some(1_795_350_896_789));
         assert_eq!(parse_rfc3339_ms("2026-11-22T12:34:56+01:00"), None);
         assert_eq!(parse_rfc3339_ms("garbage"), None);
+        assert_eq!(parse_rfc3339_ms("2026-02-31T10:00:00Z"), None);
+        assert_eq!(parse_rfc3339_ms("2026-04-31T10:00:00Z"), None);
+        assert_eq!(parse_rfc3339_ms("2026-02-29T10:00:00Z"), None);
+        assert!(parse_rfc3339_ms("2028-02-29T10:00:00Z").is_some());
+    }
+
+    #[test]
+    fn leading_utf8_bom_is_ignored() {
+        let l = format!("\u{feff}{}", human(r#","turnOrigin":"human""#));
+        assert!(matches!(&cls(&l)[..], [Entry::HumanPrompt { .. }]));
     }
 
     #[test]

@@ -47,6 +47,9 @@ pub struct PublishedRow {
 /// `(start, end)` in ms.
 pub type Interval = (i64, i64);
 
+/// Longest stored project label; bounds every API response that repeats it.
+pub const PROJECT_MAX_BYTES: usize = 256;
+
 pub struct Store {
     pub(crate) conn: Connection,
 }
@@ -153,7 +156,7 @@ impl Store {
         Ok(Store { conn })
     }
 
-    /// One transaction. Already-stored ids are duplicates (checked first, even if late);
+    /// One transaction. Project labels are cut to `PROJECT_MAX_BYTES`. Already-stored ids are duplicates (checked first, even if late);
     /// otherwise `ts <= finalized_through` fails the whole batch with `LateEvent`.
     pub fn append_events(&mut self, events: &[Event]) -> Result<AppendSummary, StoreError> {
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -167,9 +170,13 @@ impl Store {
             } else if e.ts <= fin {
                 return Err(StoreError::LateEvent { id: e.id.clone(), ts: e.ts, finalized_through: fin });
             } else {
+                let mut e = e.clone();
+                if let Some(p) = e.project.as_mut().filter(|p| p.len() > PROJECT_MAX_BYTES) {
+                    p.truncate((0..=PROJECT_MAX_BYTES).rev().find(|&i| p.is_char_boundary(i)).unwrap_or(0));
+                }
                 tx.execute(
                     "INSERT INTO events(id, ts, json) VALUES (?1, ?2, ?3)",
-                    params![e.id, e.ts, serde_json::to_string(e)?],
+                    params![e.id, e.ts, serde_json::to_string(&e)?],
                 )?;
                 added += 1;
             }
@@ -475,11 +482,24 @@ impl Store {
                 return Err(StoreError::Conflict);
             }
         }
-        let last: Option<String> = tx
-            .query_row("SELECT hash FROM ledger ORDER BY seq DESC LIMIT 1", [], |r| r.get(0))
+        let last: Option<(String, String)> = tx
+            .query_row("SELECT hash, json_extract(entry_json, '$.ruleset') FROM ledger ORDER BY seq DESC LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()?;
         if let Some(first) = entries.first() {
-            if first.prev_hash != last.as_deref().unwrap_or(GENESIS_HASH) {
+            // One ruleset per call. The same ruleset as the tip extends its chain; a different one
+            // opens a new chain at genesis, once: a ruleset that already has a chain cannot return.
+            let expected = match &last {
+                Some((hash, ruleset)) if *ruleset == first.ruleset => hash.as_str(),
+                Some(_) => {
+                    let seen: i64 = tx.query_row("SELECT COUNT(*) FROM ledger WHERE json_extract(entry_json, '$.ruleset') = ?1", [&first.ruleset], |r| r.get(0))?;
+                    if seen > 0 {
+                        return Err(StoreError::ChainBroken);
+                    }
+                    GENESIS_HASH
+                }
+                None => GENESIS_HASH,
+            };
+            if first.prev_hash != expected || entries.iter().any(|e| e.ruleset != first.ruleset) {
                 return Err(StoreError::ChainBroken);
             }
         }
@@ -564,6 +584,13 @@ impl Store {
             out.push(serde_json::from_str(&j?)?);
         }
         Ok(out)
+    }
+
+    /// The `hash` column of each ledger row, in append order (the chain tip `append_ledger` extends).
+    pub fn ledger_hash_columns(&self) -> Result<Vec<String>, StoreError> {
+        let mut st = self.conn.prepare("SELECT hash FROM ledger ORDER BY seq")?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Main ledger with its `seq`, in append order.
@@ -743,6 +770,14 @@ mod tests {
         let ids: Vec<_> = s.events().unwrap().into_iter().map(|e| e.id).collect();
         assert_eq!(ids, ["a", "b"]);
     }
+    #[test] fn long_project_labels_are_cut_on_a_char_boundary() {
+        let mut s = Store::open_in_memory().unwrap();
+        let mut e = ev("a", 1);
+        e.project = Some("\u{e9}".repeat(PROJECT_MAX_BYTES));
+        s.append_events(&[e]).unwrap();
+        let p = s.events().unwrap()[0].project.clone().unwrap();
+        assert!(p.len() <= PROJECT_MAX_BYTES && p.chars().all(|c| c == '\u{e9}'), "{}", p.len());
+    }
     #[test] fn late_events_reject_the_whole_batch_but_duplicates_pass() {
         let mut s = Store::open_in_memory().unwrap();
         s.append_events(&[ev("old", 500)]).unwrap();
@@ -802,6 +837,25 @@ mod tests {
         assert!(matches!(s.append_ledger(&[entry("a3", GENESIS_HASH)], 20, 0, &[]), Err(StoreError::ChainBroken)));
         assert_eq!(s.ledger().unwrap().len(), 2);
         assert_eq!(s.finalized_through().unwrap(), 10);
+    }
+    #[test] fn a_new_ruleset_opens_a_chain_at_genesis() {
+        let mut s = Store::open_in_memory().unwrap();
+        let at = |id: &str, ruleset: &str, prev: &str| {
+            let mut e = LedgerEntry { v: 1, ruleset: ruleset.into(), action_id: id.into(), ts: 1, project: None, kind: "k".into(),
+                verified_s: 1, unverified_s: 0, reasons: vec![], features: Default::default(), prev_hash: prev.into(), hash: String::new() };
+            e.hash = tally_scoring::ledger::entry_hash(&e);
+            e
+        };
+        let a = at("a", "old-0", GENESIS_HASH);
+        s.append_ledger(std::slice::from_ref(&a), 10, 0, &[]).unwrap();
+        // chained to the old head under a new ruleset, or back to the old ruleset, is refused
+        assert!(matches!(s.append_ledger(&[at("b", "new-0", &a.hash)], 20, 0, &[]), Err(StoreError::ChainBroken)));
+        let b = at("b", "new-0", GENESIS_HASH);
+        s.append_ledger(std::slice::from_ref(&b), 20, 0, &[]).unwrap();
+        assert!(matches!(s.append_ledger(&[at("c", "old-0", GENESIS_HASH)], 30, 0, &[]), Err(StoreError::ChainBroken)));
+        assert!(matches!(s.append_ledger(&[at("c", "old-0", &b.hash)], 30, 0, &[]), Err(StoreError::ChainBroken)));
+        s.append_ledger(&[at("c", "new-0", &b.hash)], 30, 0, &[]).unwrap();
+        assert_eq!(s.ledger().unwrap().len(), 3);
     }
     #[test] fn ledger_rows_cannot_be_updated_or_deleted() {
         let mut s = Store::open_in_memory().unwrap();

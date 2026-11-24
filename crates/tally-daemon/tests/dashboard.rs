@@ -73,3 +73,22 @@ fn dashboard_without_a_database_still_serves_the_page_and_503s_the_api() {
     assert!(get(port, "/").starts_with("HTTP/1.1 200"));
     assert!(get(port, "/api/status").starts_with("HTTP/1.1 503"));
 }
+
+#[test]
+fn tally_no_open_env_accepts_any_value() {
+    let dir = tempfile::tempdir().unwrap();
+    for v in ["1", "yes", "true"] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_tally"))
+            .arg("--home")
+            .arg(dir.path())
+            .args(["dashboard", "--port", "0"])
+            .env("TALLY_NO_OPEN", v)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+        let _g = Guard(child);
+        assert!(line.starts_with("Tally dashboard: http://"), "TALLY_NO_OPEN={v}: {line:?}");
+    }
+}

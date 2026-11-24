@@ -239,3 +239,18 @@ test("creating a device code deletes expired ones", async () => {
   await createDeviceCode(sql, "lap");
   expect((await sql`select 1 from device_codes where code_hash = ${`old!${tag}`}`).length).toBe(0);
 });
+
+test("GET /device?code= is limited by the form bucket", async () => {
+  const s = mk({ form: { perMin: 1, burst: 3 } });
+  try {
+    const u = await user();
+    const { setCookie } = await createSession(sql, testConfig(), u.id);
+    const cookie = setCookie.split(";")[0] ?? "";
+    const get = async () =>
+      (await fetch(`${s.url}/device?code=BCDF-GHJK`, { headers: { cookie }, redirect: "manual" }))
+        .status;
+    expect([await get(), await get(), await get(), await get()]).toEqual([400, 400, 400, 429]);
+  } finally {
+    s.stop();
+  }
+});

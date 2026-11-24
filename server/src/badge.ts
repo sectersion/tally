@@ -65,12 +65,14 @@ export async function badgeResponse(
     const [p] = await sql`select id, public, change_seq from projects
       where lower(public_name) = lower(${name}) and owner_id is not null`;
     if (!p) return out(404, "unknown", "lightgrey", { "cache-control": "public, max-age=60" });
+    // Private: no etag (it would leak the project id and change_seq).
+    if (!p.public)
+      return out(200, "private", "lightgrey", { "cache-control": "public, max-age=60" });
     const etag = `"${p.id}-${p.change_seq}"`;
     const cache = {
       "cache-control": "public, max-age=300, stale-while-revalidate=3600",
       etag,
     };
-    if (!p.public) return out(200, "private", "lightgrey", cache);
     const tags = (ifNoneMatch ?? "").split(",").map((t) => t.trim().replace(/^W\//, ""));
     if (tags.includes(etag) || tags.includes("*"))
       return new Response(null, { status: 304, headers: cache });
