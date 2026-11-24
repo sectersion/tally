@@ -1,0 +1,13 @@
+{"v":1,"id":"p1a","ts":0,"source":"seed","project":"p1","session":null,"kind":"prompt","chars":200,"relevance_pm":600,"novelty_bytes":100}
+{"v":1,"id":"r1","ts":10,"source":"seed","project":"p1","session":null,"kind":"test_run","cmd_hash":"aaaaaaaa11111111SECRETCMD","exit_code":1,"initiator":"user"}
+{"v":1,"id":"p1b","ts":100,"source":"seed","project":"p1","session":null,"kind":"prompt","chars":200,"relevance_pm":600,"novelty_bytes":100}
+{"v":1,"id":"r2","ts":310,"source":"seed","project":"p1","session":null,"kind":"test_run","cmd_hash":"aaaaaaaa11111111SECRETCMD","exit_code":0,"initiator":"user"}
+{"v":1,"id":"r3","ts":1000,"source":"seed","project":"p1","session":null,"kind":"test_run","cmd_hash":"bbbbbbbb22222222SECRETCMD","exit_code":1,"initiator":"user"}
+{"v":1,"id":"p1c","ts":1100,"source":"seed","project":"p1","session":null,"kind":"prompt","chars":200,"relevance_pm":600,"novelty_bytes":100}
+{"v":1,"id":"r4","ts":1540,"source":"seed","project":"p1","session":null,"kind":"test_run","cmd_hash":"bbbbbbbb22222222SECRETCMD","exit_code":0,"initiator":"user"}
+{"v":1,"id":"p1d","ts":2000,"source":"seed","project":"p1","session":null,"kind":"prompt","chars":200,"relevance_pm":600,"novelty_bytes":100}
+{"v":1,"id":"i1","ts":2060,"source":"seed","project":"p1","session":null,"kind":"idle","end_ts":2300}
+{"v":1,"id":"p1e","ts":2400,"source":"seed","project":"p1","session":null,"kind":"prompt","chars":200,"relevance_pm":100,"novelty_bytes":100}
+{"v":1,"id":"p2a","ts":90000,"source":"seed","project":"p2","session":null,"kind":"prompt","chars":200,"relevance_pm":600,"novelty_bytes":100}
+{"v":1,"id":"p2b","ts":90100,"source":"seed","project":"p2","session":null,"kind":"user_edit","file_hash":"ffffffff44444444SECRETFILE","lines_changed":4}
+{"v":1,"id":"r5","ts":90200,"source":"seed","project":"p2","session":null,"kind":"test_run","cmd_hash":"cccccccc33333333SECRETCMD","exit_code":0,"initiator":"user"}
