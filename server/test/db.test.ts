@@ -1,4 +1,8 @@
 import { afterAll, expect, test } from "bun:test";
+import { copyFileSync, mkdtempSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { connect, migrate } from "../src/db.ts";
 
 const sql = connect(process.env.DATABASE_URL ?? "");
@@ -54,4 +58,27 @@ test("one chain per project and ruleset", async () => {
     sql`insert into chains (project_id, ruleset, head_hash) values (${pid}, 'r1', 'h')`,
   ).rejects.toThrow();
   await sql`insert into chains (project_id, ruleset, head_hash) values (${pid}, 'r2', 'h')`;
+});
+
+test("migration 103 unlinks all but the newest live repo of a double-linked project", async () => {
+  const name = `mig103_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+  const url = new URL(process.env.DATABASE_URL ?? "");
+  await sql.unsafe(`create database ${name}`);
+  url.pathname = `/${name}`;
+  const db = connect(url.toString());
+  try {
+    const dir = mkdtempSync(join(tmpdir(), "mig103-"));
+    const src = new URL("../migrations/", import.meta.url);
+    for (const f of readdirSync(src)) if (f < "103") copyFileSync(new URL(f, src), join(dir, f));
+    await migrate(db, pathToFileURL(`${dir}/`));
+    await db`insert into projects (id, public_name) values ('p', 't/p')`;
+    await db`insert into github_repos (id, full_name) values (1,'a/b'),(2,'a/c')`;
+    await db`insert into project_repos (project_id, github_repo_id, linked_at) values ('p',1,now() - interval '1 day'),('p',2,now())`;
+    await migrate(db);
+    const live = await db`select github_repo_id::int as id from project_repos where unlinked_at is null`;
+    expect(live.map((r: { id: number }) => r.id)).toEqual([2]);
+  } finally {
+    await db.close();
+    await sql.unsafe(`drop database ${name}`);
+  }
 });
