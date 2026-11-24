@@ -524,3 +524,16 @@ fn doctor_lists_heartbeat_counters() {
     let o = tally(&home, &["doctor", "--json"]);
     assert!(out(&o).contains("\"dropped_agent\""), "{}", out(&o));
 }
+
+#[test]
+fn doctor_exits_zero_on_fresh_home_corrupt_config_and_corrupt_db() {
+    let d = tempfile::tempdir().unwrap();
+    let o = tally(d.path(), &["doctor"]);
+    assert!(o.status.success(), "fresh home: {}", err(&o));
+    assert!(out(&o).contains("no_logs"), "{}", out(&o));
+    std::fs::write(d.path().join("config.toml"), "x=[[").unwrap();
+    std::fs::write(d.path().join("tally.db"), "notadb").unwrap();
+    let o = tally(d.path(), &["doctor"]);
+    assert!(o.status.success(), "corrupt: {}", err(&o));
+    assert!(err(&o).contains("config.toml") && err(&o).contains("tally.db"), "{}", err(&o));
+}

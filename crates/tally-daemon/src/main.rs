@@ -229,6 +229,9 @@ fn main() -> Result<()> {
         eprintln!("{}", tally_daemon::repair::NEW_EPOCH_UNAVAILABLE);
         std::process::exit(1);
     }
+    if let Cmd::Doctor { json } = cli.cmd {
+        return doctor(&home, &db, json);
+    }
     if matches!(cli.cmd, Cmd::Ingest { .. } | Cmd::Project { .. } | Cmd::Run { .. }) {
         std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
     } else if !db.exists() {
@@ -278,7 +281,7 @@ fn main() -> Result<()> {
             println!("added {}, duplicates {}", s.added, s.duplicates);
         }
         Cmd::HeartbeatConfig => unreachable!("handled before the store opens"),
-        Cmd::Hook { .. } | Cmd::VerifyPublished { .. } | Cmd::Login { .. } | Cmd::Logout { .. } | Cmd::Dashboard { .. } => {
+        Cmd::Hook { .. } | Cmd::Doctor { .. } | Cmd::VerifyPublished { .. } | Cmd::Login { .. } | Cmd::Logout { .. } | Cmd::Dashboard { .. } => {
             unreachable!("handled before the store is opened")
         }
         Cmd::Project { cmd: ProjectCmd::Add { path, name } } => {
@@ -367,24 +370,6 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Doctor { json } => {
-            let cfg = config::load(&home)?;
-            let mut configured: Vec<&str> = if cfg.claude_code.enabled { vec!["claude-code"] } else { vec![] };
-            if cfg.copilot.enabled {
-                configured.push("copilot");
-            }
-            if cfg.heartbeat.enabled {
-                configured.push("heartbeat");
-            }
-            let r = tally_daemon::doctor::report(&store, &configured, chrono::Utc::now().timestamp_millis())?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&r)?);
-            } else {
-                for h in &r {
-                    println!("{}", tally_daemon::doctor::line(h));
-                }
-            }
-        }
         Cmd::Status => {
             let s = status(&store)?;
             println!("events: {}", s.events);
@@ -442,6 +427,35 @@ fn open_browser(url: &str) -> std::io::Result<std::process::Child> {
 }
 
 /// Stores the token from stdin, then checks it against `[sync] server` if one is configured.
+/// Never fails on a bad home: a missing/corrupt db or config.toml is reported on stderr and diagnosed with empty state.
+fn doctor(home: &std::path::Path, db: &std::path::Path, json: bool) -> Result<()> {
+    let cfg = config::load(home).unwrap_or_else(|e| {
+        eprintln!("config.toml: {e:#}; using defaults");
+        Default::default()
+    });
+    let store = if db.exists() { Store::open(db).map_err(|e| eprintln!("{}: {e}; reporting without it", db.display())).ok() } else { None };
+    let store = match store {
+        Some(s) => s,
+        None => Store::open_in_memory()?,
+    };
+    let mut configured: Vec<&str> = if cfg.claude_code.enabled { vec!["claude-code"] } else { vec![] };
+    if cfg.copilot.enabled {
+        configured.push("copilot");
+    }
+    if cfg.heartbeat.enabled {
+        configured.push("heartbeat");
+    }
+    let r = tally_daemon::doctor::report(&store, &configured, chrono::Utc::now().timestamp_millis())?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&r)?);
+    } else {
+        for h in &r {
+            println!("{}", tally_daemon::doctor::line(h));
+        }
+    }
+    Ok(())
+}
+
 fn login(home: &std::path::Path, server_id: &str, server: Option<&str>) -> Result<()> {
     if !tally_daemon::project::valid_server_id(server_id) {
         bail!("invalid server id; use 1 to 64 letters, digits, '_' or '-'");
