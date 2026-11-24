@@ -682,3 +682,13 @@ fn sync_stops_after_the_first_network_failure() {
     assert_eq!(commits.len() + uploads.len(), 1, "{commits:?} {uploads:?}");
     assert!(hits.load(Ordering::SeqCst) <= 2, "hits {}", hits.load(Ordering::SeqCst));
 }
+
+#[test]
+fn a_429_between_batches_is_waited_out_not_fatal() {
+    let f = FakeServer::start("tok");
+    f.max_batch(1);
+    // The second batch (after the first succeeded) gets a 429; the sync must retry it.
+    f.on_next_upload(|s| s.fail = (1, 429));
+    let r = sync_chain(&api(&f), "srv_1", "p", R, &chain_of(2)).unwrap();
+    assert_eq!(r.uploaded, 2);
+}
