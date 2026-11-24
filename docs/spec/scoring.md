@@ -90,6 +90,7 @@ Computed locally on prompt text, which is then discarded.
 - `relevance_pm = 1000 × |prompt ∩ context| / max(|prompt|, 1)`.
 - `novelty_bytes = len(zstd(context_tail ‖ prompt)) − len(zstd(context_tail))`, level 3, where `context_tail` is the last 8 KiB of conversation.
 - If `novelty_bytes < NOVELTY_MIN`, `relevance_pm` is set to 0 (the prompt adds nothing).
+- **Known limit:** the ratio ignores prompt size, so a single in-vocabulary identifier (about 24+ chars, passing the novelty gate) scores `relevance_pm = 1000`. This is a deliberate heuristic limit; the damage is bounded by the 1200 s prompt cap and the 20-char triviality floor.
 
 ## 6. Ledger entry (uploaded)
 
