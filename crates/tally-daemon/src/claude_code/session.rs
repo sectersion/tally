@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use tally_scoring::text::Vocab;
 use tally_scoring::{Actor, Event, Kind};
 
+use crate::adapters::common::safe_id;
 use super::features::{prompt_numbers, ContextTail};
 use super::line::{Entry, Meta};
 
@@ -39,6 +40,7 @@ pub struct Ctx<'a> {
 }
 
 fn event(session: &str, uuid: &str, suffix: &str, ts: i64, project: &Option<String>, kind: Kind) -> Event {
+    let (session, uuid) = (safe_id(session), safe_id(uuid));
     Event {
         v: 1,
         // ponytail: the session id is part of the id (Decision 1), so a forked/resumed session that copies
@@ -48,7 +50,7 @@ fn event(session: &str, uuid: &str, suffix: &str, ts: i64, project: &Option<Stri
         ts,
         source: "claude-code".into(),
         project: project.clone(),
-        session: Some(session.to_owned()),
+        session: Some(session),
         kind,
     }
 }
@@ -105,7 +107,7 @@ impl Session {
                             initiator: Actor::Agent,
                         })),
                         BashKind::Commit if !is_error => Some(("commit", Kind::Commit {
-                            sha: format!("claude:{tool_use_id}"),
+                            sha: format!("claude:{}", safe_id(tool_use_id)),
                             by: Actor::Agent,
                             lines_changed: 0,
                         })),
@@ -238,6 +240,18 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn non_uuid_log_ids_are_hashed_out_of_event_ids_and_session() {
+        let (mut s, v) = (Session::default(), Vocab::default());
+        let mut out = vec![];
+        let ctx = Ctx { project: None, vocab: &v };
+        let m = Meta { uuid: "QACANARY_UUID_1".into(), session: "QACANARY_SESS_5".into(), ts: 1, cwd: None };
+        s.feed(Entry::HumanPrompt { meta: m, text: "hi".into(), queued: false }, &ctx, &mut out);
+        for e in &out {
+            assert!(!e.id.contains("QACANARY") && !e.session.as_deref().unwrap().contains("QACANARY"), "{e:?}");
+        }
     }
 
     #[test]
