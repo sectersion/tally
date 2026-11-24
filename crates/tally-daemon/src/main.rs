@@ -426,7 +426,6 @@ fn open_browser(url: &str) -> std::io::Result<std::process::Child> {
     return std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
-/// Stores the token from stdin, then checks it against `[sync] server` if one is configured.
 /// Never fails on a bad home: a missing/corrupt db or config.toml is reported on stderr and diagnosed with empty state.
 fn doctor(home: &std::path::Path, db: &std::path::Path, json: bool) -> Result<()> {
     let cfg = config::load(home).unwrap_or_else(|e| {
@@ -456,6 +455,7 @@ fn doctor(home: &std::path::Path, db: &std::path::Path, json: bool) -> Result<()
     Ok(())
 }
 
+/// Stores the token from stdin, then checks it against `[sync] server` if one is configured.
 fn login(home: &std::path::Path, server_id: &str, server: Option<&str>) -> Result<()> {
     if !tally_daemon::project::valid_server_id(server_id) {
         bail!("invalid server id; use 1 to 64 letters, digits, '_' or '-'");
