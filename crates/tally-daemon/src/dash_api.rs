@@ -115,11 +115,11 @@ impl<'a> Query<'a> {
     }
     fn window(&self) -> Result<(i64, i64), String> {
         let to = self.int("to")?.unwrap_or_else(now_ms);
-        let from = self.int("from")?.unwrap_or(to - DEFAULT_WINDOW_MS);
+        let from = self.int("from")?.unwrap_or(to.saturating_sub(DEFAULT_WINDOW_MS));
         if from >= to {
             return Err("from must be less than to".into());
         }
-        if to - from > MAX_WINDOW_MS {
+        if to.saturating_sub(from) > MAX_WINDOW_MS {
             return Err("window (from, to) is longer than 366 days".into());
         }
         Ok((from, to))
@@ -135,7 +135,7 @@ impl<'a> Query<'a> {
         if e.windows(2).any(|w| w[0] >= w[1]) {
             return Err("edges must be strictly ascending".into());
         }
-        if e[e.len() - 1] - e[0] > MAX_WINDOW_MS + 3_600_000 {
+        if e[e.len() - 1].saturating_sub(e[0]) > MAX_WINDOW_MS + 3_600_000 {
             return Err("edges span more than 366 days".into());
         }
         Ok(e)
