@@ -89,6 +89,31 @@ test("served page boots against the live API and shows the fixture's numbers", a
   expect(document.querySelectorAll("h1").length).toBe(1);
 });
 
+test("a project filter with no loops shows the empty-bugs message", async () => {
+  // The page has no project filter on bugs; the real equivalent is a store holding only p2 (no loops).
+  const home2 = mkdtempSync(join(tmpdir(), "tally-e2e-p2-"));
+  const keep = { home, url, child, port };
+  try {
+    const base = Date.now() - 3 * 86_400_000;
+    const p2 = readFileSync(join(import.meta.dir, "../fixtures/seed.ndjson"), "utf8").trim().split("\n").filter((l) => JSON.parse(l).project === "p2")
+      .map((l) => { const e = JSON.parse(l); e.ts = base + e.ts * 1000; return JSON.stringify(e); });
+    writeFileSync(join(home2, "p2.ndjson"), p2.join("\n") + "\n");
+    home = home2;
+    tally("ingest", join(home2, "p2.ndjson"), "--source", "seed", "--watermark", String(base + 2 * 86_400_000));
+    tally("finalize");
+    await startServer(0);
+    await boot();
+    await waitFor(() => text().includes("No fixed bugs in this period yet"));
+    expect(document.querySelector(".big")?.textContent).toBe("0");
+    expect(text()).not.toMatch(/NaN|Infinity|Average time from failure to fix/);
+  } finally {
+    child?.kill();
+    await child?.exited;
+    ({ home, url, child, port } = keep);
+    rmSync(home2, { recursive: true, force: true });
+  }
+});
+
 test("replay lists the fixture sessions, the first moment is a prompt and the fixes are marked", async () => {
   await boot();
   await waitFor(() => text().includes("Bugs fixed"));
