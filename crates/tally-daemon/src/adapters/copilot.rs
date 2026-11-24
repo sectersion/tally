@@ -42,7 +42,7 @@ fn ev(session: &str, project: &Option<String>, native: &str, kind_s: &str, ts: i
     let (session, native) = (safe_id(session), safe_id(native));
     Event {
         v: 1,
-        id: stable_id(SOURCE, &format!("{}:{}", esc(session), esc(native)), kind_s),
+        id: stable_id(SOURCE, &format!("{}:{}", esc(&session), esc(&native)), kind_s),
         ts,
         source: SOURCE.into(),
         project: project.clone(),
