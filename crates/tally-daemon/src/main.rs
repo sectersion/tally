@@ -227,6 +227,9 @@ fn main() -> Result<()> {
         let token = tally_daemon::heartbeat::server::load_or_create_token(&file).context("reading or creating the heartbeat token")?;
         println!("api_url = http://127.0.0.1:{}/api", cfg.heartbeat.port);
         println!("api_key = {token}");
+        // wakatime-cli sends at most one request per 120 s by default and queues the rest, so heartbeats would
+        // arrive minutes late (OBSERVED, v2.28.4); this key turns that off for this config file.
+        println!("heartbeat_rate_limit_seconds = 0");
         println!("# put these under [settings] in ~/.wakatime.cfg; token file: {}", file.display());
         if !cfg.heartbeat.enabled {
             println!("# note: set [heartbeat] enabled = true in config.toml; the server is off by default");

@@ -18,6 +18,11 @@ pub const AGENT_WRITE_WINDOW_MS: i64 = 10_000;
 /// Heartbeats wait this long in memory so agent writes seen later in logs can still match.
 pub const HEARTBEAT_HOLD_MS: i64 = 15_000;
 pub const HEARTBEAT_SLACK_MS: i64 = 60_000;
+/// How late a heartbeat may arrive (after its own `time`) and still count. OBSERVED, wakatime-cli v2.28.4: one
+/// request is sent at most every 120 s by default (the rest wait in its offline queue), and on the dev machine the
+/// client sent nothing for 73 s after start because it first scans other tools' AI logs, so a heartbeat arrived
+/// 86 s late. The finalization horizon trails real time by `HEARTBEAT_HOLD_MS + HEARTBEAT_LATE_MS`.
+pub const HEARTBEAT_LATE_MS: i64 = 180_000;
 pub const EDIT_BUCKET_MS: i64 = 120_000;
 /// How far back `sources()` seeds the agent-write list from the store.
 pub const SEED_WINDOW_MS: i64 = 10 * 60_000;
@@ -37,10 +42,11 @@ pub struct Heartbeat {
     pub lines: Option<u32>,
     pub lineno: Option<u32>,
     pub cursorpos: Option<u32>,
-    pub line_additions: Option<u32>,
-    pub line_deletions: Option<u32>,
-    pub ai_line_changes: Option<u32>,
-    pub human_line_changes: Option<u32>,
+    // Signed: OBSERVED wakatime-cli v2.28.4 sends negative `ai_line_changes` (down to -51) for removals; an unsigned field rejected the whole heartbeat.
+    pub line_additions: Option<i64>,
+    pub line_deletions: Option<i64>,
+    pub ai_line_changes: Option<i64>,
+    pub human_line_changes: Option<i64>,
     pub user_agent: Option<String>,
     pub plugin: Option<String>,
 }
@@ -286,7 +292,7 @@ impl Source for HeartbeatSource {
     }
 
     fn poll(&mut self, now_ms: i64, _state: &mut dyn SourceState) -> Result<Poll, SourceError> {
-        let floor = now_ms - HEARTBEAT_HOLD_MS - HEARTBEAT_SLACK_MS;
+        let floor = now_ms - HEARTBEAT_HOLD_MS - HEARTBEAT_LATE_MS;
         let batch: Vec<Received> = {
             let mut g = self.sink.lock().unwrap_or_else(|e| e.into_inner());
             let (ok, bad): (Vec<Received>, Vec<Received>) =
@@ -605,7 +611,7 @@ mod tests {
         assert!(p.events.is_empty());
         assert_eq!(sink.lock().unwrap().len(), 1);
         let p = src.poll(T + HEARTBEAT_HOLD_MS, &mut st).unwrap();
-        assert_eq!(p.watermark, Some(T - HEARTBEAT_SLACK_MS));
+        assert_eq!(p.watermark, Some(T - HEARTBEAT_LATE_MS));
         assert!(sink.lock().unwrap().is_empty());
         assert!(src.take_health().is_some());
     }
