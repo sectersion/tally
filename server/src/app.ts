@@ -444,6 +444,7 @@ export function createServer(deps: Deps) {
         GET: handle("/device", async (req) => {
           const s = await requireUser(sql, req);
           const code = new URL(req.url).searchParams.get("code") ?? "";
+          if (code.trim()) limit(`form:${s.userId}`, rates.form); // code lookup is an oracle
           const viewer = viewerOf(s);
           if (!code.trim())
             return page(
