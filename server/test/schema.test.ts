@@ -27,6 +27,11 @@ async function catchAsync(f: () => Promise<unknown>): Promise<HttpError> {
 }
 const bad = (body: unknown) => catchErr(() => parse(UploadBody, body));
 
+test("a __proto__ feature key is rejected, not silently dropped", () => {
+  const e = { ...chain[0], features: JSON.parse('{"__proto__":5}') };
+  expect(bad({ prev_hash: GENESIS, entries: [e] }).status).toBe(400);
+});
+
 test("fixture entries parse", () =>
   expect(() => parse(UploadBody, { prev_hash: GENESIS, entries: chain })).not.toThrow());
 
