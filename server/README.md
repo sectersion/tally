@@ -9,6 +9,10 @@ Needs [Bun](https://bun.sh) 1.4.5 and Postgres 16.
 ```sh
 docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:16
 export DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres
+# Required (see Production settings); these placeholders are enough to start, but sign-in and GitHub need real values.
+export PUBLIC_BASE_URL=http://localhost:8080
+export HCA_CLIENT_ID=dev HCA_CLIENT_SECRET=dev
+export GITHUB_APP_SLUG=dev GITHUB_APP_CLIENT_ID=dev GITHUB_APP_CLIENT_SECRET=dev GITHUB_WEBHOOK_SECRET=dev
 cd server
 bun install
 bun run wasm     # needs Rust stable, the wasm32-unknown-unknown target and wasm-pack
@@ -16,7 +20,7 @@ bun run start    # migrations run at start; PORT defaults to 8080, LOG_LEVEL to 
 curl localhost:8080/healthz   # {"ok":true}
 ```
 
-`server/wasm/` is build output and is not committed. If port 8080 is taken, set `PORT`.
+The `docker run` line stays in the foreground: run the rest in a second terminal. `server/wasm/` is build output and is not committed. If port 8080 is taken, set `PORT` (and match it in `PUBLIC_BASE_URL`).
 
 ## Create a device token
 
@@ -34,8 +38,12 @@ Revoke with `bun run token:revoke <token_id>` (prints `revoked`, or `no such act
 
 ## Admin scripts
 
-- `bun run token:claim <project_id> <handle>` gives a project (for example one made by `token:create`, which has no owner) to the user with that handle. If the project already has an owner it refuses and exits 1; add `--force` to replace the owner.
+- `bun run token:claim <project_id> <handle>` gives a project (for example one made by `token:create`, which has no owner) to the user with that handle. If the project already has an owner it refuses and exits 1; add `--force` to replace the owner. Project-bound device tokens from `token:create` keep working after a claim (the new owner can revoke them in /settings).
 - `bun run user:role <handle> user|reviewer|admin` sets a user's role (prints `<handle> is now <role>`, or `no such handle` and exits 1).
+
+## Migrations
+
+`server/migrations/` runs in name order. Number `103` has two files (`103_device.sql`, `103_one_repo_per_project.sql`; both apply, never rename an applied migration), `104` is reserved for plan 10 (`104_submissions.sql`), `105_ledger_entries_chain_ts.sql` already exists, and `106` has three files (`106_chains_unverified_s.sql`, `106_repo_gh_updated_at.sql`, `106_unique_action_id.sql`; independent, all apply). New migrations start at `107`.
 
 ## Test
 
@@ -89,7 +97,7 @@ Environment (read once at start by `loadConfig` in `src/config.ts`; a missing re
 ## Limits
 
 - Every `/v1` response is JSON; pages outside `/v1` are server-rendered HTML.
-- Body 1 MiB, 1000 entries per batch. A body over 2 MiB is rejected by Bun itself with an empty-body 413; the JSON `body_too_large` applies between 1 and 2 MiB.
+- Body 1 MiB, 1000 entries per batch. A larger body is a JSON `413 body_too_large` (checked by `Content-Length`, and while streaming for chunked bodies); Bun itself only cuts off at 256 MiB with an empty 413.
 - 120 requests/min per token (burst 30), single instance (in-process limiter).
 - Per minute: sign-in and GitHub connect 20 per ip, `/v1/device/code` 10 per ip, session form posts 60 per user, `/u` and `/p` pages 120 per ip, badges 600 per ip (table: `LIMITS` in `src/ratelimit.ts`). Webhooks are not limited. Over a limit is `429` with `retry-after: 60`.
 - Failed auth is limited per client ip. Behind a proxy, set `TRUST_PROXY=1` so the client ip is the last `x-forwarded-for` hop (the one the proxy appended); otherwise every client shares the proxy's address. Never set it without a proxy that appends that header: clients could then pick their own ip.

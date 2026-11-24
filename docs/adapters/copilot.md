@@ -1,25 +1,32 @@
 # GitHub Copilot adapter
 
-**Status: unsupported, spike not run.** tally cannot track Copilot time yet. We have not seen real Copilot logs, so no parser exists. See `crates/tally-daemon/tests/fixtures/copilot/NOTES.md`.
+**Status: supported for the Copilot CLI / agent host** (`session-state/<id>/events.jsonl`, seen with Copilot CLI 1.0.111, event format version 1). **VS Code Copilot Chat is not supported**: every chat file on the spike machine had zero requests, so its request format is unseen. Evidence and every OBSERVED/UNVERIFIED item: `crates/tally-daemon/tests/fixtures/copilot/NOTES.md`.
 
-## Where logs are believed to live (all UNVERIFIED on disk)
+## Where logs live
 
-| Surface | Path |
-|---|---|
-| Copilot CLI (all OS) | `~/.copilot/session-state/<session-id>/events.jsonl` (`COPILOT_HOME` overrides root; Windows `%USERPROFILE%\.copilot\...`) |
-| VS Code Chat, Windows | `%APPDATA%\Code\User\workspaceStorage\<hash>\chatSessions\` |
-| VS Code Chat, macOS | `~/Library/Application Support/Code/User/workspaceStorage/<hash>/chatSessions/` |
-| VS Code Chat, Linux | `~/.config/Code/User/workspaceStorage/<hash>/chatSessions/` |
-
-The CLI root and `events.jsonl` name come from GitHub docs; the VS Code paths and all file formats come from third-party write-ups.
-
-## Expected signals (honesty table)
-
-| Signal | Expectation | Confidence |
+| Surface | Path | Seen on disk |
 |---|---|---|
-| Session start/end | Likely from event timestamps | UNVERIFIED |
-| Active time per turn | CLI: unknown; VS Code: `elapsedMs` per request maybe | UNVERIFIED |
-| Idle gaps | Inferable only if events are timestamped | UNVERIFIED |
-| Token usage | CLI: only at clean shutdown, cumulative; VS Code: per request | UNVERIFIED |
-| Crash/kill | Probably no shutdown event, totals lost | UNVERIFIED |
-| Project attribution | Session cwd likely recorded; VS Code via workspace.json | UNVERIFIED |
+| Copilot CLI, Windows | `%USERPROFILE%\.copilot\session-state\<session-id>\events.jsonl` | yes |
+| Copilot CLI, macOS / Linux | `~/.copilot/session-state/<session-id>/events.jsonl` | no (docs only, UNVERIFIED) |
+| Override | `COPILOT_HOME` env var, or `[copilot] home = "<dir>"` in `config.toml` | `COPILOT_HOME` UNVERIFIED |
+| VS Code Chat (not parsed) | `%APPDATA%\Code\User\workspaceStorage\<hash>\chatSessions\*.jsonl` | yes, but empty of requests |
+
+Config (`<home>/config.toml`): `[copilot]` with `enabled` (default true) and `home`. Only sessions modified in the last 7 days are read. `tally doctor` shows the files found, the last event time, the format (`cli-events-v1`) and the error rate. Prompt text is never stored: only lengths and derived numbers leave the parser.
+
+## Honesty table
+
+| Signal | Status | How |
+|---|---|---|
+| prompt | supported | `user.message` with `delivery == "idle"`; the typed `content` only, never the injected context |
+| agent_output | supported | chars of non-empty `assistant.message` content |
+| agent_busy | supported | prompt time to the last `assistant.turn_end` before the `agentStop` hook (or next prompt / shutdown) |
+| project attribution | supported | `session.start` `context.cwd` through the git root |
+| interrupt | unsupported | no abort/Stop was ever recorded in the sample |
+| tool_decision | unsupported | the only decisions seen were automatic (`host_policy`), not the user's |
+| agent writes (heartbeat filter) | unsupported | only read tools (`view`, `glob`, `rg`) were seen; write tool names unknown |
+
+Messages typed while the agent is running (`delivery` other than `idle`) are not counted as prompts until their format is verified, so a busy session can under-count. A session killed mid-turn leaves an open turn that is not emitted and stops holding the clock after 6 hours.
+
+## To extend
+
+Run a CLI session with an edit, an approved and a rejected command, a message typed mid-turn, a Stop, and a kill; follow the maintainer TODO in `NOTES.md`.

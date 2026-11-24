@@ -6,7 +6,7 @@ const chain = (await Bun.file(new URL("./fixtures/chain.json", import.meta.url))
 ];
 const GENESIS = "0".repeat(64);
 
-test("ruleset is the crate's", () => expect(rulesetVersion()).toBe("2026.11-0"));
+test("ruleset is the crate's", () => expect(rulesetVersion()).toBe("2026.11-1"));
 test("fixture verifies whole and in two parts", () => {
   expect(verifyChain(chain, GENESIS)).toEqual({ ok: true });
   expect(verifyChain(chain.slice(3), chain[2].hash)).toEqual({ ok: true });

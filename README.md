@@ -18,8 +18,8 @@ Tally passively measures the hours of *productive struggle* you spend building p
 
 ## Privacy
 
-- **Logged hours:** only an action ledger leaves your machine (project, action type, seconds, reason code). No text, titles, or URLs. Nothing about projects you don't track.
-- **Submitted hours:** prompt text leaves only for projects you choose to submit, goes to a self-hosted judge, and is deleted after review.
+- **Logged hours:** what can leave your machine is listed here, and nothing else. Sync uploads ledger entries (project, action type, action id, timestamps, seconds, reason code, numeric text features) and head hashes with commit timestamps. Publish writes badge data and public ledger files to the `tally-data` branch. No text, titles, or URLs. Nothing about projects you don't track.
+- **Submitted hours:** scrubbed session text leaves only on an explicit `tally submit`, for projects you choose, and goes to a self-hosted judge that deletes it after review. Planned (plan 10); not built yet, so no text leaves today.
 
 ## Why keep it installed
 
@@ -40,7 +40,7 @@ tally verify-published ledger-2026.11-0.json
 
 Expected output: `ok: ledger-2026.11-0.json: N entries, project sectersion/tally, ruleset 2026.11-0, verified_hours N.N`.
 
-This proves the chain is intact and the hours add up. A ledger holds claims, not events, so it cannot be re-scored. Each entry's timestamp is public and permanent in the branch history. A new ruleset starts a new file, and the badge sums all files.
+This proves the chain is intact and the hours add up. A chain cut to its first N entries still verifies, so compare the entry count and hours with the badge. A ledger holds claims, not events, so it cannot be re-scored. Each entry's timestamp is public and permanent in the branch history. A new ruleset starts a new file, and the badge sums all files.
 
 ## Planned stack
 

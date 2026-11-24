@@ -17,6 +17,15 @@ fn mk(s: i64, project: Option<&str>, kind: Kind) -> Event {
         kind,
     }
 }
+#[test]
+fn floor_keeps_total_equal_to_floored_raw() {
+    // Cap 283.080 s (relevance 151), raw interval 284.0 s: verified 283 + unverified 1.
+    let a = mk(0, Some("P"), Kind::Interrupt);
+    let b = mk(284, Some("P"), prompt(200, 151));
+    let c = score(&[a, b]);
+    assert_eq!(c[1].verified_s + c[1].unverified_s, 284);
+}
+
 fn prompt(chars: u32, rel: u16) -> Kind {
     Kind::Prompt { chars, relevance_pm: rel, novelty_bytes: 100 }
 }
@@ -67,11 +76,21 @@ fn watching_generation_earns_nothing_reading_does() {
     assert!(c[1].reasons.contains(&"agent_busy_subtracted".into()));
 }
 #[test]
-fn reading_output_protects_idle_time_and_says_so() {
-    // idle 10..300 would remove 190..300 (110 s); reading 100..200 protects 190..200, so only 100 s go
-    let c = score(&[prompt_at(0, 600), idle(10, 300), output(100, 2500), prompt_at(420, 300)]);
-    assert_eq!(c[1].verified_s, 320);
-    assert!(c[1].reasons.contains(&"read_protected".into()));
+fn agent_output_does_not_cancel_idle_subtraction() {
+    // spec 9.1: away 1790 s with big agent replies earns grace + thinking only (355 s), same as no output
+    let mut v = vec![prompt_at(0, 1000), idle(10, 1799), busy(0, 1800)];
+    v.extend((0..18).map(|k| output(20 + k * 100, 15_000)));
+    v.push(prompt_at(1800, 1000));
+    let c = score(&v);
+    assert_eq!(c[1].verified_s, 355);
+    assert!(c[1].reasons.contains(&"idle_subtracted".into()));
+}
+#[test]
+fn huge_replies_do_not_cancel_idle_subtraction() {
+    // idle 10..2000, huge replies at 100 and 700; prompt rel 300 at 1780: away stretch stays bounded
+    let c = score(&[prompt_at(0, 600), idle(10, 2000), output(100, 15000), output(700, 15000), prompt_at(1780, 300)]);
+    assert_eq!(c[1].verified_s, 190);
+    assert!(!c[1].reasons.contains(&"read_protected".into()));
     assert!(c[1].reasons.contains(&"idle_subtracted".into()));
 }
 #[test]
@@ -135,10 +154,41 @@ fn gap_of_exactly_max_interval_is_same_run() {
     assert!(!c[1].reasons.contains(&"first_action".into()));
 }
 #[test]
+fn equal_ts_actions_do_not_depend_on_id_or_input_order() {
+    let at = |id: &str, k: Kind| Event { id: id.into(), ..mk(600, Some("P"), k) };
+    let run = |ii: &str, pi: &str, rev: bool| {
+        let mut v = vec![mk(0, Some("P"), Kind::Interrupt), at(ii, Kind::Interrupt), at(pi, prompt(200, 1000))];
+        if rev {
+            v.reverse();
+        }
+        score(&v).iter().map(|c| (c.kind.clone(), c.verified_s)).collect::<Vec<_>>()
+    };
+    let want = run("a", "b", false);
+    assert_eq!(want, run("b", "a", false));
+    assert_eq!(want, run("b", "a", true));
+    // same id and ts, different kind (SCORING-4)
+    let x = |k| Event { id: "x".into(), ..mk(5, Some("P"), k) };
+    let (a, b) = (x(prompt(200, 600)), x(Kind::Interrupt));
+    assert_eq!(score(&[a.clone(), b.clone()]), score(&[b, a]));
+}
+#[test]
 fn fail_pass_loop_completes_once() {
     let c = score(&[test_at(0, "x", 1), prompt_at(300, 600), test_at(900, "x", 0), test_at(1800, "x", 0)]);
     assert_eq!(c[2].verified_s, 600);
     assert!(c[2].reasons.contains(&"fail_pass_loop".into()));
     assert_eq!((c[3].verified_s, c[3].unverified_s), (120, 780));
     assert!(!c[3].reasons.contains(&"fail_pass_loop".into()));
+}
+
+#[test]
+fn interrupt_followed_by_same_ts_prompt_regardless_of_id() {
+    for pid in ["a", "z"] {
+        let mut p = prompt_at(1000, 600);
+        p.id = pid.into();
+        let mut i = mk(1000, Some("P"), Kind::Interrupt);
+        i.id = "m".into();
+        let c = score(&[i, p]);
+        let c = c.iter().find(|c| c.action_id == "m").unwrap();
+        assert!(c.reasons.contains(&"interrupt_followed".into()), "prompt id {pid}");
+    }
 }

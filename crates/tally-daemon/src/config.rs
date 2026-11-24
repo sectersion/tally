@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub run: RunConfig,
     pub claude_code: ClaudeCodeConfig,
+    pub copilot: CopilotConfig,
     pub presence: PresenceConfig,
     pub publish: crate::publish::PublishConfig,
     pub sync: SyncConfig,
@@ -102,6 +103,20 @@ impl Default for ClaudeCodeConfig {
     }
 }
 
+/// `home: None` means `$COPILOT_HOME`, else `~/.copilot` (the Copilot CLI state directory).
+#[derive(serde::Deserialize, Debug, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct CopilotConfig {
+    pub enabled: bool,
+    pub home: Option<PathBuf>,
+}
+
+impl Default for CopilotConfig {
+    fn default() -> Self {
+        Self { enabled: true, home: None }
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum ConfigError {
     #[error("reading {path}: {source}")]
@@ -131,7 +146,13 @@ pub fn load(home: &Path) -> Result<Config, ConfigError> {
         // the host must end after the loopback name, so http://localhost.evil.example is refused
         let local = ["http://127.0.0.1", "http://localhost"]
             .iter()
-            .any(|p| s.strip_prefix(p).is_some_and(|r| r.is_empty() || r.starts_with([':', '/'])));
+            .any(|p| {
+                // rest of the authority must be empty or ":port" (no userinfo like localhost:80@evil)
+                s.strip_prefix(p).is_some_and(|r| {
+                    let auth = r.split(['/', '?', '#', '\\']).next().unwrap_or("");
+                    auth.is_empty() || auth.strip_prefix(':').is_some_and(|d| d.bytes().all(|b| b.is_ascii_digit()))
+                })
+            });
         let ok = s.starts_with("https://") || local;
         if !ok {
             return Err(ConfigError::Invalid { path, msg: "sync.server must start with https:// (http:// only for 127.0.0.1 or localhost)".into() });
@@ -162,6 +183,22 @@ mod tests {
             (15, true, None)
         );
         assert_eq!((c.run.dashboard, c.run.dashboard_port), (false, 7878));
+    }
+
+    #[test]
+    fn http_sync_server_userinfo_is_not_loopback() {
+        let d = tempfile::tempdir().unwrap();
+        for (u, ok) in [
+            ("http://localhost:80@127.0.0.2:18249", false),
+            ("http://127.0.0.1@evil.example", false),
+            ("http://localhost.evil.example", false),
+            ("http://localhost", true),
+            ("http://localhost:8787/", true),
+            ("http://127.0.0.1:8787/x@y", true),
+        ] {
+            write(&d, &format!("[sync]\nserver = '{u}'\n"));
+            assert_eq!(load(d.path()).is_ok(), ok, "{u}");
+        }
     }
 
     #[test]
@@ -210,6 +247,22 @@ mod tests {
         write(&d, "[sync]\ntoken = \"x\"\n");
         assert!(load(d.path()).unwrap_err().to_string().contains("unknown"));
         assert_eq!(Config::default().sync, SyncConfig { enabled: false, server: None });
+    }
+
+    #[test]
+    fn copilot_table_parses_and_defaults_on() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(load(d.path()).unwrap().copilot, CopilotConfig { enabled: true, home: None });
+        write(&d, "[copilot]
+enabled = false
+home = \"/x\"
+");
+        let c = load(d.path()).unwrap().copilot;
+        assert_eq!((c.enabled, c.home), (false, Some(PathBuf::from("/x"))));
+        write(&d, "[copilot]
+user_data_dirs = []
+");
+        assert!(load(d.path()).unwrap_err().to_string().contains("unknown"));
     }
 
     #[test]

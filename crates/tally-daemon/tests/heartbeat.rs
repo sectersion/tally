@@ -180,3 +180,50 @@ fn invalid_item_gets_a_fixed_error_text_and_is_counted() {
     assert_eq!(post(&r, ONE, "{nope").0, 400);
     assert_eq!(counters.malformed.load(std::sync::atomic::Ordering::Relaxed), 2);
 }
+
+/// OBSERVED request shape of wakatime-cli v2.28.4 (values scrubbed or synthetic, see fixtures/heartbeat/NOTES.md):
+/// a bulk of file and app heartbeats incl. `ai_*` fields and a negative `ai_line_changes`.
+const CLI_BULK: &str = include_str!("fixtures/heartbeat/wakatime-cli-2.28.4-bulk.json");
+
+#[test]
+fn the_real_client_path_without_v1_is_accepted() {
+    // `api_url = http://127.0.0.1:<port>/api` makes wakatime-cli request /api/users/current/heartbeats.bulk.
+    let (r, s) = up();
+    let (c, b) = post(&r, "/api/users/current/heartbeats.bulk", CLI_BULK);
+    assert_eq!(c, 201);
+    let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+    let codes: Vec<i64> = v["responses"].as_array().unwrap().iter().map(|p| p[1].as_i64().unwrap()).collect();
+    // every item acked 201: a 400 for one (the negative ai_line_changes) would make the client queue it again
+    assert_eq!(codes, vec![201, 201, 201, 201]);
+    assert_eq!(s.lock().unwrap().len(), 4);
+    assert_eq!(post(&r, "/api/users/current/heartbeats", SINGLE).0, 201);
+    assert_eq!(post(&r, "/api/users/current/other", SINGLE).0, 404);
+}
+
+#[test]
+fn a_negative_ai_line_count_parses() {
+    let (r, s) = up();
+    post(&r, "/api/users/current/heartbeats.bulk", CLI_BULK);
+    let g = s.lock().unwrap();
+    assert_eq!(g[3].hb.ai_line_changes, Some(-51));
+}
+
+#[test]
+fn the_token_is_a_uuid_which_stock_clients_accept_and_old_hex_tokens_are_replaced() {
+    use tally_daemon::heartbeat::server::load_or_create_token;
+    let uuid_shaped = |t: &str| {
+        let p: Vec<&str> = t.split('-').collect();
+        p.iter().map(|x| x.len()).collect::<Vec<_>>() == [8, 4, 4, 4, 12] && t.bytes().all(|c| c == b'-' || c.is_ascii_hexdigit())
+    };
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("heartbeat.token");
+    let t = load_or_create_token(&f).unwrap();
+    assert!(uuid_shaped(&t), "{t}");
+    assert_eq!(t.as_bytes()[14], b'4', "version 4");
+    assert_eq!(load_or_create_token(&f).unwrap(), t, "stable once created");
+    // a token written by an older build (64 hex digits) was rejected by wakatime-cli ("invalid api key format")
+    std::fs::write(&f, "02ce379d23e8c21e8023a13f950798b2dbbd91586ae7c96936ab449a7ec13ae7").unwrap();
+    let new = load_or_create_token(&f).unwrap();
+    assert!(uuid_shaped(&new));
+    assert_eq!(load_or_create_token(&f).unwrap(), new);
+}

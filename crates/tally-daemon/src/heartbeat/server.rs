@@ -73,13 +73,13 @@ pub fn host_ok(host: Option<&str>) -> bool {
 /// Reads the key from `token_file`, creating a random 32-byte hex one (0600 on unix) on first use.
 pub fn load_or_create_token(path: &Path) -> std::io::Result<String> {
     if let Ok(t) = std::fs::read_to_string(path) {
-        if !t.trim().is_empty() {
+        // A token that is not UUID-shaped is replaced: wakatime-cli rejects any other key ("invalid api key
+        // format", OBSERVED v2.28.4), so the old 64-hex tokens never worked with a stock plugin.
+        if is_uuid(t.trim()) {
             return Ok(t.trim().to_string());
         }
     }
-    let mut b = [0u8; 32];
-    getrandom::getrandom(&mut b).map_err(|e| std::io::Error::other(e.to_string()))?;
-    let t = hex::encode(b);
+    let t = new_token()?;
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
@@ -89,6 +89,21 @@ pub fn load_or_create_token(path: &Path) -> std::io::Result<String> {
     std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
     std::io::Write::write_all(&mut o.open(path)?, t.as_bytes())?;
     Ok(t)
+}
+
+/// A random (version 4) UUID: 122 random bits, in the one shape every WakaTime client accepts as an API key.
+fn new_token() -> std::io::Result<String> {
+    let mut b = [0u8; 16];
+    getrandom::getrandom(&mut b).map_err(|e| std::io::Error::other(e.to_string()))?;
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h = hex::encode(b);
+    Ok(format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..]))
+}
+
+fn is_uuid(t: &str) -> bool {
+    let p: Vec<&str> = t.split('-').collect();
+    p.len() == 5 && [8, 4, 4, 4, 12].iter().zip(&p).all(|(n, s)| s.len() == *n && s.bytes().all(|c| c.is_ascii_hexdigit()))
 }
 
 pub fn start(cfg: ServerConfig, sink: Arc<Mutex<Vec<Received>>>) -> std::io::Result<Running> {
@@ -139,9 +154,13 @@ fn handle(req: Request, cfg: &ServerConfig, sink: &Mutex<Vec<Received>>) {
     let url = req.url().to_string();
     let (path, query) = url.split_once('?').unwrap_or((&url, ""));
     let route = path.strip_prefix("/api/hackatime").or_else(|| path.strip_prefix("/api")).unwrap_or(path);
+    // OBSERVED (wakatime-cli v2.28.4): the client appends `/users/current/heartbeats.bulk` to `api_url` as written, so
+    // `api_url = http://127.0.0.1:<port>/api` requests `/api/users/current/...` with no `/v1`. Hackatime-style
+    // urls (`.../api/hackatime/v1`) include it, so accept both.
+    let route = route.strip_prefix("/v1").unwrap_or(route);
     let bulk = match route {
-        "/v1/users/current/heartbeats" => false,
-        "/v1/users/current/heartbeats.bulk" => true,
+        "/users/current/heartbeats" => false,
+        "/users/current/heartbeats.bulk" => true,
         _ => return reply(req, 404, None),
     };
     if *req.method() != Method::Post {

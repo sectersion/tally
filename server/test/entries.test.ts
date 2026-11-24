@@ -2,6 +2,7 @@ import { afterAll, expect, test } from "bun:test";
 import { createServer } from "../src/app.ts";
 import { MAX_BATCH, MAX_BODY_BYTES, testConfig } from "../src/config.ts";
 import { connect } from "../src/db.ts";
+import { checkBatch } from "../src/ledger.ts";
 import { chains, seed, seedFixture, start } from "./helpers.ts";
 
 // Fixture names are single-use per database. Tests that need a fresh chain own their name (demo-10,
@@ -151,9 +152,9 @@ test("append to an existing older-ruleset chain succeeds", async () => {
     const r = await post(p, { prev_hash: c[2]?.hash, entries: c.slice(3) }, p.token, url);
     await ok(r, at("acme/demo-6", 5), 6);
     const [ch] =
-      await sql`select verified_s from chains where project_id = ${p.projectId} and ruleset = '2026.11-0'`;
+      await sql`select verified_s from chains where project_id = ${p.projectId} and ruleset = '2026.11-1'`;
     expect(Number(ch.verified_s)).toBe(c.reduce((s, e) => s + e.verified_s, 0));
-    // demo-3 has no 2026.11-0 chain: on this server that ruleset is old, so it cannot start one
+    // demo-3 has no 2026.11-1 chain: on this server that ruleset is old, so it cannot start one
     const fresh = await seedFixture(sql, "acme/demo-3");
     const d = chains["acme/demo-3"]?.slice(0, 3);
     const r2 = await post(fresh, { prev_hash: GENESIS, entries: d }, fresh.token, url);
@@ -244,4 +245,12 @@ test("invalid_body issue paths are capped", async () => {
   const text = await r.text();
   expect(text.length).toBeLessThan(500);
   expect(text).toContain("k".repeat(60));
+});
+
+test("checkBatch matches the project name case-insensitively", () => {
+  const e = (chains["acme/demo-3"] ?? []).slice(0, 1);
+  expect(checkBatch(e, GENESIS, "ACME/Demo-3", e[0]?.ruleset ?? "")).toBeNull();
+  expect(checkBatch(e, GENESIS, "acme/other", e[0]?.ruleset ?? "")?.reason).toBe(
+    "project_mismatch",
+  );
 });

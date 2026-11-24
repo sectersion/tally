@@ -18,11 +18,22 @@ export function json(status: number, body: unknown, headers?: HeadersInit): Resp
 
 const tooLarge = () => new HttpError(413, { error: "body_too_large", max: MAX_BODY_BYTES });
 
+/** Reads the body, giving up as soon as it passes MAX_BODY_BYTES (also for chunked bodies). */
+export async function readCapped(req: Request): Promise<Uint8Array> {
+  if (Number(req.headers.get("content-length")) > MAX_BODY_BYTES) throw tooLarge();
+  const chunks: Uint8Array[] = [];
+  let n = 0;
+  if (req.body)
+    for await (const c of req.body as unknown as AsyncIterable<Uint8Array>) {
+      n += c.byteLength;
+      if (n > MAX_BODY_BYTES) throw tooLarge();
+      chunks.push(c);
+    }
+  return Buffer.concat(chunks);
+}
+
 export async function readJson(req: Request): Promise<unknown> {
-  const len = Number(req.headers.get("content-length"));
-  if (len > MAX_BODY_BYTES) throw tooLarge();
-  const text = await req.text();
-  if (Buffer.byteLength(text) > MAX_BODY_BYTES) throw tooLarge();
+  const text = new TextDecoder().decode(await readCapped(req));
   try {
     return JSON.parse(text);
   } catch {

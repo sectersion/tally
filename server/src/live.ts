@@ -26,7 +26,7 @@ const reason = (e: unknown) => (e instanceof Error ? e.message : String(e));
 export type Live = ReturnType<typeof createLive>;
 
 export function createLive(sql: SQL) {
-  const subs = new Map<string, Set<(seq: number) => void>>();
+  const subs = new Map<string, Set<(seq: number, pub: boolean) => void>>();
   const perIp = new Map<string, number>();
   const streams = new Set<() => void>();
   // ponytail: after the first LISTEN succeeds, reconnects rely on Bun's internal backoff (not our
@@ -34,10 +34,10 @@ export function createLive(sql: SQL) {
   let listening: Promise<SQL.ListenSubscription | null> | null = null;
   let closed = false;
 
-  const fanOut = (id: string, seq: number) => {
+  const fanOut = (id: string, seq: number, pub: boolean) => {
     for (const send of subs.get(id) ?? []) {
       try {
-        send(seq);
+        send(seq, pub);
       } catch (e) {
         log("warn", "live send failed", { reason: reason(e) });
       }
@@ -47,8 +47,9 @@ export function createLive(sql: SQL) {
   const refresh = async (ids: string[]) => {
     if (!ids.length) return;
     try {
-      const rows = await sql`select id, change_seq from projects where id = any(${ids}::text[])`;
-      for (const r of rows) fanOut(r.id, Number(r.change_seq));
+      const rows =
+        await sql`select id, change_seq, public from projects where id = any(${ids}::text[])`;
+      for (const r of rows) fanOut(r.id, Number(r.change_seq), r.public);
     } catch (e) {
       log("warn", "live refresh failed", { reason: reason(e) });
     }
@@ -72,7 +73,7 @@ export function createLive(sql: SQL) {
   };
 
   /** Registers send for projectId; the returned function removes it (idempotent). */
-  const subscribe = (projectId: string, send: (seq: number) => void) => {
+  const subscribe = (projectId: string, send: (seq: number, pub: boolean) => void) => {
     const set = subs.get(projectId) ?? new Set();
     subs.set(projectId, set.add(send));
     listening ??= listen();
@@ -91,7 +92,13 @@ export function createLive(sql: SQL) {
   };
 
   /** The SSE response for a project the caller already checked is visible. */
-  const stream = (req: Request, server: Server<undefined>, projectId: string, ip: string) => {
+  const stream = (
+    req: Request,
+    server: Server<undefined>,
+    projectId: string,
+    ip: string,
+    wasPublic = false,
+  ) => {
     // Shutting down: a stream opened now would hold server.stop() open.
     if (closed)
       return Response.json(
@@ -146,12 +153,15 @@ export function createLive(sql: SQL) {
       start(c) {
         ctl = c;
         write("retry: 3000\n\n");
-        unsub = subscribe(projectId, (seq) => {
+        unsub = subscribe(projectId, (seq, pub) => {
+          // Opened because it was public: once it is private, stop (the owner may still re-open it).
+          if (wasPublic && !pub) return end();
           if (seq > last) emit(seq);
         });
         timer = setInterval(() => write(": ping\n\n"), PING_MS);
-        sql`select change_seq from projects where id = ${projectId}`
+        sql`select change_seq, public from projects where id = ${projectId}`
           .then(([r]) => {
+            if (wasPublic && r && !r.public) return end();
             const cur = Number(r?.change_seq);
             if (r && !sent && cur !== initial) emit(cur);
           })

@@ -1,6 +1,6 @@
 //! Ruleset constants (spec section 7). Durations are in milliseconds.
 
-pub const RULESET_VERSION: &str = "2026.11-0";
+pub const RULESET_VERSION: &str = "2026.11-1";
 
 pub const MAX_INTERVAL_MS: i64 = 3_600_000;
 pub const FIRST_ACTION_MS: i64 = 120_000;
@@ -9,8 +9,6 @@ pub const IDLE_GRACE_MS: i64 = 180_000;
 pub const THINK_MAX_MS: i64 = 300_000;
 pub const THINK_RELEVANCE_PM: u16 = 500;
 pub const AGENT_IDLE_MS: i64 = 45_000;
-pub const READ_CPS: i64 = 25;
-pub const MAX_READ_MS: i64 = 600_000;
 pub const LOOP_WINDOW_MS: i64 = 3_600_000;
 pub const NOVELTY_MIN: u32 = 24;
 pub const VOCAB_MAX: usize = 50_000;

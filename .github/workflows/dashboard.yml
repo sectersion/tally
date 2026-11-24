@@ -1,0 +1,48 @@
+name: dashboard
+on:
+  push:
+    paths: ["dashboard/**", "crates/tally-daemon/**", ".github/workflows/dashboard.yml"]
+  pull_request:
+    paths: ["dashboard/**", "crates/tally-daemon/**", ".github/workflows/dashboard.yml"]
+  workflow_dispatch:
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.5
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test src
+      - run: bun run build
+      - name: dist drift check
+        run: |
+          git diff --exit-code -- dist || { echo "dashboard/dist is stale, run bun run build and commit"; exit 1; }
+      - name: gzip size budget (60,000 bytes for js + css)
+        run: |
+          n=$(( $(gzip -c dist/main.js | wc -c) + $(gzip -c dist/styles.css | wc -c) ))
+          echo "gzipped: $n bytes"
+          test "$n" -le 60000
+  e2e:
+    needs: frontend
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p tally-daemon
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.5
+      - run: bun install --frozen-lockfile
+        working-directory: dashboard
+      - run: bun run e2e
+        working-directory: dashboard

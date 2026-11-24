@@ -62,6 +62,15 @@ pub fn commit_cursor(state: &mut dyn SourceState, path: &Path, chunk: &Chunk) {
     state.set(&key(path), &format!("{}:{}", chunk.end, chunk.prefix));
 }
 
+/// Log-supplied ids go into event ids, the public ledger and the server, so only UUID-like tokens
+/// (alphanumerics and `-`, up to 64) pass through; anything else is replaced by a truncated sha256.
+pub fn safe_id(s: &str) -> String {
+    if !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return s.to_string();
+    }
+    hex::encode(Sha256::digest(s.as_bytes()))[..16].to_string()
+}
+
 pub fn stable_id(source: &str, native: &str, kind: &str) -> String {
     format!("{source}:{native}:{kind}")
 }
@@ -80,6 +89,15 @@ pub fn file_watermark(now_ms: i64, open_starts: impl IntoIterator<Item = i64>) -
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn safe_id_keeps_uuids_and_hashes_text() {
+        assert_eq!(super::safe_id("0b1c2d3e-4f50-6789-abcd-ef0123456789"), "0b1c2d3e-4f50-6789-abcd-ef0123456789");
+        let h = super::safe_id("my secret prompt text");
+        assert_eq!(h.len(), 16);
+        assert!(!h.contains("secret"));
+        assert_eq!(super::safe_id("QACANARY_UUID_1").len(), 16);
+    }
+
     use super::*;
     use std::collections::BTreeMap;
 

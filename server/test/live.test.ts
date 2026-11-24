@@ -261,6 +261,18 @@ test("events for a private project are 404", async () => {
   expect(live.size().streams).toBe(0);
 });
 
+test("an open stream ends when its project goes private", async () => {
+  const { url, live } = serve();
+  const p = await project();
+  const s = await openStream(`${url}/p/${p.name}/events?seq=0`);
+  expect(await s.next()).toContain("retry: 3000");
+  await sql`update projects set public = false where id = ${p.id}`;
+  await bump(p.id);
+  expect(await s.nextWithin(3000)).toBe("<eof>");
+  expect(await until(() => live.size().streams === 0)).toBe(true);
+  s.close();
+});
+
 /** Runs static/live.js against stubbed browser globals; timers fire only when the test says so. */
 async function runLiveJs() {
   const src = await Bun.file(new URL("../static/live.js", import.meta.url)).text();
