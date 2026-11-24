@@ -181,7 +181,7 @@ fn main() -> Result<()> {
             let text = match std::fs::read_to_string(f) {
                 Ok(t) => t,
                 Err(e) => {
-                    println!("{}: cannot read: {e}", f.display());
+                    println!("{}: FAIL reading file: {e}", f.display());
                     failed = true;
                     continue;
                 }

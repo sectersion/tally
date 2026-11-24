@@ -75,7 +75,7 @@ fn verify_published_rejects_an_empty_chain_and_continues_past_unreadable_files()
     let o = tally(&home, &["verify-published", ef.to_str().unwrap(), mf.to_str().unwrap(), gf.to_str().unwrap()]);
     assert_eq!(o.status.code(), Some(1));
     assert!(!out(&o).contains("ok: ") || out(&o).matches("ok: ").count() == 1, "{}", out(&o));
-    assert!(out(&o).contains("empty chain") && out(&o).contains("cannot read"), "{}", out(&o));
+    assert!(out(&o).contains("empty chain") && out(&o).contains("FAIL reading file"), "{}", out(&o));
     assert!(out(&o).contains(&format!("ok: {}", gf.display())), "{}", out(&o));
 }
 
@@ -354,6 +354,20 @@ fn verify_published_checks_files_without_creating_a_database() {
     assert!(out(&o).contains("FAIL at entry"), "{}", out(&o));
     assert!(out(&o).contains(&format!("{}: FAIL at entry", bf.display())), "{}", out(&o));
     assert!(!home.join("tally.db").exists());
+}
+
+#[test]
+fn verify_published_continues_past_unreadable_files_and_flags_empty_chains() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let (bin, empty, missing) = (t.path().join("rnd.bin"), t.path().join("empty.json"), t.path().join("missing.json"));
+    std::fs::write(&bin, [0xffu8, 0xfe, 0x80, 0x81]).unwrap();
+    std::fs::write(&empty, "[]").unwrap();
+    let o = tally(&home, &["verify-published", bin.to_str().unwrap(), missing.to_str().unwrap(), empty.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    let s = out(&o);
+    assert!(s.contains(&format!("{}: FAIL reading file", bin.display())), "{s}");
+    assert!(s.contains(&format!("{}: FAIL: empty chain", empty.display())), "{s}");
 }
 
 #[test]
