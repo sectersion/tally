@@ -40,7 +40,7 @@ Design documents: `docs/superpowers/specs/2026-11-22-daemon-roadmap-design.md` (
 | 03 | `2026-11-23-03-claude-code-adapter-and-run-loop.md` | `Source` trait, poll runner (`tally run`), persisted source state, Claude Code session-log adapter, relevance/novelty with the `text` feature, config file |
 | 04 | `2026-11-23-04-presence-and-git.md` | Windows idle-timer source (idle spans), git source (commits, user vs agent), test-run capture, project matching across worktrees |
 | 05 | `2026-11-23-05-publish-badge-and-ledger.md` | Daily publish job: badge endpoint JSON and the ledger to a public location; README badge; `tally publish` |
-| 06 | `2026-11-23-06-server-core.md` | `server/` TypeScript service, Postgres schema, ledger upload API, WASM chain verification and re-scoring, hash commits |
+| 06 | `2026-11-23-06-server-core.md` | `server/` TypeScript service, Postgres schema, ledger upload API, WASM chain verification (no re-scoring), hash commits |
 | 07 | `2026-11-23-07-daemon-sync.md` | Daemon uploader, periodic hash commit, local-to-server project mapping, offline queue |
 | 08 | `2026-11-23-08-more-adapters-and-heartbeat.md` | Codex, Aider, Gemini CLI, Copilot, Cursor adapters; WakaTime-compatible heartbeat endpoint; adapter fixtures and health checks |
 | 09 | `2026-11-23-09-server-accounts-projects-profiles.md` | Hack Club Auth sign-in, projects and the Unified Projects DB link, GitHub App and server-witnessed pushes, public profiles, badge service, SSE dashboard |
