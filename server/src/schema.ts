@@ -15,7 +15,10 @@ export const LedgerEntrySchema = z
     unverified_s: u32,
     reasons: z.array(z.string().max(64)).max(32),
     features: z
-      .record(z.string().max(64), z.number().int())
+      .unknown()
+      // zod's record drops an own "__proto__" key (assigns the prototype), so reject it up front.
+      .refine((o) => typeof o !== "object" || o === null || !Object.hasOwn(o, "__proto__"))
+      .pipe(z.record(z.string().max(64), z.number().int()))
       .refine((o) => Object.keys(o).length <= 32),
     prev_hash: Hash,
     hash: Hash,
