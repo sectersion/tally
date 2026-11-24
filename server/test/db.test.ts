@@ -55,3 +55,8 @@ test("one chain per project and ruleset", async () => {
   ).rejects.toThrow();
   await sql`insert into chains (project_id, ruleset, head_hash) values (${pid}, 'r2', 'h')`;
 });
+
+test("pool sets lock_timeout and statement_timeout", async () => {
+  const [r] = await sql`select current_setting('lock_timeout') as l, current_setting('statement_timeout') as s`;
+  expect([r.l, r.s]).toEqual(["2s", "10s"]);
+});

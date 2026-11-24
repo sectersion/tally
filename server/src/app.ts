@@ -142,6 +142,10 @@ const formError = (e: HttpError) => {
   return r;
 };
 
+/** lock_not_available / query_canceled (lock_timeout, statement_timeout). */
+const isDbTimeout = (e: unknown) =>
+  ["55P03", "57014"].includes((e as { errno?: string })?.errno ?? "");
+
 /**
  * The router's one try/catch: HttpError becomes its response, anything else a logged 500.
  * Also writes the one request log line (route pattern only; never headers, body, query or token).
@@ -162,7 +166,10 @@ function handle<P extends string>(
       else if (e instanceof HttpError && req.method === "POST" && isForm(route)) res = formError(e);
       else if (e instanceof HttpError)
         res = json(e.status, e.body, e.status === 429 ? { "retry-after": "60" } : undefined);
-      else {
+      else if (isDbTimeout(e)) {
+        log("warn", "db timeout");
+        res = json(503, { error: "unavailable" }, { "retry-after": "3" });
+      } else {
         log("error", e instanceof Error ? e.message : String(e)); // message only: never bodies or tokens
         res = json(500, { error: "internal" });
       }
