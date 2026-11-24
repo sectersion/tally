@@ -2,7 +2,9 @@
 
 The contract every component implements: the daemon computes it, the server verifies the ledger's hash chain, ruleset, project and unique action ids (same Rust crate compiled to WebAssembly) but does not re-score claims, which is bounded by the device token; auditors re-derive it from events. If code and this spec disagree, the spec wins until it is changed.
 
-Ruleset version: `2026.11-0`. Every constant below is part of the ruleset; changing any value bumps the version.
+Ruleset version: `2026.11-1`. Every constant below is part of the ruleset; changing any value bumps the version.
+
+`2026.11-1` changes from `2026.11-0`: agent output no longer cancels the idle/busy subtraction (REDTEAM-1, REDTEAM-3). A ruleset bump starts a new ledger chain; `2026.11-0` chains stay valid under their own ruleset.
 
 ## 1. Concepts
 
@@ -97,7 +99,7 @@ Computed locally on prompt text, which is then discarded.
 ```json
 {
   "v": 1,
-  "ruleset": "2026.11-0",
+  "ruleset": "2026.11-1",
   "action_id": "01J...",
   "ts": 1763800000000,
   "project": "<public project name, e.g. sectersion/tally>",
@@ -133,7 +135,7 @@ The `project` field is the public project name, set before chaining, and is neve
 
 All values are starting points, to be calibrated against human-labeled sessions.
 
-## 8. Deferred (not in ruleset 2026.11-0)
+## 8. Deferred (not in ruleset 2026.11-1)
 
 - Surviving-diff check for `user_edit` (M2).
 - "Failing test existed before the loop" check (M2).

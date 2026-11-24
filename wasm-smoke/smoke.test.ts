@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { scoreJson, verifyChainJson, rulesetVersion } from "../crates/tally-scoring/pkg/tally_scoring.js";
 
-test("ruleset version", () => expect(rulesetVersion()).toBe("2026.11-0"));
+test("ruleset version", () => expect(rulesetVersion()).toBe("2026.11-1"));
 test("lunch scenario matches native", () => {
   const ev = (id: string, ts: number, kind: object) => ({ v: 1, id, ts: ts * 1000, source: "t", project: "p", session: null, ...kind });
   const p = { kind: "prompt", chars: 200, relevance_pm: 600, novelty_bytes: 90 };
