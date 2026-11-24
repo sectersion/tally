@@ -79,7 +79,7 @@ crates/tally-daemon/
 
 ## Source authoring notes (put this text in the `source.rs` module doc)
 
-- A source that first appears with a watermark below `finalized_through` has promised nothing about the past. Any event it emits at or before `finalized_through` is rejected by `append_events` with `LateEvent`. The runner drops only the late events (and retries the rest), still persists the source's state, so the source does not resend it forever, and prints `source <id>: dropped <n> late events`.
+- A source that first appears with a watermark below `finalized_through` has promised nothing about the past. Any event it emits at or before `finalized_through` is rejected by `append_events` with `LateEvent`. The runner drops only the late events (and retries the rest), still persists the source's state, so the source does not resend it forever, and prints `source <id>: dropped <n> late events`. Documented limit (QA r2b-1): this includes a backwards system-clock step. `finalized_through` and the ledger are append-only and hash-chained, so finalized scoring is never re-opened; events stamped by the corrected clock at or below the old horizon are dropped, once per tick, until the clock passes it again. Under-counts only. The only signal is the `dropped <n> late events` line on stderr.
 - Sources never call `finalize` and never touch the store; they read and write cursors only through `SourceState`. Extra per-source data (coverage, health, agent writes) goes through default trait methods that the runner in `run.rs` persists (README ruling 5).
 - Event ids must be derived from the log, never random, so a re-read is idempotent.
 
