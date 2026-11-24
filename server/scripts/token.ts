@@ -1,5 +1,6 @@
 import { createProjectToken, revokeToken } from "../src/auth.ts";
 import { connect, migrate } from "../src/db.ts";
+import { bumpChange } from "../src/projects.ts";
 
 const [cmd, a, b] = process.argv.slice(2);
 const usage = () => {
@@ -29,7 +30,12 @@ if (cmd === "create") {
   const [p] = await sql`select owner_id from projects where id = ${a as string}`;
   const r =
     p && (p.owner_id === null || force)
-      ? await sql`update projects set owner_id = u.id from users u where projects.id = ${a as string} and lower(u.handle) = lower(${b as string}) returning projects.id`
+      ? await sql.begin(async (tx) => {
+          const u =
+            await tx`update projects set owner_id = u.id from users u where projects.id = ${a as string} and lower(u.handle) = lower(${b as string}) returning projects.id`;
+          if (u.length) await bumpChange(tx, a as string);
+          return u;
+        })
       : [];
   if (r.length) console.log("claimed");
   else {
