@@ -135,6 +135,24 @@ fn gap_of_exactly_max_interval_is_same_run() {
     assert!(!c[1].reasons.contains(&"first_action".into()));
 }
 #[test]
+fn equal_ts_actions_do_not_depend_on_id_or_input_order() {
+    let at = |id: &str, k: Kind| Event { id: id.into(), ..mk(600, Some("P"), k) };
+    let run = |ii: &str, pi: &str, rev: bool| {
+        let mut v = vec![mk(0, Some("P"), Kind::Interrupt), at(ii, Kind::Interrupt), at(pi, prompt(200, 1000))];
+        if rev {
+            v.reverse();
+        }
+        score(&v).iter().map(|c| (c.kind.clone(), c.verified_s)).collect::<Vec<_>>()
+    };
+    let want = run("a", "b", false);
+    assert_eq!(want, run("b", "a", false));
+    assert_eq!(want, run("b", "a", true));
+    // same id and ts, different kind (SCORING-4)
+    let x = |k| Event { id: "x".into(), ..mk(5, Some("P"), k) };
+    let (a, b) = (x(prompt(200, 600)), x(Kind::Interrupt));
+    assert_eq!(score(&[a.clone(), b.clone()]), score(&[b, a]));
+}
+#[test]
 fn fail_pass_loop_completes_once() {
     let c = score(&[test_at(0, "x", 1), prompt_at(300, 600), test_at(900, "x", 0), test_at(1800, "x", 0)]);
     assert_eq!(c[2].verified_s, 600);

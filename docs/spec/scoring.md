@@ -146,4 +146,4 @@ All values are starting points, to be calibrated against human-labeled sessions.
 1. **Silent thinking:** idle time beyond `IDLE_GRACE_S` is subtracted, except reading windows and a thinking allowance of up to `THINK_MAX_S` before a substantive prompt. Thinking that leads nowhere isn't counted; a stretch away from the keyboard can earn at most 5 minutes, and only when followed by a substantive prompt.
 2. **Plain-language prompts:** project vocabulary includes comments and prose files, and the trivial threshold is 150‰.
 3. **Unverified seconds:** never credited automatically. Every project gets a human review before it ships.
-4. **Event ids:** stable derived strings, not ULIDs, so a re-read log is deduplicated by id. Nothing orders by id except as the tie-break in (ts, id).
+4. **Event ids:** stable derived strings, not ULIDs, so a re-read log is deduplicated by id. Nothing orders by id except as the last tie-break in (ts, kind, id), so equal-ts order does not depend on id spelling.

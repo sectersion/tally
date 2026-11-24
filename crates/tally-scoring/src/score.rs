@@ -21,7 +21,7 @@ pub struct Claim {
     pub features: BTreeMap<String, i64>,
 }
 
-/// Claims for every human action, in `(ts, id)` order. Input order and duplicate ids do not matter.
+/// Claims for every human action, in `(ts, kind, id)` order. Input order and duplicate ids do not matter.
 pub fn score(events: &[Event]) -> Vec<Claim> {
     let sorted = sort_dedup(events);
     let mut prev = None;
@@ -52,10 +52,10 @@ pub fn score(events: &[Event]) -> Vec<Claim> {
     out
 }
 
-/// Sorted by `(ts, id)`, first occurrence of each id kept.
+/// Sorted by `(ts, kind, id)` so equal-ts order does not hinge on the id string; first occurrence of each id kept.
 fn sort_dedup(events: &[Event]) -> Vec<Event> {
     let mut sorted = events.to_vec();
-    sorted.sort_by(|a, b| (a.ts, &a.id).cmp(&(b.ts, &b.id)));
+    sorted.sort_by_cached_key(|e| (e.ts, kind_features(&e.kind).0, e.id.clone()));
     let mut seen = BTreeSet::new();
     sorted.retain(|e| seen.insert(e.id.clone()));
     sorted
@@ -126,7 +126,7 @@ fn claim<'a>(
 
     let ctx = CapContext {
         interrupt_followed_by_prompt: matches!(a.kind, Kind::Interrupt)
-            && ev[i + 1..]
+            && ev[ev.partition_point(|e| e.ts < t)..]
                 .iter()
                 .take_while(|e| e.ts.saturating_sub(t) <= INTERRUPT_FOLLOW_MS)
                 .any(|e| matches!(e.kind, Kind::Prompt { .. })),
