@@ -51,6 +51,9 @@ export async function recordCommit(
   await sql`insert into commits (project_id, hash, ts) values (${projectId}, ${c.hash}, ${c.ts})`;
 }
 
+/** Entries stamped later than the server clock plus this are rejected (they fall in no push window). */
+const FUTURE_SLACK_MS = 10 * 60_000;
+
 /** Pure batch checks, first failure wins: foreign ruleset, foreign project, then the Rust chain check. */
 export function checkBatch(
   entries: LedgerEntry[],
@@ -62,6 +65,8 @@ export function checkBatch(
   if (r >= 0) return { index: r, reason: "unknown_ruleset" };
   const p = entries.findIndex((e) => e.project !== publicName);
   if (p >= 0) return { index: p, reason: "project_mismatch" };
+  const f = entries.findIndex((e) => e.ts > Date.now() + FUTURE_SLACK_MS);
+  if (f >= 0) return { index: f, reason: "future_ts" };
   const v = verifyChain(entries, prevHash);
   return v.ok ? null : { index: v.index, reason: v.reason };
 }
