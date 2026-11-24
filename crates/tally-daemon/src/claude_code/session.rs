@@ -179,26 +179,40 @@ fn is_env_assign(tok: &str) -> bool {
 fn is_git_commit(seg: &str) -> bool {
     let toks: Vec<&str> = seg
         .split_whitespace()
-        .map(|t| t.trim_start_matches(['(', '"', '\'']).trim_end_matches([')', '"', '\'']))
+        .map(|t| t.trim_start_matches(['(', '"', '\'', '$']).trim_end_matches([')', '"', '\'']))
         .filter(|t| !t.is_empty())
         .collect();
+    let flags = |r: &[&str]| r.iter().take_while(|f| f.starts_with('-')).count();
     let mut t = &toks[..];
-    loop {
-        match t {
-            [w, f, rest @ ..] if matches!(*w, "bash" | "sh" | "zsh") && f.starts_with('-') && f.contains('c') => t = rest,
-            [w, rest @ ..] if matches!(*w, "env" | "sudo" | "time" | "command") || is_env_assign(w) => t = rest,
-            // `pwsh [-flags [values]] -Command "..."`: skip to after `-c`/`-Command`; without one, skip leading flags.
-            [w, rest @ ..] if matches!(w.to_ascii_lowercase().as_str(), "pwsh" | "pwsh.exe" | "powershell" | "powershell.exe") => {
-                let cmd = rest.iter().position(|f| f.eq_ignore_ascii_case("-c") || f.eq_ignore_ascii_case("-command"));
-                t = match cmd {
-                    Some(i) => &rest[i + 1..],
-                    None => &rest[rest.iter().take_while(|f| f.starts_with('-')).count()..],
-                };
+    while let Some((w, rest)) = t.split_first() {
+        t = match prog(w).as_str() {
+            "bash" | "sh" | "zsh" => {
+                let n = flags(rest);
+                if rest[..n].iter().any(|f| f.contains('c')) { &rest[n..] } else { break }
             }
+            "cmd" if rest.first().is_some_and(|f| f.eq_ignore_ascii_case("/c")) => &rest[1..],
+            // `pwsh [-flags [values]] -Command "..."`: skip to after `-c`/`-Command`; without one, skip leading flags.
+            "pwsh" | "powershell" => match rest.iter().position(|f| f.eq_ignore_ascii_case("-c") || f.eq_ignore_ascii_case("-command")) {
+                Some(i) => &rest[i + 1..],
+                None => &rest[flags(rest)..],
+            },
+            "env" | "sudo" => &rest[flags(rest)..],
+            // `timeout [-flags] DURATION cmd`
+            "timeout" => rest.get(flags(rest) + 1..).unwrap_or(&[]),
+            "time" | "command" | "exec" | "nohup" | "eval" | "invoke-expression" | "iex" | "!" | "then" | "do" | "else"
+            | "if" | "elif" | "while" | "until" | "&" => rest,
+            p if is_env_assign(w) || (p != "git" && w.contains(['/', '\\'])) => rest,
             _ => break,
-        }
+        };
     }
-    matches!(t, ["git", rest @ ..] if rest.contains(&"commit"))
+    matches!(t, [g, rest @ ..] if prog(g) == "git"
+        && rest.iter().any(|a| matches!(*a, "commit" | "merge" | "rebase" | "revert" | "cherry-pick" | "am")))
+}
+
+/// Program name of a token: directory and `.exe` stripped, lowercased (`C:\Git\git.exe` -> `git`).
+fn prog(tok: &str) -> String {
+    let b = tok.rsplit(['/', '\\']).next().unwrap_or(tok).to_ascii_lowercase();
+    b.strip_suffix(".exe").map_or(b.clone(), str::to_string)
 }
 
 /// Lowercase hex SHA-256 of the command string.
