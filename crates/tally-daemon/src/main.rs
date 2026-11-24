@@ -118,7 +118,7 @@ enum Cmd {
         #[arg(long, default_value_t = 7878)]
         port: u16,
         /// Do not open the browser (also: TALLY_NO_OPEN).
-        #[arg(long, env = "TALLY_NO_OPEN")]
+        #[arg(long)]
         no_open: bool,
     },
     /// Hooks that other tools and shells call.
@@ -425,7 +425,7 @@ fn dashboard(db: &std::path::Path, port: u16, no_open: bool) -> Result<()> {
         .map_err(|e| anyhow!("port {port} is in use; run tally dashboard --port 0 to pick a free one ({e})"))?;
     let url = format!("http://127.0.0.1:{}/", s.addr.port());
     println!("Tally dashboard: {url}");
-    if !no_open {
+    if !no_open && std::env::var_os("TALLY_NO_OPEN").is_none_or(|v| v.is_empty()) {
         let _ = open_browser(&url); // the URL is printed either way
     }
     ctrlc::set_handler(|| STOP.store(true, Ordering::Relaxed)).context("installing the Ctrl-C handler")?;
