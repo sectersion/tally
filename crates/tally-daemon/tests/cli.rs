@@ -538,7 +538,9 @@ fn heartbeat_config_prints_loopback_url_and_token_and_creates_token_file() {
     let s = out(&o);
     assert!(s.lines().any(|l| l == "api_url = http://127.0.0.1:25930/api"), "{s}");
     let key = s.lines().find_map(|l| l.strip_prefix("api_key = ")).expect("api_key line").to_string();
-    assert!(key.len() >= 32, "{s}");
+    // wakatime-cli rejects any key that is not UUID-shaped ("invalid api key format"): 8-4-4-4-12 hex digits
+    assert_eq!(key.split('-').map(str::len).collect::<Vec<_>>(), [8, 4, 4, 4, 12], "{s}");
+    assert!(s.lines().any(|l| l == "heartbeat_rate_limit_seconds = 0"), "{s}");
     let file = std::fs::read_to_string(home.join("heartbeat.token")).unwrap();
     assert_eq!(file.trim(), key);
     assert!(s.contains("heartbeat.token"), "{s}");
