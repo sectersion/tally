@@ -143,6 +143,9 @@ pub struct PublishedCheck {
 /// Checks a downloaded public chain file: valid chain from genesis, one project, one ruleset.
 pub fn verify_published_json(json: &str) -> Result<PublishedCheck, String> {
     let entries: Vec<LedgerEntry> = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    if entries.is_empty() {
+        return Err("FAIL: empty chain".into());
+    }
     verify_chain(&entries, GENESIS_HASH).map_err(|e| format!("FAIL at entry {}: {}", e.index, e.reason))?;
     let first = entries.first();
     if entries.iter().any(|e| Some(&e.project) != first.map(|f| &f.project) || Some(&e.ruleset) != first.map(|f| &f.ruleset)) {
@@ -333,7 +336,7 @@ mod tests {
         let bad = good.replacen("\"verified_s\":100", "\"verified_s\":999", 1);
         assert!(verify_published_json(&bad).unwrap_err().starts_with("FAIL at entry"));
         assert_eq!(verify_published_json(&chain_json(&["o/r", "o/x"])).unwrap_err(), "FAIL: file mixes projects or rulesets");
-        assert_eq!(verify_published_json("[]").unwrap().entries, 0);
+        assert_eq!(verify_published_json("[]").unwrap_err(), "FAIL: empty chain");
         assert!(verify_published_json("nope").is_err());
     }
     #[test] fn badge_hours_floor_to_one_decimal() {

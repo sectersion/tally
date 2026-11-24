@@ -62,6 +62,24 @@ fn lunch_scenario_end_to_end() {
 }
 
 #[test]
+fn verify_published_rejects_an_empty_chain_and_continues_past_unreadable_files() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let claims = [tally_scoring::Claim {
+        action_id: "a0".into(), ts: 0, project: Some("o/r".into()), kind: "prompt".into(),
+        verified_s: 360, unverified_s: 0, reasons: vec![], features: Default::default(),
+    }];
+    let (gf, ef, mf) = (t.path().join("good.json"), t.path().join("empty.json"), t.path().join("missing.json"));
+    std::fs::write(&gf, serde_json::to_string(&tally_scoring::chain(&claims, tally_scoring::GENESIS_HASH)).unwrap()).unwrap();
+    std::fs::write(&ef, "[]").unwrap();
+    let o = tally(&home, &["verify-published", ef.to_str().unwrap(), mf.to_str().unwrap(), gf.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(!out(&o).contains("ok: ") || out(&o).matches("ok: ").count() == 1, "{}", out(&o));
+    assert!(out(&o).contains("empty chain") && out(&o).contains("cannot read"), "{}", out(&o));
+    assert!(out(&o).contains(&format!("ok: {}", gf.display())), "{}", out(&o));
+}
+
+#[test]
 fn project_add_rejects_a_directory_outside_git_and_prints_the_id_inside_one() {
     let t = tempfile::tempdir().unwrap();
     let home = t.path().join("home");
