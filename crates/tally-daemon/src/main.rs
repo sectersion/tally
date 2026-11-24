@@ -98,6 +98,10 @@ enum Cmd {
         #[arg(long)]
         hook_json: bool,
     },
+    /// Pause tally: stop the daemon and keep `ensure` from starting it until `tally start`.
+    Stop,
+    /// Undo `tally stop` and start the daemon if it is not running.
+    Start,
     Status,
     Verify,
     /// Check downloaded published chain files; needs no home or database. Exits 1 if any fail.
@@ -238,6 +242,24 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
+    if let Cmd::Stop = &cli.cmd {
+        // Always exits 0; the pause marker is written even with no daemon so a later session does not start one.
+        let _ = std::fs::create_dir_all(&home).and_then(|()| std::fs::write(home.join("paused"), ""));
+        let was_running = tally_daemon::ensure::daemon_running(&home);
+        let t0 = std::time::Instant::now();
+        while tally_daemon::ensure::daemon_running(&home) && t0.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        println!("{}", if !was_running { "not running" } else if tally_daemon::ensure::daemon_running(&home) { "still running" } else { "stopped" });
+        return Ok(());
+    }
+    if let Cmd::Start = &cli.cmd {
+        let _ = std::fs::remove_file(home.join("paused"));
+        let o = tally_daemon::ensure::EnsureOpts { client: None, register_cwd: None };
+        let r = tally_daemon::ensure::ensure(&home, &o, &tally_daemon::ensure::spawn_daemon);
+        println!("{}", if r.started { "started" } else { "already running" });
+        return Ok(());
+    }
     if let Cmd::HeartbeatConfig = &cli.cmd {
         std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
         let cfg = config::load(&home)?;
@@ -317,7 +339,7 @@ fn main() -> Result<()> {
             let s = ingest_ndjson(&mut store, &text, &source, watermark)?;
             println!("added {}, duplicates {}", s.added, s.duplicates);
         }
-        Cmd::HeartbeatConfig | Cmd::Ensure { .. } => unreachable!("handled before the store opens"),
+        Cmd::HeartbeatConfig | Cmd::Ensure { .. } | Cmd::Stop | Cmd::Start => unreachable!("handled before the store opens"),
         Cmd::Hook { .. } | Cmd::Doctor { .. } | Cmd::VerifyPublished { .. } | Cmd::Login { .. } | Cmd::Logout { .. } | Cmd::Dashboard { .. } => {
             unreachable!("handled before the store is opened")
         }

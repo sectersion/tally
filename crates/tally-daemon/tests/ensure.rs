@@ -174,3 +174,50 @@ fn hook_json_returns_while_the_daemon_keeps_running() {
     assert!(o.status.success() && !o.stdout.is_empty());
     assert!(up);
 }
+
+#[test]
+fn stop_pauses_and_ensure_respects_it() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let held = lock(&home);
+    // Stands in for the daemon: lets go of run.lock once `paused` appears.
+    let h = home.clone();
+    let releaser = std::thread::spawn(move || {
+        let t0 = std::time::Instant::now();
+        while !h.join("paused").exists() && t0.elapsed().as_secs() < 15 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        drop(held);
+    });
+    let o = tally(&home, &["stop"]);
+    releaser.join().unwrap();
+    assert!(o.status.success());
+    assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "stopped");
+    let r = ensure(&home, &opts(), &|_| panic!("spawn must not be called"));
+    assert!(!r.started && !r.first_run);
+}
+
+#[test]
+fn start_clears_the_pause() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let o = tally(&home, &["stop"]);
+    assert!(o.status.success());
+    assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "not running");
+    assert!(home.join("paused").exists());
+    // A held lock keeps `start` from spawning a real daemon.
+    let held = lock(&home);
+    let o = tally(&home, &["start"]);
+    assert!(o.status.success());
+    assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "already running");
+    assert!(!home.join("paused").exists());
+    drop(held);
+    let n = Cell::new(0);
+    let r = ensure(&home, &opts(), &|_| {
+        n.set(n.get() + 1);
+        Ok(())
+    });
+    assert!(r.started);
+    assert_eq!(n.get(), 1);
+}
