@@ -446,6 +446,18 @@ fn login_checks_the_token_against_a_configured_server() {
     let o = login(t.path(), "tok", &[]);
     assert!(o.status.success(), "{}", err(&o));
     assert!(err(&o).contains("warning"), "{}", err(&o));
+    assert_eq!(out(&o), "token stored, not verified");
+}
+
+#[test]
+fn sync_with_a_rejected_token_prints_one_line_per_project() {
+    let f = FakeServer::start("tok");
+    let t = tempfile::tempdir().unwrap();
+    let home = synced_home(t.path(), &f.url);
+    login(&home, "tok_wrong", &[]); // rejected, but the token stays stored
+    let o = tally(&home, &["sync"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(err(&o).matches("device token rejected").count(), 1, "{}", err(&o));
 }
 
 #[test]
