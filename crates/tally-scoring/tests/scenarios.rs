@@ -142,3 +142,15 @@ fn fail_pass_loop_completes_once() {
     assert_eq!((c[3].verified_s, c[3].unverified_s), (120, 780));
     assert!(!c[3].reasons.contains(&"fail_pass_loop".into()));
 }
+
+#[test]
+fn interrupt_followed_by_same_ts_prompt_regardless_of_id() {
+    for pid in ["a", "z"] {
+        let mut p = prompt_at(1000, 600);
+        p.id = pid.into();
+        let mut i = mk(1000, Some("P"), Kind::Interrupt);
+        i.id = "m".into();
+        let c = score(&[i, p]);
+        assert!(c[0].reasons.contains(&"interrupt_followed".into()), "prompt id {pid}");
+    }
+}

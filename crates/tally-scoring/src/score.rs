@@ -126,7 +126,7 @@ fn claim<'a>(
 
     let ctx = CapContext {
         interrupt_followed_by_prompt: matches!(a.kind, Kind::Interrupt)
-            && ev[i + 1..]
+            && ev[ev.partition_point(|e| e.ts < t)..]
                 .iter()
                 .take_while(|e| e.ts.saturating_sub(t) <= INTERRUPT_FOLLOW_MS)
                 .any(|e| matches!(e.kind, Kind::Prompt { .. })),
