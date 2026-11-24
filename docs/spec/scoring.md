@@ -55,7 +55,7 @@ For each human action `a` at time `t`, with the previous human action (any proje
 3. **Thinking allowance.** If `a` is a substantive prompt (`relevance_pm ≥ THINK_RELEVANCE_PM`), the last `THINK_MAX_S` seconds before `t` are also protected. Deep thinking counts only when it ends in a substantive decision.
 4. **Idle subtraction.** For each `idle` span inside `I`, subtract the part beyond the first `IDLE_GRACE_S` seconds, excluding protected windows.
 5. **Agent-busy subtraction.** For each `agent_busy` span inside `I`, subtract the overlap with idle time beyond `AGENT_IDLE_S`.
-6. **Raw seconds** = what remains of `I`.
+6. **Raw seconds** = what remains of `I`. Seconds are floored: `verified_s = floor(verified_ms / 1000)` and `unverified_s = floor(raw_ms / 1000) - verified_s`, so the two sum to `floor(raw_ms / 1000)`. The sub-second remainder of each claim is dropped (a downward error only, never inflation; activity spaced under 1 s apart earns little).
 7. **Cap.** `verified_s = min(raw, cap(a))`, `unverified_s = raw − verified_s`.
 8. **Attribution.** The claim belongs to `a.project`.
 
