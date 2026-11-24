@@ -33,10 +33,15 @@ fn chars(s: &str) -> u32 {
     u32::try_from(s.chars().count()).unwrap_or(u32::MAX)
 }
 
+// Escape the id separator so session "a:b" + msg "c" cannot collide with "a" + "b:c".
+fn esc(s: &str) -> String {
+    s.replace('%', "%25").replace(':', "%3A")
+}
+
 fn ev(session: &str, project: &Option<String>, native: &str, kind_s: &str, ts: i64, kind: Kind) -> Event {
     Event {
         v: 1,
-        id: stable_id(SOURCE, &format!("{session}:{native}"), kind_s),
+        id: stable_id(SOURCE, &format!("{}:{}", esc(session), esc(native)), kind_s),
         ts,
         source: SOURCE.into(),
         project: project.clone(),
@@ -265,6 +270,15 @@ mod tests {
     fn stop(ms: i64) -> String {
         line("assistant.turn_end", ms - 1, serde_json::json!({"turnId": "0"})) + &line("hook.start", ms, serde_json::json!({"hookType": "agentStop"}))
     }
+    #[test]
+    fn ids_do_not_collide_when_session_and_message_ids_contain_colons() {
+        let id = |sid: &str, mid: &str| {
+            let t = line("session.start", 1000, serde_json::json!({"sessionId": sid, "version": 1, "context": {"cwd": "/p"}})) + &prompt(2000, mid, "hello", "idle");
+            parse_full(&t, &StubCtx).0.events[0].id.clone()
+        };
+        assert_ne!(id("a:b", "c"), id("a", "b:c"));
+    }
+
     fn kinds(p: &Parsed) -> Vec<&'static str> {
         p.events
             .iter()
