@@ -376,7 +376,7 @@ fn main() -> Result<()> {
             if cfg.heartbeat.enabled {
                 configured.push("heartbeat");
             }
-            let r = tally_daemon::doctor::report(&store, &configured)?;
+            let r = tally_daemon::doctor::report(&store, &configured, chrono::Utc::now().timestamp_millis())?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&r)?);
             } else {
