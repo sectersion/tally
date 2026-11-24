@@ -185,7 +185,12 @@ const Removed = z.object({
   repositories_removed: z.array(z.object({ id: Id })),
 });
 const RepositoryEv = z.object({
-  repository: z.object({ id: Id, full_name: z.string(), owner: z.object({ login: z.string() }) }),
+  repository: z.object({
+    id: Id,
+    full_name: z.string(),
+    owner: z.object({ login: z.string() }),
+    updated_at: z.string().optional(),
+  }),
   installation: z.object({ id: Id }).optional(),
 });
 const SenderEv = z.object({ sender: z.object({ id: Id }) });
@@ -266,8 +271,12 @@ export async function dispatch(
   }
   if (event === "repository" && (action === "renamed" || action === "transferred")) {
     const p = parse(RepositoryEv, payload);
-    const [old] = await tx`select full_name from github_repos where id = ${p.repository.id}`;
+    const [old] =
+      await tx`select full_name, gh_updated_at from github_repos where id = ${p.repository.id}`;
     if (!old) return true;
+    // Deliveries can arrive out of order: skip an event older than the newest one applied.
+    const at = claimed(p.repository.updated_at);
+    if (at !== null && old.gh_updated_at && at < old.gh_updated_at.getTime()) return true;
     let installationId: number | null = null;
     if (action === "transferred" && p.installation) {
       installationId = p.installation.id;
@@ -275,6 +284,7 @@ export async function dispatch(
         on conflict (id) do nothing`;
     }
     await tx`update github_repos set full_name = ${p.repository.full_name},
+      gh_updated_at = coalesce(${at === null ? null : new Date(at)}::timestamptz, gh_updated_at),
       installation_id = coalesce(${installationId}::bigint, installation_id) where id = ${p.repository.id}`;
     await tx`insert into repo_events (github_repo_id, kind, detail)
       values (${p.repository.id}, ${action}, ${`${old.full_name} -> ${p.repository.full_name}`})`;
