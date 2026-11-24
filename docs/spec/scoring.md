@@ -9,7 +9,7 @@ Ruleset version: `2026.11-0`. Every constant below is part of the ruleset; chang
 - **Event:** something observed on the machine (a prompt, a test run, an idle span).
 - **Human action:** an event that represents a decision by the user. Only human actions claim time.
 - **Claim:** seconds a human action earns, split into `verified_s` and `unverified_s`.
-- **Ledger entry:** one claim, hash-chained, uploaded. The ledger is the only thing that leaves the machine for logged hours.
+- **Ledger entry:** one claim, hash-chained, uploaded. For logged hours, ledger entries, head hashes with commit timestamps (sync) and badge data and public ledger files (publish) are all that leave the machine; see the README privacy section.
 - **Project:** a git repository root. Local id = SHA-256 of the canonical absolute root path; server id assigned on link.
 
 ## 2. Event schema

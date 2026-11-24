@@ -70,7 +70,7 @@ crates/tally-daemon/
 2. **Live capture only:** on first sight of a file with no cursor, the source starts at its current end. A file first seen after the daemon started (a new session) is read from 0. Backfill is out of scope (README ruling).
 3. **Human tool decision** = a `permissionDecision` whose `source` is not `config` (observed: `config` for mode, rule and classifier auto-decisions; `user_temporary` for a user click). `accept` maps to `approve`, `reject` to `deny`. Auto decisions produce nothing. The spike lists every observed `source` value.
 4. **Interrupt** = a non-sidechain `user` entry with no `toolUseResult` whose first text block starts with `[Request interrupted by user` (observed shape: text content, no `origin`). Confirmed or corrected by the spike.
-5. **Agent busy span** = human prompt `ts` to the `ts` of the turn's `system`/`turn_duration` entry. A turn without `turn_duration` for `OPEN_SPAN_MAX_MS` (6 h) is closed at its last seen entry, so a crashed session cannot hold the horizon forever.
+5. **Agent busy span** = human prompt `ts` to the `ts` of the turn's `system`/`turn_duration` entry. A turn also closes at an interrupt or at the next human prompt (at the last seen entry). A turn without `turn_duration` for `OPEN_SPAN_MAX_MS` (6 h) is closed at its last seen entry, so a crashed session cannot hold the horizon forever.
 6. **Agent test/commit detection** from Bash `tool_use.input.command`, using a fixed prefix list (Task 10). The log has no commit sha, so `sha = "claude:" + <tool_use id>` and `lines_changed = 0`; plan 04's git source records real commits and supersedes this. Plan 04 matches this event by `by = agent` plus a time window (the sha does not matter) and gates its own commits on this source's watermark (README ruling 1), so the watermark must stay below any pending Bash `git commit` tool_use (Decision 9, tested in Task 10).
 7. **Projects:** an event's `project` is the local id of `find_git_root(cwd)`, `None` outside a repo. Nothing is auto-registered; `finalize` already leaves unnamed ids as they are.
 8. **Config keys** (all optional): `[run] interval_secs = 15`; `[claude_code] enabled = true`, `projects_dir = "<user home>/.claude/projects"`.
@@ -79,7 +79,7 @@ crates/tally-daemon/
 
 ## Source authoring notes (put this text in the `source.rs` module doc)
 
-- A source that first appears with a watermark below `finalized_through` has promised nothing about the past. Any event it emits at or before `finalized_through` is rejected by `append_events` with `LateEvent`, and the batch is lost. The runner then drops that batch but still persists the source's state, so the source does not resend it forever, and prints `source <id>: dropped <n> late events`.
+- A source that first appears with a watermark below `finalized_through` has promised nothing about the past. Any event it emits at or before `finalized_through` is rejected by `append_events` with `LateEvent`. The runner drops only the late events (and retries the rest), still persists the source's state, so the source does not resend it forever, and prints `source <id>: dropped <n> late events`.
 - Sources never call `finalize` and never touch the store; they read and write cursors only through `SourceState`. Extra per-source data (coverage, health, agent writes) goes through default trait methods that the runner in `run.rs` persists (README ruling 5).
 - Event ids must be derived from the log, never random, so a re-read is idempotent.
 
@@ -172,7 +172,7 @@ pub type TickHook = Box<dyn FnMut(&mut Store, i64) -> Result<(), HookError>>;
 pub struct TickReport { pub added: usize, pub duplicates: usize, pub errors: Vec<String>, pub finalized: Option<FinalizeSummary> }
 pub fn run_once(store: &mut Store, sources: &mut [Box<dyn Source>], hooks: &mut [TickHook], now_ms: i64) -> TickReport;
 // Task 5 adds, once `Config` exists:
-pub fn sources(cfg: &Config, home: &std::path::Path, store: &Store) -> Vec<Box<dyn Source>>;
+pub fn sources(cfg: &Config, home: &std::path::Path, store: &mut Store) -> Result<Vec<Box<dyn Source>>, StoreError>;
 pub fn hooks(cfg: &Config, home: &std::path::Path) -> Vec<TickHook>;
 pub fn run_loop(store: &mut Store, cfg: &Config, home: &std::path::Path, stop: &std::sync::atomic::AtomicBool);
 ```
@@ -184,7 +184,7 @@ pub fn run_loop(store: &mut Store, cfg: &Config, home: &std::path::Path, stop: &
 2. `Err(e)`: push `"source <id>: <e>"` to `errors`; persist nothing (the cursor did not move, the next tick retries).
 3. `Ok(p)`: `append_events(&p.events)`.
    - `Ok`: add the counts; `set_watermark(id, w)` if `Some(w)`; `set_state(id, &st)`.
-   - `Err(StoreError::LateEvent { .. })`: push `"source <id>: dropped <n> late events"` (`n = p.events.len()`); still set the watermark and `set_state` (see the authoring notes).
+   - `Err(StoreError::LateEvent { .. })`: push `"source <id>: dropped <n> late events"` (`n` = the number of late events dropped; the rest of the batch is kept); still set the watermark and `set_state` (see the authoring notes).
    - any other error: push it; persist nothing (the events are re-emitted next tick and deduplicated).
 4. After all sources: `finalize(store)`; `Ok` goes in `finalized`, `Err` is pushed to `errors`.
 5. Then every hook in order: `hook(store, now_ms)`; an `Err(e)` is pushed as `"hook: <e>"` and the next hook still runs.

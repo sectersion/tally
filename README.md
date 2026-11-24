@@ -18,8 +18,8 @@ Tally passively measures the hours of *productive struggle* you spend building p
 
 ## Privacy
 
-- **Logged hours:** only an action ledger leaves your machine (project, action type, seconds, reason code). No text, titles, or URLs. Nothing about projects you don't track.
-- **Submitted hours:** prompt text leaves only for projects you choose to submit, goes to a self-hosted judge, and is deleted after review.
+- **Logged hours:** what can leave your machine is listed here, and nothing else. Sync uploads ledger entries (project, action type, action id, timestamps, seconds, reason code, numeric text features) and head hashes with commit timestamps. Publish writes badge data and public ledger files to the `tally-data` branch. No text, titles, or URLs. Nothing about projects you don't track.
+- **Submitted hours:** scrubbed session text leaves only on an explicit `tally submit`, for projects you choose, and goes to a self-hosted judge that deletes it after review. Planned (plan 10); not built yet, so no text leaves today.
 
 ## Why keep it installed
 

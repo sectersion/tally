@@ -11,7 +11,8 @@ Read this first. Every later plan assumes what is written here. Written 2026-11-
 | Plans 03 to 07 | Done, on `main` (claude adapter and run loop, presence and git, publish and badge, server core, daemon sync). |
 | Plan 09 | Done, on `main`. `server/` accounts, device-code login, projects, GitHub App linking and webhooks, public pages, badge service, live page. Spikes ran on documented fallbacks only; see `docs/spikes/`. |
 | Plan 08 | Partly done, on `main` (PR #10): adapter kit and golden-test kit, `tally doctor`, localhost WakaTime heartbeat endpoint, Claude Code agent writes. Copilot adapter (Tasks 11-12, PR #12) is done against the Copilot CLI log (`~/.copilot/session-state`); interrupt, tool_decision and agent writes are unobserved. Codex, Aider, Gemini CLI and Cursor adapters (Tasks 4-10, 13-15) are NOT built: blocked on access to each tool (login, install or subscription), since each needs a real-tool spike first; see `crates/tally-daemon/tests/fixtures/<harness>/NOTES.md` (all UNVERIFIED) and `docs/adapters/README.md`. |
-| Plans 10, 11, 12 | Written, not started. |
+| Plan 11 | Done, on `main` (PR #14): local dashboard (`dash_api.rs`, `snapshot.rs`, `dashboard/`). Outstanding: the manual accessibility checklist (Task 10) and the decision on the 2,000,000-event latency measurement. |
+| Plans 10, 12 | Written, not started. |
 
 Design documents: `docs/superpowers/specs/2026-11-22-daemon-roadmap-design.md` (goals, non-goals, finalization, badge approach C), `docs/spec/scoring.md` (ruleset `2026.11-0`), `PITCH.md` (product and threat model).
 
@@ -119,7 +120,7 @@ From the plan 01 and 02 reviews, to be picked up by the plan noted:
 
 - `RULESET_VERSION` bump does not start a new chain → plan 05 (check at finalize; refuse to append across rulesets).
 - ~~`finalize`'s divergence check ignores `kind`, `reasons`, `features`~~ → done in plan 07 Task 2 (44f8b62).
-- `status` reads are not in one transaction (display only) → plan 11.
+- ~~`status` reads are not in one transaction (display only)~~ → done in plan 11 (`status` reads inside one read transaction).
 - WAL journal mode for concurrent daemon + CLI → plan 03 (the run loop makes this real).
 - Spans: a source that registers with a watermark below the finalized point has promised nothing about the past; the count guard handles the race, the first-run behaviour is "events at or before `finalized_through` are rejected" → document in plan 03 source authoring notes.
 - Verbatim UNC (`\\?\UNC\...`) project paths normalize differently from `\\server\share` → plan 04.
@@ -154,8 +155,3 @@ These override anything in an individual plan that disagrees. Each plan was amen
 12. **CLI shape:** `tally hook` is a subcommand group: `hook test-run -- <cmd>` (plan 04), `hook cursor <event>` and `hook install cursor` (plan 08). `tally login --browser` belongs to plan 12.
 13. **Presence model (plan 04 is authoritative):** names `Platform`, `PlatformError { Unsupported, Failed }`, files `presence.rs` and `presence_win.rs`, coverage in the store, uncovered claims skipped with reason `no_presence_coverage`, `[presence] enabled/require`. Plan 12's macOS and Linux sources implement plan 04's trait and turn on its defaults for those platforms.
 14. **Privacy statements** must list everything that can leave the machine: ledger entries and head hashes (sync, plan 07), badge data (plan 05), and scrubbed session text only on explicit `tally submit` (plan 10).
-
-## Refinements to apply while executing (from the final plan review; not blocking)
-
-- **Plan 08 Task 19, `hash_writes`:** compare against `normalize_path(&root.to_string_lossy())` (production roots from `project_for_dir` are canonicalized, so on Windows they carry a `\?\` prefix and backslashes), and require the written path to equal that root or start with it followed by `/`, so `C:/tallyproj2/x` is not treated as inside `C:/tallyproj`. Add a test with a verbatim-prefix root.
-- **Plan 03, `bash_kind`:** trim each segment before stripping, and compare tokens after trimming trailing `)`, `"` and `'`; also handle `bash -c '<a && b>'` by stripping the `bash -c`/`sh -c` prefix before splitting on `&&`. Add `(git commit)`, `bash -c "git commit"` and `cd x && (git commit -m x)` to the tests. A miss is the unsafe direction: plan 04 would record the agent's commit as a user commit.
