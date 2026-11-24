@@ -214,8 +214,13 @@ impl Source for CopilotSource {
             let text = match std::fs::read(path) {
                 Ok(b) => String::from_utf8_lossy(&b).into_owned(),
                 Err(e) => {
-                    // Name only, never content. The file keeps its old parse (and its hold on the watermark).
+                    // Name only, never content. The file keeps its old parse (and its hold on the watermark),
+                    // counts as one error so doctor does not say ok, and is retried next poll (empty stat).
                     eprintln!("source copilot: {}: {}", normalize_path(&path.to_string_lossy()), e.kind());
+                    let s = self.seen.entry(path.clone()).or_insert_with(|| Seen { stat: String::new(), open: None, report: ParseReport::default() });
+                    s.stat.clear();
+                    s.report.records += 1;
+                    s.report.errors += 1;
                     continue;
                 }
             };
@@ -388,5 +393,15 @@ mod tests {
         src.poll(n, &mut BTreeMap::new()).unwrap();
         let h = src.take_health().unwrap();
         assert_eq!((h.files_found, h.records, h.errors, h.format.as_str(), h.last_event_ts), (1, 3, 1, "cli-events-v1", Some(n - 4_000)));
+    }
+
+    #[test]
+    fn unreadable_events_file_counts_as_an_error() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("session-state/s1/events.jsonl")).unwrap(); // a directory: read fails
+        let mut src = CopilotSource::new(Some(d.path().to_path_buf()));
+        src.poll(now(), &mut BTreeMap::new()).unwrap();
+        let h = src.take_health().unwrap();
+        assert_eq!((h.files_found, h.records, h.errors), (1, 1, 1));
     }
 }
