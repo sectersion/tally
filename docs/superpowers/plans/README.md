@@ -10,7 +10,8 @@ Read this first. Every later plan assumes what is written here. Written 2026-11-
 | `2026-11-22-daemon-core-pipeline.md` | Done, on `main`. Crate `crates/tally-daemon` (SQLite store, `finalize`, `ingest`, `status`, `verify`, `project add`). |
 | Plans 03 to 07 | Done, on `main` (claude adapter and run loop, presence and git, publish and badge, server core, daemon sync). |
 | Plan 09 | Done, on `main`. `server/` accounts, device-code login, projects, GitHub App linking and webhooks, public pages, badge service, live page. Spikes ran on documented fallbacks only; see `docs/spikes/`. |
-| Plans 08, 10, 11, 12 | Written, not started. |
+| Plan 08 | Partly done, on `main` (PR #10): adapter kit and golden-test kit, `tally doctor`, localhost WakaTime heartbeat endpoint, Claude Code agent writes. Copilot adapter (Tasks 11-12, PR #12) is done against the Copilot CLI log (`~/.copilot/session-state`); interrupt, tool_decision and agent writes are unobserved. Codex, Aider, Gemini CLI and Cursor adapters (Tasks 4-10, 13-15) are NOT built: blocked on access to each tool (login, install or subscription), since each needs a real-tool spike first; see `crates/tally-daemon/tests/fixtures/<harness>/NOTES.md` (all UNVERIFIED) and `docs/adapters/README.md`. |
+| Plans 10, 11, 12 | Written, not started. |
 
 Design documents: `docs/superpowers/specs/2026-11-22-daemon-roadmap-design.md` (goals, non-goals, finalization, badge approach C), `docs/spec/scoring.md` (ruleset `2026.11-0`), `PITCH.md` (product and threat model).
 
