@@ -137,9 +137,19 @@ pub(crate) fn rel_under(root: &str, entity: &str) -> Option<String> {
     let fold = cfg!(any(windows, target_os = "macos"));
     let (r, e) = if fold { (root.to_lowercase(), entity.to_lowercase()) } else { (root.to_string(), entity.to_string()) };
     let rest = e.strip_prefix(r.trim_end_matches('/'))?.strip_prefix('/')?;
-    // Take the tail from the original so its case survives (lowercasing can change byte length only for exotic chars).
-    let rel = entity.get(entity.len().checked_sub(rest.len())?..)?;
-    (!rel.is_empty()).then(|| rel.to_string())
+    // Lexically resolve '.', '..' and '//' so every spelling of one file hashes alike; fold case where the filesystem does.
+    let mut parts: Vec<&str> = Vec::new();
+    for c in rest.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?; // escapes the root
+            }
+            c => parts.push(c),
+        }
+    }
+    let rel = parts.join("/");
+    (!rel.is_empty()).then_some(rel)
 }
 
 /// False for UNC paths (`//host/..`, `\\host\..`, `\\?\UNC\..`); the verbatim `\\?\C:\..` form is local.
