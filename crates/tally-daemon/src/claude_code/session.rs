@@ -26,6 +26,7 @@ pub struct Session {
     /// so a far-future line cannot pin the open turn past expiry. `i64::MAX` = no bound.
     pub ts_ceiling: i64,
     pending: BTreeMap<String, (Meta, String, BashKind)>, // Bash tool_use id -> (meta, cmd_hash, kind)
+    write_paths: BTreeMap<String, String>, // Edit/Write tool_use id -> file_path, awaiting its tool_result
     tail: ContextTail,
     last_output: String,
     last_error: String,
@@ -112,10 +113,17 @@ impl Session {
                         self.pending.insert(id.clone(), (meta.clone(), cmd_hash(c), k));
                     }
                 }
-                ("Edit" | "Write" | "MultiEdit" | "NotebookEdit", _, Some(p)) => self.agent_writes.push((meta.ts, p.clone())),
+                ("Edit" | "Write" | "MultiEdit" | "NotebookEdit", _, Some(p)) => {
+                    // Also stamped at the tool_result: in default permission mode the file lands after approval, long after tool_use.
+                    self.write_paths.insert(id.clone(), p.clone());
+                    self.agent_writes.push((meta.ts, p.clone()));
+                }
                 _ => {}
             },
-            Entry::ToolResult { tool_use_id, is_error, text, .. } => {
+            Entry::ToolResult { meta, tool_use_id, is_error, text } => {
+                if let Some(p) = self.write_paths.remove(tool_use_id).filter(|_| !is_error) {
+                    self.agent_writes.push((meta.ts, p));
+                }
                 if let Some((tm, hash, k)) = self.pending.remove(tool_use_id) {
                     let kind = match k {
                         BashKind::Test => Some(("test_run", Kind::TestRun {
@@ -123,12 +131,13 @@ impl Session {
                             exit_code: *is_error as i32,
                             initiator: Actor::Agent,
                         })),
-                        BashKind::Commit if !is_error => Some(("commit", Kind::Commit {
+                        // Marked even when the chain exits non-zero (`commit && push` failing): the commit may exist, and
+                        // a false positive only makes a commit agent-owned (the safe direction).
+                        BashKind::Commit => Some(("commit", Kind::Commit {
                             sha: format!("claude:{tool_use_id}"),
                             by: Actor::Agent,
                             lines_changed: 0,
                         })),
-                        BashKind::Commit => None,
                     };
                     // Id has no block index: two Bash blocks in one entry would collide (FORMAT.md: one block per entry).
                     if let Some((suffix, kind)) = kind {
@@ -198,26 +207,40 @@ fn is_env_assign(tok: &str) -> bool {
 fn is_git_commit(seg: &str) -> bool {
     let toks: Vec<&str> = seg
         .split_whitespace()
-        .map(|t| t.trim_start_matches(['(', '"', '\'']).trim_end_matches([')', '"', '\'']))
+        .map(|t| t.trim_start_matches(['(', '"', '\'', '$']).trim_end_matches([')', '"', '\'']))
         .filter(|t| !t.is_empty())
         .collect();
+    let flags = |r: &[&str]| r.iter().take_while(|f| f.starts_with('-')).count();
     let mut t = &toks[..];
-    loop {
-        match t {
-            [w, f, rest @ ..] if matches!(*w, "bash" | "sh" | "zsh") && f.starts_with('-') && f.contains('c') => t = rest,
-            [w, rest @ ..] if matches!(*w, "env" | "sudo" | "time" | "command") || is_env_assign(w) => t = rest,
-            // `pwsh [-flags [values]] -Command "..."`: skip to after `-c`/`-Command`; without one, skip leading flags.
-            [w, rest @ ..] if matches!(w.to_ascii_lowercase().as_str(), "pwsh" | "pwsh.exe" | "powershell" | "powershell.exe") => {
-                let cmd = rest.iter().position(|f| f.eq_ignore_ascii_case("-c") || f.eq_ignore_ascii_case("-command"));
-                t = match cmd {
-                    Some(i) => &rest[i + 1..],
-                    None => &rest[rest.iter().take_while(|f| f.starts_with('-')).count()..],
-                };
+    while let Some((w, rest)) = t.split_first() {
+        t = match prog(w).as_str() {
+            "bash" | "sh" | "zsh" => {
+                let n = flags(rest);
+                if rest[..n].iter().any(|f| f.contains('c')) { &rest[n..] } else { break }
             }
+            "cmd" if rest.first().is_some_and(|f| f.eq_ignore_ascii_case("/c")) => &rest[1..],
+            // `pwsh [-flags [values]] -Command "..."`: skip to after `-c`/`-Command`; without one, skip leading flags.
+            "pwsh" | "powershell" => match rest.iter().position(|f| f.eq_ignore_ascii_case("-c") || f.eq_ignore_ascii_case("-command")) {
+                Some(i) => &rest[i + 1..],
+                None => &rest[flags(rest)..],
+            },
+            "env" | "sudo" => &rest[flags(rest)..],
+            // `timeout [-flags] DURATION cmd`
+            "timeout" => rest.get(flags(rest) + 1..).unwrap_or(&[]),
+            "time" | "command" | "exec" | "nohup" | "eval" | "invoke-expression" | "iex" | "!" | "then" | "do" | "else"
+            | "if" | "elif" | "while" | "until" | "&" => rest,
+            p if is_env_assign(w) || (p != "git" && w.contains(['/', '\\'])) => rest,
             _ => break,
-        }
+        };
     }
-    matches!(t, ["git", rest @ ..] if rest.contains(&"commit"))
+    matches!(t, [g, rest @ ..] if prog(g) == "git"
+        && rest.iter().any(|a| matches!(*a, "commit" | "merge" | "rebase" | "revert" | "cherry-pick" | "am")))
+}
+
+/// Program name of a token: directory and `.exe` stripped, lowercased (`C:\Git\git.exe` -> `git`).
+fn prog(tok: &str) -> String {
+    let b = tok.rsplit(['/', '\\']).next().unwrap_or(tok).to_ascii_lowercase();
+    b.strip_suffix(".exe").map_or(b.clone(), str::to_string)
 }
 
 /// Lowercase hex SHA-256 of the command string.
@@ -329,11 +352,12 @@ mod tests {
         let c = out.last().unwrap();
         assert_eq!((c.id.as_str(), c.ts), ("claude:s:a2:commit", 3_000));
         assert_eq!(c.kind, Kind::Commit { sha: "claude:t2".into(), by: Actor::Agent, lines_changed: 0 });
-        // a failed commit gives nothing
+        // a commit chain that exits non-zero (e.g. failing push) is still marked (GIT-1)
         let n = out.len();
         s.feed(tool("a3", 4_000, "t3", "Bash", Some("git commit -m y"), None), &ctx, &mut out);
-        s.feed(result("r3", 4_100, "t3", true, "nothing to commit"), &ctx, &mut out);
-        assert_eq!(out.len(), n);
+        s.feed(result("r3", 4_100, "t3", true, "push failed"), &ctx, &mut out);
+        assert_eq!(out.len(), n + 1);
+        assert!(matches!(out.last().unwrap().kind, Kind::Commit { by: Actor::Agent, .. }));
         s.feed(tool("a4", 5_000, "t4", "Bash", Some("ls"), None), &ctx, &mut out);
         assert_eq!(s.limit(), i64::MAX);
         assert!(!serde_json::to_string(&out).unwrap().contains("cargo"));
@@ -446,6 +470,16 @@ mod tests {
         s.feed(tool("a2", 4_100, "t2", "Read", None, Some("src/b.rs")), &ctx, &mut out);
         assert_eq!(s.agent_writes, [(4_000, "src/a.rs".to_owned())]);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn agent_edit_is_also_stamped_at_its_slow_tool_result() {
+        let (mut s, v) = (Session::default(), Vocab::default());
+        let mut out = vec![];
+        let ctx = Ctx { project: None, vocab: &v };
+        s.feed(tool("a1", 4_000, "t1", "Edit", None, Some("src/a.rs")), &ctx, &mut out);
+        s.feed(result("r1", 35_000, "t1", false, "ok"), &ctx, &mut out);
+        assert_eq!(s.agent_writes, [(4_000, "src/a.rs".to_owned()), (35_000, "src/a.rs".to_owned())]);
     }
 
     #[test]
