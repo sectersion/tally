@@ -147,6 +147,8 @@ impl Snapshot<'_> {
     /// `(ts, id)`, strictly after the cursor, at most `limit`. All values are bound parameters.
     pub fn project_events_in(&self, projects: &[String], kinds: &[&str], from_ts: i64, to_ts: i64, after: Option<(i64, String)>, limit: usize) -> Result<Vec<Event>, StoreError> {
         let (cts, cid) = after.unwrap_or((i64::MIN, String::new()));
+        // The row-value cursor alone is not an index bound; without this every page rescans from `from_ts`.
+        let from_ts = from_ts.max(cts);
         let mut args: Vec<Value> = vec![from_ts.into(), to_ts.into(), cts.into(), cid.into(), (limit as i64).into()];
         args.extend(kinds.iter().map(|k| Value::from(k.to_string())));
         args.extend(projects.iter().map(|p| Value::from(p.clone())));

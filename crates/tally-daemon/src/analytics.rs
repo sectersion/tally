@@ -89,18 +89,24 @@ pub fn find_bug_fixes(events: &[Event], from_ts: i64, to_ts: i64) -> Vec<BugFix>
     out
 }
 
-/// Every event of `kinds` in `[from_ts, to_ts)`, in pages (each page is bounded; the window bounds the total).
+/// Every event of `kinds` in `[from_ts, to_ts)`, sorted by `(ts, id)`. Paged one kind at a time: a multi-kind query
+/// needs a sort, which rescans every remaining row on every page (quadratic on a large store).
 pub(crate) fn load_events(snap: &Snapshot, kinds: &[&str], from_ts: i64, to_ts: i64) -> Result<Vec<Event>, StoreError> {
     let mut all: Vec<Event> = Vec::new();
-    loop {
-        let after = all.last().map(|e| (e.ts, e.id.clone()));
-        let page = snap.events_in(kinds, from_ts, to_ts, after, PAGE)?;
-        let n = page.len();
-        all.extend(page);
-        if n < PAGE {
-            return Ok(all);
+    for kind in kinds {
+        let mut after = None;
+        loop {
+            let page = snap.events_in(&[kind], from_ts, to_ts, after, PAGE)?;
+            let n = page.len();
+            after = page.last().map(|e| (e.ts, e.id.clone()));
+            all.extend(page);
+            if n < PAGE {
+                break;
+            }
         }
     }
+    all.sort_by(|a, b| (a.ts, &a.id).cmp(&(b.ts, &b.id)));
+    Ok(all)
 }
 
 pub fn bugs(snap: &Snapshot, from_ts: i64, to_ts: i64) -> Result<Bugs, StoreError> {
@@ -361,6 +367,29 @@ mod tests {
             s.conn.execute("INSERT INTO skipped_claims VALUES (?1, ?2, 'no_presence_coverage')", rusqlite::params![id, ts]).unwrap();
         }
         s
+    }
+    #[test]
+    fn load_events_pages_many_kinds_in_order_and_is_not_quadratic() {
+        let kinds = ["prompt", "interrupt", "tool_decision", "user_edit", "test_run", "commit"];
+        let mut s = Store::open_in_memory().unwrap();
+        let tx = s.conn.transaction().unwrap();
+        let mut n = 0;
+        for i in 0..400_000i64 {
+            let e = match i % 3 {
+                0 => prompt(&format!("e{i:07}"), i, 1),
+                1 => ev(&format!("e{i:07}"), i, Kind::UserEdit { file_hash: "f".into(), lines_changed: 1 }),
+                _ => ev(&format!("e{i:07}"), i, Kind::AgentOutput { chars: 1 }),
+            };
+            n += (i % 3 != 2) as usize;
+            tx.execute("INSERT INTO events(id, ts, json) VALUES (?1, ?2, ?3)", rusqlite::params![e.id, e.ts, serde_json::to_string(&e).unwrap()]).unwrap();
+        }
+        tx.commit().unwrap();
+        let snap = s.snapshot().unwrap();
+        let t = std::time::Instant::now();
+        let got = load_events(&snap, &kinds, 0, i64::MAX).unwrap();
+        assert_eq!(got.len(), n);
+        assert!(got.windows(2).all(|w| (w[0].ts, &w[0].id) < (w[1].ts, &w[1].id)));
+        assert!(t.elapsed().as_secs_f64() < 5.5, "load_events took {:?}", t.elapsed());
     }
     fn bugs_of(events: &[Event], skipped: &[&str], from: i64, to: i64) -> Bugs {
         let mut s = store(events, skipped);
