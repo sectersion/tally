@@ -228,7 +228,11 @@ impl Source for ClaudeCode {
                 }
             };
             if chunk.rotated {
-                self.files.insert(rel.clone(), File { floor: last_ts, ..File::new(path) });
+                // The open turn's agent_busy was not sent yet; its ts is the prompt ts, so keep the floor below it
+                // (re-sent events dedupe by id, and the open turn held the watermark below its start).
+                let open_ts: Option<i64> = state.get(&open_key).and_then(|o| o.split_once(' ')?.1.parse().ok());
+                let floor = last_ts.map(|l| open_ts.map_or(l, |t| l.min(t - 1)));
+                self.files.insert(rel.clone(), File { floor, ..File::new(path) });
             } else if self.files.get(rel).is_none_or(|f| {
                 // Saved state differs from memory (last tick not persisted, e.g. an expiry with no new lines).
                 f.fed_to != off || open_str(&f.session) != state.get(&open_key).unwrap_or_else(|| "-".into())
@@ -351,6 +355,34 @@ mod tests {
         let p = src.poll(late, &mut st).unwrap();
         let ids: Vec<_> = p.events.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, ["claude:s:p1:agent_busy"]);
+    }
+
+    #[test]
+    fn a_rotation_keeps_the_busy_span_of_the_turn_open_at_rotation() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("p")).unwrap();
+        let f = d.path().join("p/s.jsonl");
+        let head = |ty: &str, u: &str, i: usize| {
+            let t = ts(i);
+            format!(r#"{{"type":"{ty}","uuid":"{u}","sessionId":"s","timestamp":"{t}""#)
+        };
+        let p = head("user", "p1", 0) + r#","origin":{"kind":"human"},"message":{"content":"go"}}"#;
+        let a = head("assistant", "a1", 1) + r#","message":{"content":[{"type":"text","text":"working"}]}}"#;
+        let end = head("system", "d1", 3) + r#","subtype":"turn_duration"}"#;
+        std::fs::write(&f, [p.as_str(), a.as_str(), &"x".repeat(500)].join("
+") + "
+").unwrap();
+        let now = parse_rfc3339_ms(&ts(0)).unwrap() + 30_000;
+        let mut src = ClaudeCode::new(d.path().to_path_buf());
+        let mut st = BTreeMap::from([("started".to_owned(), "1".to_owned())]);
+        src.poll(now, &mut st).unwrap();
+        assert_eq!(src.poll(now, &mut st).unwrap().events.len(), 0);
+        // The file shrinks (rewritten), still holding the open turn, and now ends it.
+        std::fs::write(&f, [p, a, end].join("
+") + "
+").unwrap();
+        let ids: Vec<_> = src.poll(now, &mut st).unwrap().events.into_iter().map(|e| e.id).collect();
+        assert!(ids.contains(&"claude:s:p1:agent_busy".to_owned()), "{ids:?}");
     }
 
     #[test]
