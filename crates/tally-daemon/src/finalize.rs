@@ -24,6 +24,8 @@ pub enum FinalizeError {
     Divergence { index: usize, action_id: String, field: &'static str },
     #[error("ledger was written under ruleset {ledger} but this build scores with {current}; finalize will not append across a ruleset change")]
     RulesetChanged { ledger: String, current: String },
+    #[error("another finalize kept changing the ledger while this one ran; nothing is wrong with the ledger, try again")]
+    Busy,
 }
 
 /// A claim is final iff `ts + INTERRUPT_FOLLOW_MS <= horizon`. The stored ledger must be a
@@ -59,6 +61,16 @@ pub fn finalize(store: &mut Store) -> Result<FinalizeSummary, FinalizeError> {
         let p = prepare(store)?;
         commit(store, p)
     })
+    .map_err(busy_if_contended)
+}
+
+/// `Conflict`/`ChainBroken` out of `retry` only mean a peer kept winning the race (the ledger prefix was
+/// verified in `prepare`), so say that instead of "ledger chain broken".
+fn busy_if_contended(e: FinalizeError) -> FinalizeError {
+    match e {
+        FinalizeError::Store(StoreError::Conflict | StoreError::ChainBroken) => FinalizeError::Busy,
+        e => e,
+    }
 }
 
 // A busy peer finalizer makes our read stale; back off so it can finish (about 1 s in total).
@@ -514,6 +526,11 @@ mod tests {
         assert_eq!(s.ledger().unwrap().len(), 1);
         check_derivation(&s).unwrap();
         finalize(&mut s).unwrap();
+    }
+    #[test] fn persistent_contention_reports_busy_not_chain_broken() {
+        assert!(matches!(busy_if_contended(FinalizeError::Store(StoreError::ChainBroken)), FinalizeError::Busy));
+        assert!(matches!(busy_if_contended(FinalizeError::Store(StoreError::Conflict)), FinalizeError::Busy));
+        assert!(matches!(busy_if_contended(FinalizeError::Divergence { index: 0, action_id: "x".into(), field: "ts" }), FinalizeError::Divergence { .. }));
     }
     #[test] fn retry_outlasts_a_busy_peer_that_breaks_the_chain_five_times() {
         let mut calls = 0;
