@@ -47,6 +47,9 @@ pub struct PublishedRow {
 /// `(start, end)` in ms.
 pub type Interval = (i64, i64);
 
+/// Longest stored project label; bounds every API response that repeats it.
+pub const PROJECT_MAX_BYTES: usize = 256;
+
 pub struct Store {
     pub(crate) conn: Connection,
 }
@@ -153,7 +156,7 @@ impl Store {
         Ok(Store { conn })
     }
 
-    /// One transaction. Already-stored ids are duplicates (checked first, even if late);
+    /// One transaction. Project labels are cut to `PROJECT_MAX_BYTES`. Already-stored ids are duplicates (checked first, even if late);
     /// otherwise `ts <= finalized_through` fails the whole batch with `LateEvent`.
     pub fn append_events(&mut self, events: &[Event]) -> Result<AppendSummary, StoreError> {
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -167,9 +170,13 @@ impl Store {
             } else if e.ts <= fin {
                 return Err(StoreError::LateEvent { id: e.id.clone(), ts: e.ts, finalized_through: fin });
             } else {
+                let mut e = e.clone();
+                if let Some(p) = e.project.as_mut().filter(|p| p.len() > PROJECT_MAX_BYTES) {
+                    p.truncate((0..=PROJECT_MAX_BYTES).rev().find(|&i| p.is_char_boundary(i)).unwrap_or(0));
+                }
                 tx.execute(
                     "INSERT INTO events(id, ts, json) VALUES (?1, ?2, ?3)",
-                    params![e.id, e.ts, serde_json::to_string(e)?],
+                    params![e.id, e.ts, serde_json::to_string(&e)?],
                 )?;
                 added += 1;
             }
@@ -742,6 +749,14 @@ mod tests {
         assert_eq!((r.added, r.duplicates), (2, 1));
         let ids: Vec<_> = s.events().unwrap().into_iter().map(|e| e.id).collect();
         assert_eq!(ids, ["a", "b"]);
+    }
+    #[test] fn long_project_labels_are_cut_on_a_char_boundary() {
+        let mut s = Store::open_in_memory().unwrap();
+        let mut e = ev("a", 1);
+        e.project = Some("\u{e9}".repeat(PROJECT_MAX_BYTES));
+        s.append_events(&[e]).unwrap();
+        let p = s.events().unwrap()[0].project.clone().unwrap();
+        assert!(p.len() <= PROJECT_MAX_BYTES && p.chars().all(|c| c == '\u{e9}'), "{}", p.len());
     }
     #[test] fn late_events_reject_the_whole_batch_but_duplicates_pass() {
         let mut s = Store::open_in_memory().unwrap();
