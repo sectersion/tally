@@ -79,8 +79,8 @@ Adjustment: { "action_id", "approve_unverified_s" (int >= 0), "remove_verified_s
    unverified_s += verified_s, verified_s = 0, and reason "label_<label>". Other labels change no seconds
    but add the reason "label_<label>" to P's own claim only.
 11. Adjustments, in input order after step 10, per claim:
-   moved = min(approve_unverified_s, unverified_s): verified_s += moved, unverified_s -= moved, reason "reviewer_approved";
-   moved = min(remove_verified_s, verified_s): verified_s -= moved, unverified_s += moved, reason "reviewer_removed".
+   moved = min(approve_unverified_s, unverified_s): verified_s += moved, unverified_s -= moved, reason "reviewer_approved" (only if moved > 0);
+   moved = min(remove_verified_s, verified_s): verified_s -= moved, unverified_s += moved, reason "reviewer_removed" (only if moved > 0).
    An adjustment or label naming an action_id with no claim is ignored and reported (§3.2 input error list).
 Reasons are appended in that order and are never duplicated. verified_s + unverified_s is never changed by steps 9 to 11.
 ```
