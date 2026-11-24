@@ -123,10 +123,21 @@ pub fn sync_once(
     };
     let commits = commit_at.map_or_else(Vec::new, |now| commit_heads(store, server, tokens, committed, now));
     let mut out = Vec::new();
-    for (name, ids) in links {
-        sync_project(store, server, tokens, &name, &ids, (&[], false), &mut out);
+    // A server that is down fails every project the same way, slowly: stop at the first such error.
+    if !commits.iter().any(|(_, r)| is_down(r)) {
+        for (name, ids) in links {
+            sync_project(store, server, tokens, &name, &ids, (&[], false), &mut out);
+            if out.iter().any(|(_, r)| is_down(r)) {
+                break;
+            }
+        }
     }
     (commits, out)
+}
+
+/// A network or 5xx failure: the server is unreachable, so trying more projects only costs timeouts.
+fn is_down<T>(r: &Result<T, SyncError>) -> bool {
+    matches!(r, Err(SyncError::Api(a)) if a.retryable())
 }
 
 /// What `sync_all` would upload, from one `GET /head` per chain; stores and uploads nothing.
@@ -195,7 +206,7 @@ fn sync_project(
     }
     for (ruleset, entries) in chains {
         let r = chain(&api, id, name, &ruleset, &entries, dry);
-        let stop = matches!(r, Err(SyncError::Api(ApiError::Unauthorized)));
+        let stop = matches!(r, Err(SyncError::Api(ApiError::Unauthorized))) || is_down(&r);
         push(r);
         if stop {
             break;
@@ -272,7 +283,12 @@ pub fn commit_heads(
         if r.is_ok() {
             last.insert(id.clone(), head);
         }
-        out.push((name, r.map_err(SyncError::from)));
+        let r = r.map_err(SyncError::from);
+        let down = is_down(&r);
+        out.push((name, r));
+        if down {
+            break;
+        }
     }
     out
 }
