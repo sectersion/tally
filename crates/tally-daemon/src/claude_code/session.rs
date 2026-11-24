@@ -24,6 +24,7 @@ pub struct Session {
     pub open_turn: Option<(String, i64)>, // (prompt uuid, prompt ts)
     pub last_seen_ts: i64,
     pending: BTreeMap<String, (Meta, String, BashKind)>, // Bash tool_use id -> (meta, cmd_hash, kind)
+    write_paths: BTreeMap<String, String>, // Edit/Write tool_use id -> file_path, awaiting its tool_result
     tail: ContextTail,
     last_output: String,
     last_error: String,
@@ -93,10 +94,17 @@ impl Session {
                         self.pending.insert(id.clone(), (meta.clone(), cmd_hash(c), k));
                     }
                 }
-                ("Edit" | "Write" | "MultiEdit" | "NotebookEdit", _, Some(p)) => self.agent_writes.push((meta.ts, p.clone())),
+                ("Edit" | "Write" | "MultiEdit" | "NotebookEdit", _, Some(p)) => {
+                    // Also stamped at the tool_result: in default permission mode the file lands after approval, long after tool_use.
+                    self.write_paths.insert(id.clone(), p.clone());
+                    self.agent_writes.push((meta.ts, p.clone()));
+                }
                 _ => {}
             },
-            Entry::ToolResult { tool_use_id, is_error, text, .. } => {
+            Entry::ToolResult { meta, tool_use_id, is_error, text } => {
+                if let Some(p) = self.write_paths.remove(tool_use_id).filter(|_| !is_error) {
+                    self.agent_writes.push((meta.ts, p));
+                }
                 if let Some((tm, hash, k)) = self.pending.remove(tool_use_id) {
                     let kind = match k {
                         BashKind::Test => Some(("test_run", Kind::TestRun {
@@ -441,6 +449,16 @@ mod tests {
         s.feed(tool("a2", 4_100, "t2", "Read", None, Some("src/b.rs")), &ctx, &mut out);
         assert_eq!(s.agent_writes, [(4_000, "src/a.rs".to_owned())]);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn agent_edit_is_also_stamped_at_its_slow_tool_result() {
+        let (mut s, v) = (Session::default(), Vocab::default());
+        let mut out = vec![];
+        let ctx = Ctx { project: None, vocab: &v };
+        s.feed(tool("a1", 4_000, "t1", "Edit", None, Some("src/a.rs")), &ctx, &mut out);
+        s.feed(result("r1", 35_000, "t1", false, "ok"), &ctx, &mut out);
+        assert_eq!(s.agent_writes, [(4_000, "src/a.rs".to_owned()), (35_000, "src/a.rs".to_owned())]);
     }
 
     #[test]
