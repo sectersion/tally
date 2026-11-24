@@ -18,20 +18,42 @@ fn err(o: &Output) -> String {
 fn second_run_on_one_home_is_refused() {
     let t = tempfile::tempdir().unwrap();
     let home = t.path().join("home");
-    let mut first = Command::new(env!("CARGO_BIN_EXE_tally"))
-        .arg("--home")
-        .arg(&home)
-        .args(["run", "--interval-secs", "3600"])
-        .env_remove("CLAUDECODE")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+    let run = |piped: bool| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_tally"));
+        c.arg("--home")
+            .arg(&home)
+            .args(["run", "--interval-secs", "3600"])
+            .env_remove("CLAUDECODE");
+        c.stdout(std::process::Stdio::null());
+        c.stderr(if piped {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        });
+        c.spawn().unwrap()
+    };
+    let mut first = run(false);
     std::thread::sleep(std::time::Duration::from_secs(2));
-    let o = tally(&home, &["run", "--interval-secs", "3600"]);
+    let mut second = run(true);
+    // Without the lock the second daemon never exits; bound the wait so that fails instead of hanging.
+    let mut status = None;
+    for _ in 0..50 {
+        if let Some(s) = second.try_wait().unwrap() {
+            status = Some(s);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if status.is_none() {
+        second.kill().unwrap();
+    }
     first.kill().unwrap();
     first.wait().unwrap();
-    assert!(!o.status.success());
+    let o = second.wait_with_output().unwrap();
+    assert!(
+        status.is_some_and(|s| !s.success()),
+        "second run was not refused"
+    );
     assert!(err(&o).contains("already"), "{}", err(&o));
 }
 
