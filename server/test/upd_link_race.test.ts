@@ -58,7 +58,12 @@ async function project(u: U, fullName: string, repoId = rnd()) {
 test("upd-link racing unlink-repo does not leave a record on an unlinked project", async () => {
   resetUpdCache();
   list = [
-    { id: "recRACE", ysws: "Horizons", approved_at: 1790553600, code_url: "https://github.com/octo/mine" },
+    {
+      id: "recRACE",
+      ysws: "Horizons",
+      approved_at: 1790553600,
+      code_url: "https://github.com/octo/mine",
+    },
   ];
   shipsDelayMs = 400;
   const u = await user();

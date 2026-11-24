@@ -61,7 +61,8 @@ test("one chain per project and ruleset", async () => {
 });
 
 test("pool sets lock_timeout and statement_timeout", async () => {
-  const [r] = await sql`select current_setting('lock_timeout') as l, current_setting('statement_timeout') as s`;
+  const [r] =
+    await sql`select current_setting('lock_timeout') as l, current_setting('statement_timeout') as s`;
   expect([r.l, r.s]).toEqual(["2s", "10s"]);
 });
 
@@ -80,7 +81,8 @@ test("migration 103 unlinks all but the newest live repo of a double-linked proj
     await db`insert into github_repos (id, full_name) values (1,'a/b'),(2,'a/c')`;
     await db`insert into project_repos (project_id, github_repo_id, linked_at) values ('p',1,now() - interval '1 day'),('p',2,now())`;
     await migrate(db);
-    const live = await db`select github_repo_id::int as id from project_repos where unlinked_at is null`;
+    const live =
+      await db`select github_repo_id::int as id from project_repos where unlinked_at is null`;
     expect(live.map((r: { id: number }) => r.id)).toEqual([2]);
   } finally {
     await db.close();

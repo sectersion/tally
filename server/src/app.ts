@@ -209,7 +209,8 @@ export function createServer(deps: Deps) {
     try {
       ({ tokenId } = await requireToken(sql, req, projectId));
     } catch (e) {
-      if (e instanceof HttpError && (e.status === 401 || e.status === 403)) limit(`ip:${ip(req, server)}`);
+      if (e instanceof HttpError && (e.status === 401 || e.status === 403))
+        limit(`ip:${ip(req, server)}`);
       throw e;
     }
     limit(`tok:${tokenId}`);
@@ -661,7 +662,8 @@ export function createServer(deps: Deps) {
             const r = await tx`update projects set upd_record_id = ${id}
               where id = ${p.id} and exists (select 1 from project_repos
                 where project_id = ${p.id} and unlinked_at is null) returning id`;
-            if (!r.length) throw new HttpError(409, { error: "repo was unlinked; link a repo first" });
+            if (!r.length)
+              throw new HttpError(409, { error: "repo was unlinked; link a repo first" });
             await bumpChange(tx, p.id);
           });
           return redirect(`/p/${p.public_name}/settings`);
