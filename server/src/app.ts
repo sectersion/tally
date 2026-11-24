@@ -193,13 +193,13 @@ export function createServer(deps: Deps) {
   };
   const limitAuth = (req: Request, server: Srv) => limit(`auth:${ip(req, server)}`, rates.auth);
   const limitPage = (req: Request, server: Srv) => limit(`page:${ip(req, server)}`, rates.page);
-  /** Token auth, then the per-token bucket; failed auth spends the caller's ip bucket instead. */
+  /** Token auth, then the per-token bucket; failed auth (401 or 403) spends the caller's ip bucket instead. */
   const authed = async (req: Request, server: Srv, projectId: string) => {
     let tokenId: number;
     try {
       ({ tokenId } = await requireToken(sql, req, projectId));
     } catch (e) {
-      if (e instanceof HttpError && e.status === 401) limit(`ip:${ip(req, server)}`);
+      if (e instanceof HttpError && (e.status === 401 || e.status === 403)) limit(`ip:${ip(req, server)}`);
       throw e;
     }
     limit(`tok:${tokenId}`);
