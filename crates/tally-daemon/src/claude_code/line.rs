@@ -224,8 +224,8 @@ mod tests {
 
     #[test]
     fn leading_utf8_bom_is_ignored() {
-        let l = format!("\u{feff}{}", human(""));
-        assert_eq!(cls(&l).len(), 1);
+        let l = format!("\u{feff}{}", human(r#","turnOrigin":"human""#));
+        assert!(matches!(&cls(&l)[..], [Entry::HumanPrompt { .. }]));
     }
 
     #[test]
