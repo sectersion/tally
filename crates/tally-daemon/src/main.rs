@@ -52,7 +52,8 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Store a project's device token (read from stdin) in the data dir; the token is never printed.
+    /// Store a project's device token (one line from stdin) in the data dir. tally never prints the token,
+    /// but a terminal echoes what you type: pipe it in (`... | tally login`) instead of typing or pasting it.
     ///
     /// With `--server`, also writes `[sync] enabled = true` into config.toml unless it already has a `[sync]` table.
     Login {
