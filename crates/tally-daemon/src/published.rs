@@ -19,10 +19,21 @@ pub enum PublishError {
     PublishedChain { project: String, ruleset: String, index: usize, reason: &'static str },
 }
 
-/// `owner/repo`: two non-empty segments of `[A-Za-z0-9._-]`, neither `.` nor `..`.
+/// `owner/repo`: two segments of `[A-Za-z0-9._-]`, 1..=100 chars, not `.`/`..`/`.git` (git ignores it),
+/// not ending in `.` (Windows aliases it) and not a Windows device name (`con`, `aux.x`, `com1`, ...).
 pub fn valid_public_name(name: &str) -> bool {
     let seg = |s: &str| {
-        !s.is_empty() && s != "." && s != ".." && s.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+        let stem = s.split('.').next().unwrap_or("").to_ascii_uppercase();
+        let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+        !s.is_empty()
+            && s.len() <= 100
+            && s != "."
+            && s != ".."
+            && !s.eq_ignore_ascii_case(".git")
+            && !s.ends_with('.')
+            && !device
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
     };
     matches!(name.split_once('/'), Some((a, b)) if seg(a) && seg(b))
 }
@@ -34,10 +45,22 @@ fn resolve<'a>(names: &'a BTreeMap<String, String>, p: &str) -> Option<&'a str> 
 
 fn valid_names(store: &Store) -> Result<BTreeMap<String, String>, PublishError> {
     let names = store.project_names()?;
-    match names.values().find(|n| !valid_public_name(n)) {
-        Some(bad) => Err(PublishError::BadName(bad.clone())),
-        None => Ok(names),
+    if let Some(bad) = names.values().find(|n| !valid_public_name(n)) {
+        return Err(PublishError::BadName(bad.clone()));
     }
+    // Names differing only by case share a directory on case-insensitive filesystems.
+    let mut seen = HashSet::new();
+    for n in names.values().collect::<HashSet<_>>() {
+        if !seen.insert(n.to_ascii_lowercase()) {
+            return Err(PublishError::BadName(n.clone()));
+        }
+    }
+    Ok(names)
+}
+
+/// True if `name` differs only by case from a different already-registered public name.
+pub fn case_collides(store: &Store, name: &str) -> Result<bool, PublishError> {
+    Ok(store.project_names()?.values().any(|n| n != name && n.eq_ignore_ascii_case(name)))
 }
 
 /// Rows to append; writes nothing.
@@ -189,6 +212,13 @@ mod tests {
         for n in names { s.conn.execute(&format!("DROP TRIGGER {n}"), []).unwrap(); }
     }
 
+    #[test] fn case_differing_names_are_rejected() {
+        let mut s = store_with_ledger(Some("Owner/Repo"));
+        assert!(case_collides(&s, "owner/repo").unwrap());
+        assert!(!case_collides(&s, "Owner/Repo").unwrap());
+        s.register_project("p2", "C:/r2", Some("owner/repo")).unwrap();
+        assert!(matches!(pending(&s), Err(PublishError::BadName(_))));
+    }
     #[test] fn unnamed_projects_publish_nothing() {
         let mut s = store_with_ledger(None);
         assert!(sync(&mut s, true).unwrap().is_empty());
@@ -309,7 +339,10 @@ mod tests {
         assert_eq!(after[0], before[0]);
     }
     #[test] fn bad_public_names_are_rejected() {
-        for bad in ["", "owner", "a/b/c", "../x", "o/..", "o/r r", "o/r?x"] { assert!(!valid_public_name(bad), "{bad}"); }
+        for bad in ["", "owner", "a/b/c", "../x", "o/..", "o/r r", "o/r?x",
+            "o/.git", "o/.GIT", "o/r.", "o/con", "o/CON", "o/aux.x", "o/com1", "o/lpt9.txt"] { assert!(!valid_public_name(bad), "{bad}"); }
+        assert!(!valid_public_name(&format!("o/{}", "a".repeat(101))));
+        for ok in ["o/.github", "o/console", "o/com0", "o/com10", "o/r.x", &format!("o/{}", "a".repeat(100))] { assert!(valid_public_name(ok), "{ok}"); }
         assert!(valid_public_name("sectersion/tally"));
         let mut s = store_with_ledger(None);
         s.register_project("p1", "C:/r", Some("o/r r")).unwrap();
