@@ -566,6 +566,13 @@ impl Store {
         Ok(out)
     }
 
+    /// The `hash` column of each ledger row, in append order (the chain tip `append_ledger` extends).
+    pub fn ledger_hash_columns(&self) -> Result<Vec<String>, StoreError> {
+        let mut st = self.conn.prepare("SELECT hash FROM ledger ORDER BY seq")?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Main ledger with its `seq`, in append order.
     pub fn ledger_rows(&self) -> Result<Vec<(i64, LedgerEntry)>, StoreError> {
         let mut st = self.conn.prepare("SELECT seq, entry_json FROM ledger ORDER BY seq")?;

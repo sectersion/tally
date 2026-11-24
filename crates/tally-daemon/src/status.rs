@@ -55,9 +55,14 @@ pub enum VerifyError {
     Chain { index: usize, reason: &'static str },
 }
 
-/// Number of entries when the whole chain verifies from `GENESIS_HASH`.
+/// Number of entries when the whole chain verifies from `GENESIS_HASH` and each row's `hash` column
+/// (the tip `append_ledger` extends) matches its entry. Chain-only: it does not re-derive the seconds
+/// (that is `repair`), so a forged, fully rechained ledger passes.
 pub fn verify_ledger(store: &Store) -> Result<usize, VerifyError> {
     let ledger = store.ledger()?;
+    if let Some(index) = store.ledger_hash_columns()?.iter().zip(&ledger).position(|(h, e)| *h != e.hash) {
+        return Err(VerifyError::Chain { index, reason: "hash_column_mismatch" });
+    }
     verify_chain(&ledger, GENESIS_HASH).map_err(|e| VerifyError::Chain { index: e.index, reason: e.reason })?;
     Ok(ledger.len())
 }
@@ -76,6 +81,11 @@ mod tests {
         s
     }
 
+    #[test] fn verify_flags_a_tampered_hash_column() {
+        let s = store_with_two_final_claims();
+        s.conn.execute_batch("DROP TRIGGER IF EXISTS ledger_no_update; UPDATE ledger SET hash='deadbeef' WHERE seq=2").unwrap();
+        assert!(matches!(verify_ledger(&s), Err(VerifyError::Chain { index: 1, reason: "hash_column_mismatch" })));
+    }
     #[test] fn status_counts_final_and_provisional_claims() {
         let mut s = store_with_two_final_claims();
         s.append_events(&[edit("c", 2_000_000)]).unwrap();         // not final yet: watermark is 1_000_000
