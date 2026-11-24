@@ -97,6 +97,9 @@ impl GitSource {
     }
 }
 
+/// How long a failing (but existing) repo may hold the git watermark back before it is skipped.
+const FAILING_REPO_GRACE_MS: i64 = 24 * 3_600_000;
+
 pub(crate) enum GitFail {
     Missing,
     Failed,
@@ -183,7 +186,15 @@ impl Source for GitSource {
                         }
                         wm.max(cutoff)
                     }
-                    Err(GitFail::Failed) => wm, // retried next poll; holds the source watermark back
+                    // Retried next poll, holding the source watermark back, but only for a day: a repo that
+                    // stays broken (corrupt HEAD, dubious ownership) must not cap finalization forever.
+                    Err(GitFail::Failed) if cutoff - wm <= FAILING_REPO_GRACE_MS => wm,
+                    Err(GitFail::Failed) => {
+                        if self.warned.insert(repo.local_id.clone()) {
+                            eprintln!("git: repository {} keeps failing; skipping commits until it works again", repo.root.display());
+                        }
+                        wm.max(cutoff)
+                    }
                 },
             };
             state.set(&key, &new_wm.to_string());
@@ -560,6 +571,19 @@ mod tests {
         let p = src.poll(T + 500_000, &mut st).unwrap();
         assert!(p.events.is_empty());
         assert_eq!(p.watermark, Some(T - GIT_LAG_MS));
+    }
+
+    #[test]
+    fn a_repo_failing_for_over_a_day_stops_holding_the_watermark() {
+        if !git_available() { return; }
+        let (dir, mut src, _lk, mut st) = setup();
+        src.poll(T, &mut st).unwrap();
+        std::fs::write(dir.path().join(".git").join("HEAD"), "garbage
+").unwrap();
+        let later = T + 30 * 86_400_000;
+        let p = src.poll(later, &mut st).unwrap();
+        assert_eq!(p.watermark, Some(later - GIT_LAG_MS));
+        assert_eq!(src.warned.len(), 1);
     }
 
     #[test]
