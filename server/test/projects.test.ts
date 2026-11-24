@@ -123,8 +123,12 @@ test("token.ts claim sets an owner, and replaces one only with --force", async (
       cwd: `${import.meta.dir}/..`,
       env: process.env,
     }).exitCode;
+  const seq = async (pid: string) =>
+    Number((await sql`select change_seq from projects where id = ${pid}`)[0].change_seq);
+  const seq0 = await seq(unowned.projectId);
   expect(claim(unowned.projectId)).toBe(0);
   expect(await owner(unowned.projectId)).toBe(b.id);
+  expect(await seq(unowned.projectId)).toBe(seq0 + 1);
   expect(claim(owned.id)).toBe(1);
   expect(await owner(owned.id)).toBe(a.id);
   expect(claim(owned.id, "--force")).toBe(0);

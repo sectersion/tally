@@ -38,7 +38,7 @@ Revoke with `bun run token:revoke <token_id>` (prints `revoked`, or `no such act
 
 ## Admin scripts
 
-- `bun run token:claim <project_id> <handle>` gives a project (for example one made by `token:create`, which has no owner) to the user with that handle. If the project already has an owner it refuses and exits 1; add `--force` to replace the owner.
+- `bun run token:claim <project_id> <handle>` gives a project (for example one made by `token:create`, which has no owner) to the user with that handle. If the project already has an owner it refuses and exits 1; add `--force` to replace the owner. Project-bound device tokens from `token:create` keep working after a claim (the new owner can revoke them in /settings).
 - `bun run user:role <handle> user|reviewer|admin` sets a user's role (prints `<handle> is now <role>`, or `no such handle` and exits 1).
 
 ## Migrations
