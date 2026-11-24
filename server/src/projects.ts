@@ -90,9 +90,8 @@ export async function projectHours(
   sql: SQL,
   projectId: string,
 ): Promise<{ verified_s: number; unverified_s: number }> {
-  const [r] = await sql`select coalesce(sum(e.verified_s), 0)::bigint as v,
-      coalesce(sum(e.unverified_s), 0)::bigint as u
-    from ledger_entries e join chains c on c.id = e.chain_id where c.project_id = ${projectId}`;
+  const [r] = await sql`select coalesce(sum(verified_s), 0)::bigint as v,
+      coalesce(sum(unverified_s), 0)::bigint as u from chains where project_id = ${projectId}`;
   return { verified_s: Number(r.v), unverified_s: Number(r.u) };
 }
 

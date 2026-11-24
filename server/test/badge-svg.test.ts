@@ -33,7 +33,7 @@ async function project(o: { public?: boolean; owned?: boolean } = {}) {
 /** One chain: verified/unverified seconds, stored on both the entries and the chain row. */
 async function ledger(projectId: string, v: number, u: number) {
   const [c] =
-    await sql`insert into chains (project_id, ruleset, head_hash, count, verified_s) values (${projectId}, ${`r${rnd()}`}, ${GENESIS}, 1, ${v}) returning id`;
+    await sql`insert into chains (project_id, ruleset, head_hash, count, verified_s, unverified_s) values (${projectId}, ${`r${rnd()}`}, ${GENESIS}, 1, ${v}, ${u}) returning id`;
   await sql`insert into ledger_entries (chain_id, seq, hash, prev_hash, action_id, ts, kind, verified_s, unverified_s, entry)
     values (${c.id}, 0, ${`${++hashNo}`.padStart(64, "0")}, ${GENESIS}, 'a0', ${Date.now()}, 'k', ${v}, ${u}, '{}'::json)`;
   await sql`update projects set change_seq = change_seq + 1 where id = ${projectId}`;

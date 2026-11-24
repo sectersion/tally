@@ -122,9 +122,10 @@ export async function appendEntries(
         ${col((e) => JSON.stringify(e))}::text[]::json[])`;
     const last = fresh[fresh.length - 1] as LedgerEntry;
     const added = fresh.reduce((s, e) => s + e.verified_s, 0);
+    const addedU = fresh.reduce((s, e) => s + e.unverified_s, 0);
     const [u] =
       await tx`update chains set head_hash = ${last.hash}, count = ${count + fresh.length},
-        verified_s = verified_s + ${added} where id = ${ch.id} returning head_hash, count`;
+        verified_s = verified_s + ${added}, unverified_s = unverified_s + ${addedU} where id = ${ch.id} returning head_hash, count`;
     await bumpChange(tx, projectId);
     return { head_hash: u.head_hash, count: Number(u.count) };
   });
