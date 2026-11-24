@@ -66,7 +66,7 @@ fn hash_writes(writes: &[(i64, String)], root: &Path, project_id: &str) -> Vec<(
     writes
         .iter()
         .filter_map(|(ts, p)| {
-            let rel = crate::heartbeat::rel_under(&root, &crate::project::normalize_path(p))?;
+            let rel = crate::heartbeat::rel_under_canon(&root, &crate::project::normalize_path(p))?;
             Some((crate::heartbeat::file_hash(project_id, &rel), *ts))
         })
         .collect()
@@ -304,6 +304,21 @@ mod tests {
         assert!(!format!("{got:?}").contains("src/a.rs"));
         // production roots are canonicalized: verbatim prefix and backslashes
         assert_eq!(hash_writes(&w, Path::new(r"\\?\C:\tallyproj"), "p"), got);
+    }
+
+    #[test]
+    fn hash_writes_resolves_a_link_into_the_canonical_root() {
+        let d = tempfile::tempdir().unwrap();
+        let repo = std::fs::canonicalize(d.path()).unwrap().join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        let link = d.path().join("link");
+        #[cfg(windows)]
+        assert!(std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(&link).arg(&repo).output().unwrap().status.success());
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo, &link).unwrap();
+        let via_link = crate::project::normalize_path(&link.join("src/a.rs").to_string_lossy());
+        let got = hash_writes(&[(1, via_link)], &repo, "p");
+        assert_eq!(got, [(crate::heartbeat::file_hash("p", "src/a.rs"), 1)]);
     }
 
     #[test]
