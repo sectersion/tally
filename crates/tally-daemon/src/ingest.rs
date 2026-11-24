@@ -8,7 +8,12 @@ pub enum IngestError {
     Store(#[from] StoreError),
     #[error("line {line}: {source}")]
     Parse { line: usize, source: serde_json::Error },
+    #[error("{what} {ts} is more than a day in the future; refusing it (it would finalize the store past real time)")]
+    Future { what: String, ts: i64 },
 }
+
+/// Clock skew allowed before a timestamp counts as implausibly far ahead.
+const FUTURE_SLACK_MS: i64 = 24 * 3_600_000;
 
 /// Parses every line first (blank lines skipped); writes nothing if any line fails.
 /// The watermark for `source` is `watermark`, else the newest `ts` in `text`;
@@ -25,6 +30,13 @@ pub fn ingest_ndjson(
             continue;
         }
         events.push(serde_json::from_str::<Event>(line).map_err(|e| IngestError::Parse { line: i + 1, source: e })?);
+    }
+    let limit = crate::source::now_ms().saturating_add(FUTURE_SLACK_MS);
+    if let Some(e) = events.iter().find(|e| e.ts > limit) {
+        return Err(IngestError::Future { what: format!("event {} ts", e.id), ts: e.ts });
+    }
+    if let Some(ms) = watermark.filter(|&w| w > limit) {
+        return Err(IngestError::Future { what: "watermark".into(), ts: ms });
     }
     let mark = watermark.or_else(|| events.iter().map(|e| e.ts).max());
     let summary = store.append_events(&events)?;
@@ -60,6 +72,18 @@ mod tests {
         let text = format!("{}\n{}\n", line("1", 5), line("2", 9));
         ingest_ndjson(&mut s, &text, "x", None).unwrap();
         assert_eq!(s.horizon().unwrap(), Some(9));
+    }
+
+    #[test]
+    fn far_future_ts_or_watermark_is_refused_and_store_stays_usable() {
+        let mut s = Store::open_in_memory().unwrap();
+        let e = ingest_ndjson(&mut s, &line("1", i64::MAX), "x", None).unwrap_err();
+        assert!(matches!(e, IngestError::Future { .. }), "{e}");
+        let e = ingest_ndjson(&mut s, &line("2", 5), "x", Some(i64::MAX)).unwrap_err();
+        assert!(matches!(e, IngestError::Future { .. }), "{e}");
+        assert!(s.events().unwrap().is_empty());
+        ingest_ndjson(&mut s, &line("3", 5), "x", None).unwrap();
+        assert_eq!(s.horizon().unwrap(), Some(5));
     }
 
     #[test]
