@@ -153,7 +153,7 @@ fn claim<'a>(
         project: a.project.clone(),
         kind: kind.into(),
         verified_s: (verified_ms / 1000) as u32,
-        unverified_s: ((raw_ms - verified_ms) / 1000).min(u32::MAX as i64) as u32,
+        unverified_s: (raw_ms / 1000 - verified_ms / 1000).min(u32::MAX as i64) as u32,
         reasons: reasons.iter().filter(|r| r.1).map(|r| r.0.to_string()).collect(),
         features: features.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
     }

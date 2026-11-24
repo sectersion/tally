@@ -17,6 +17,15 @@ fn mk(s: i64, project: Option<&str>, kind: Kind) -> Event {
         kind,
     }
 }
+#[test]
+fn floor_keeps_total_equal_to_floored_raw() {
+    // Cap 283.080 s (relevance 151), raw interval 284.0 s: verified 283 + unverified 1.
+    let a = mk(0, Some("P"), Kind::Interrupt);
+    let b = mk(284, Some("P"), prompt(200, 151));
+    let c = score(&[a, b]);
+    assert_eq!(c[1].verified_s + c[1].unverified_s, 284);
+}
+
 fn prompt(chars: u32, rel: u16) -> Kind {
     Kind::Prompt { chars, relevance_pm: rel, novelty_bytes: 100 }
 }
