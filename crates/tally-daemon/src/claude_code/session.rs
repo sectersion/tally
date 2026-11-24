@@ -65,6 +65,7 @@ impl Default for Session {
             last_seen_ts: 0,
             ts_ceiling: i64::MAX,
             pending: BTreeMap::new(),
+            write_paths: BTreeMap::new(),
             tail: ContextTail::default(),
             last_output: String::new(),
             last_error: String::new(),
