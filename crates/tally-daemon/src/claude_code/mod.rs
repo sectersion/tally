@@ -15,7 +15,7 @@ use tally_scoring::text::Vocab;
 use tally_scoring::Event;
 
 use crate::project::project_for_dir;
-use crate::source::{Poll, Source, SourceError, SourceState};
+use crate::source::{Health, Poll, Source, SourceError, SourceState};
 use session::{Ctx, Session};
 
 /// Covers entries whose timestamp is earlier than the moment their line is flushed, and a partial last line.
@@ -60,6 +60,8 @@ pub struct ClaudeCode {
     agent_writes: Vec<(String, i64)>,
     /// `now_ms` of the poll in progress; entry timestamps past it (plus slack) do not count as seen.
     now_ms: i64,
+    /// Doctor stats, cumulative since start.
+    health: Health,
 }
 
 /// `(file_hash, ts)` for each write under `root`; paths outside it are dropped, the path text is not kept.
@@ -85,6 +87,7 @@ impl ClaudeCode {
             vocab_failed: HashSet::new(),
             agent_writes: Vec::new(),
             now_ms: i64::MAX,
+            health: Health::default(),
         }
     }
 
@@ -205,10 +208,12 @@ impl Source for ClaudeCode {
                 state.set(&format!("off:{rel}"), &len.to_string());
             }
             state.set("started", &now_ms.to_string());
+            self.health.files_found = files.len();
+            self.health.format = "session-jsonl".into();
             return Ok(Poll { events: vec![], watermark: None });
         }
         self.files.retain(|k, _| files.iter().any(|(rel, _)| rel == k));
-        let (mut events, mut skipped) = (Vec::new(), 0);
+        let (mut events, mut skipped, mut records, mut last_event_ts) = (Vec::new(), 0, 0, None);
         // A file with complete lines left unread (budget hit or read error) holds the watermark below the
         // newest timestamp it has shown, minus the write slack (unread lines may be a little older), and below
         // a persisted open turn (`open_ts`, for a file not registered in this process yet); one that has shown
@@ -246,6 +251,7 @@ impl Source for ClaudeCode {
                 }
             }
             let mut out = Vec::new();
+            records += chunk.lines.len();
             skipped += self.feed(rel, sub, chunk.lines.iter().map(Vec::as_slice), &mut out);
             let f = self.files.get_mut(rel).expect("registered");
             f.fed_to = chunk.end;
@@ -269,8 +275,16 @@ impl Source for ClaudeCode {
             }
             state.set(&off_key, &chunk.end.to_string());
             state.set(&open_key, &open_str(&f.session));
+            last_event_ts = last_event_ts.max(out.iter().map(|e| e.ts).max());
             events.extend(out);
         }
+        let h = &mut self.health;
+        h.files_found = files.len();
+        h.format = "session-jsonl".into();
+        h.records += records;
+        h.errors += skipped;
+        h.skipped += skipped;
+        h.last_event_ts = h.last_event_ts.max(last_event_ts);
         if skipped > 0 {
             eprintln!("source claude-code: skipped {skipped} unreadable lines");
         }
@@ -280,6 +294,10 @@ impl Source for ClaudeCode {
 
     fn take_agent_writes(&mut self) -> Vec<(String, i64)> {
         std::mem::take(&mut self.agent_writes)
+    }
+
+    fn take_health(&mut self) -> Option<Health> {
+        Some(self.health.clone())
     }
 }
 
@@ -528,5 +546,23 @@ mod tests {
         // nothing seen at all: no promise
         st.remove("last_ts:p/s.jsonl");
         assert_eq!(ClaudeCode::new(d.path().to_path_buf()).poll(now, &mut st).unwrap().watermark, None);
+    }
+
+    #[test]
+    fn reports_health_for_doctor() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("p")).unwrap();
+        let t0 = ts(0);
+        let line = format!(r#"{{"type":"user","uuid":"p1","sessionId":"s","timestamp":"{t0}","origin":{{"kind":"human"}},"message":{{"content":"go"}}}}"#);
+        std::fs::write(d.path().join("p/s.jsonl"), line + "
+not json
+").unwrap();
+        let mut src = ClaudeCode::new(d.path().to_path_buf());
+        let mut st = BTreeMap::from([("started".to_owned(), "1".to_owned())]);
+        src.poll(parse_rfc3339_ms(&t0).unwrap() + 3_600_000, &mut st).unwrap();
+        let h = src.take_health().expect("claude-code reports health");
+        assert_eq!((h.files_found, h.records, h.errors), (1, 2, 1));
+        assert_eq!(h.last_event_ts, Some(parse_rfc3339_ms(&t0).unwrap()));
+        assert_ne!(h.format, "unknown");
     }
 }
