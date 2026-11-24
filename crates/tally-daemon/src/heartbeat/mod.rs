@@ -213,6 +213,11 @@ pub fn map_heartbeats(
             stats.not_a_file += 1;
             continue;
         }
+        // Editor-reported AI attribution (e.g. Copilot): all AI lines and no human lines is not a human edit.
+        if hb.ai_line_changes.unwrap_or(0) > 0 && hb.human_line_changes.unwrap_or(0) == 0 {
+            stats.dropped_agent += 1;
+            continue;
+        }
         let ts = hb.time_ms();
         if agent_writes(&h, ts - AGENT_WRITE_WINDOW_MS, ts) {
             stats.dropped_agent += 1;
