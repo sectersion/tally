@@ -1,0 +1,79 @@
+name: nightly
+# Builds the six archives from main once a day and AUTO-PUBLISHES a pre-release tagged `nightly`.
+# Body: every commit since the previous nightly, each linked. Archives are `-unsigned` (no signing secrets).
+# Consumers: TALLY_RELEASE_BASE=https://github.com/sectersion/tally/releases/download/nightly TALLY_VERSION=<version> sh install.sh
+on:
+  schedule:
+    - cron: "0 3 * * *" # 03:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stamp:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.s.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: s
+        run: |
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/tally-daemon/Cargo.toml | head -1)
+          echo "version=$crate-nightly.$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: stamp
+    uses: ./.github/workflows/release.yml
+    with:
+      skip_version_check: true
+      version_override: ${{ needs.stamp.outputs.version }}
+    permissions:
+      contents: read
+
+  publish:
+    needs: [stamp, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.stamp.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history: the notes list commits since the previous nightly
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum tally-* | grep -v '\.SIGNED$' > SHA256SUMS
+          cat SHA256SUMS
+      - name: Check the artifact set
+        run: sh scripts/check-release-artifacts.sh dist "$VERSION"
+      - name: Commit log for release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Commits since the previous nightly release (or 24h on first run), each as a linked line.
+          since=$(gh release view nightly --repo "$GITHUB_REPOSITORY" --json createdAt -q .createdAt 2>/dev/null || date -u -d '24 hours ago' --iso-8601=seconds)
+          {
+            echo "Commits since $since:"
+            git log --since="$since" --format='- [%h](https://github.com/sectersion/tally/commit/%H) %s'
+          } > notes.md
+          cat notes.md
+      - name: Publish nightly
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ls dist | grep -q -- '-unsigned'; then echo "UNSIGNED BUILD. Windows SmartScreen and macOS Gatekeeper will warn." >> notes.md; fi
+          gh release delete nightly --cleanup-tag --yes 2>/dev/null || true
+          gh release create nightly --prerelease --target "$GITHUB_SHA" --title "nightly $VERSION" --notes-file notes.md \
+            dist/SHA256SUMS $(ls dist/tally-* | grep -v '\.SIGNED$')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nightly-set
+          path: dist/*
