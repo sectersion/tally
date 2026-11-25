@@ -28,6 +28,10 @@ See your data: run `tally status`.
 
 Stop it: run `tally stop`.
 
+Start it at every login: run `tally service install`. Remove that
+with `tally service uninstall`; it keeps your data unless you add
+`--purge`.
+
 Remove it: run `tally stop`, run `tally setup --remove` (or
 uninstall the extension or plugin yourself), then delete the Tally
 folder, which holds all your data. Nothing removes it for you.

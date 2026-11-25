@@ -36,3 +36,30 @@ Scratch extension (`activationEvents:["onStartupFinished"]`) packaged with `npx 
 
   `workspace.textDocuments` also held a `chatSessionInput` scheme document. So `scheme === "file"` and not untitled is the right filter; every other scheme seen is excluded by it.
 - Cursor, Windsurf, Antigravity, VSCodium, Trae: not installed (no CLI on PATH), not tested. `--install-extension` / `--list-extensions` on those: UNVERIFIED.
+
+## Idle time per OS (plan 12 Task 1)
+
+Probe: `cargo run -p tally-daemon --example idle_spike` (prints `idle_ms` once a second through `default_platform()`).
+
+### Windows 11 (10.0.26300), `GetLastInputInfo` minus `GetTickCount64`, milliseconds
+
+- OBSERVED 2026-11-24: untouched, the value grew 250, 1250, 2250 ms one second apart; after input it reset to 31 ms. Matches the call's documented meaning.
+- Across a lid-close or hibernate sleep: NOT OBSERVED (needs a human closing the lid for 2 minutes). UNVERIFIED whether the counter resets, keeps counting or jumps. Plan 04's gap rule does not depend on which.
+
+### macOS (Apple silicon / Intel), Ubuntu X11, Fedora GNOME Wayland, Sway (ext-idle-notify-v1)
+
+NOT VERIFIED: no such machine available to the executor. Later tasks (3 to 6) must keep their manual checklists open for each of these; their sleep behaviour and the presence of `ext-idle-notify-v1` / `org.gnome.Mutter.IdleMonitor` are unknown.
+
+### Linux/X11 (plan 12 Task 4)
+
+OBSERVED 2026-11-24 in a `rust:1` Docker container under `xvfb-run`: `X11Platform` (XScreenSaver `QueryInfo`) returns `ms_since_user_input` and the value is at least 1000 after a 1.2 s sleep with no input. NOT VERIFIED on a real X11 desktop (typing resets the counter): needs a human.
+
+### Linux Wayland (plan 12 Task 5)
+
+`MutterPlatform` (zbus, `GetIdletime`) and `ExtIdlePlatform` (ext-idle-notify-v1, 30 s timeout) compile and pass clippy `-D warnings` in a `rust:1` container. NOT VERIFIED on a real GNOME Wayland session, on Sway, or on a compositor with neither (needs `tally status` to print the unsupported line and `tally run` to refuse): no such desktop available. The container has no D-Bus or Wayland, so only `available() == false` paths ran.
+
+### Lid-close checklist (plan 12 Task 6)
+
+Automated: `finalize::tests::sleep_gap_holds_for_every_idle_timer_wake_behaviour` covers an idle timer that resets, keeps counting or jumps on wake (no OS needed).
+Manual, per OS (Windows, macOS, Linux/X11, Linux/GNOME-Wayland): run `tally run`, work 1 minute, close the lid 10 minutes, open, send one prompt; then `sqlite3 <home>/tally.db "select * from coverage"` must show a gap over the sleep and `tally status` must count the prompt under `skipped_claims` (`no_presence_coverage`). Windows hibernate and Linux suspend-to-RAM too if available.
+Status: NOT VERIFIED on all four (needs a human with the hardware).

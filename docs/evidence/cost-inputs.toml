@@ -1,0 +1,42 @@
+# Prices for `tally-evidence cost`. The generator never invents a price: every line is supplied here with a source.
+# An empty `source` prints UNSOURCED in the sheet. Quote a number only after its source is filled in.
+users_monthly = 15488      # PITCH.md "Cost"
+hours_monthly = 109759     # PITCH.md "Cost"
+
+# Fly.io option from docs/cost.md ("Envelope at month 12", prices checked 2026-11-23). Low is month 1 storage, high is month 12.
+[[prices]]
+item = "App host: Fly.io shared-cpu-2x 2 GB machine"
+low_usd = 13.39
+high_usd = 13.39
+source = "docs/cost.md, citing https://docs.fly.io/about/pricing (checked 2026-11-23)"
+
+[[prices]]
+item = "Postgres: Fly.io managed, Basic plan (CPU and RAM of the plan not verified)"
+low_usd = 38.00
+high_usd = 38.00
+source = "docs/cost.md, citing https://docs.fly.io/about/pricing (checked 2026-11-23)"
+
+[[prices]]
+item = "Ledger storage at $0.28/GB (3 GB at month 1, 35 GB at month 12)"
+low_usd = 0.84
+high_usd = 9.80
+source = "docs/cost.md (storage sizes there are estimates; replace with the measured bytes from this sheet)"
+
+# Not priced anywhere in the repo: left UNSOURCED on purpose. PITCH.md gives ranges but no vendor price.
+[[prices]]
+item = "Self-hosted 8B judge, spot GPU, 20 to 40 GPU-hours per month"
+low_usd = 20.00
+high_usd = 80.00
+source = ""
+
+[[prices]]
+item = "Object storage for backups and published ledgers"
+low_usd = 0.00
+high_usd = 5.00
+source = ""
+
+[[prices]]
+item = "Code signing: Windows certificate and Apple Developer Program (see docs/release.md)"
+low_usd = 0.00
+high_usd = 20.00
+source = ""
