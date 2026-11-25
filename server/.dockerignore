@@ -1,0 +1,11 @@
+target/
+crates/tally-scoring/pkg/
+wasm-smoke/
+integrations/
+datamining/
+docs/
+server/node_modules/
+server/wasm/
+.claude/
+.github/
+.git

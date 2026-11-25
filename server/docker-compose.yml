@@ -14,7 +14,7 @@ services:
       retries: 10
 
   server:
-    build: .
+    build: { context: .., dockerfile: server/Dockerfile }
     image: tally-server
     restart: unless-stopped
     depends_on:
