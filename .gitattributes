@@ -6,3 +6,5 @@ crates/tally-daemon/tests/fixtures/gemini-cli/** text eol=lf
 crates/tally-daemon/tests/fixtures/copilot/** text eol=lf
 crates/tally-daemon/tests/fixtures/cursor/** text eol=lf
 crates/tally-daemon/tests/fixtures/heartbeat/** text eol=lf
+integrations/claude-code/hooks/* text eol=lf
+scripts/*.sh text eol=lf

@@ -6,7 +6,7 @@ Tally runs a small HTTP server on loopback that speaks the WakaTime heartbeat AP
 
 ## Setup
 
-1. Enable it in `config.toml`:
+1. It is on by default; set `enabled = false` in `config.toml` to turn it off. The settings:
 
    ```toml
    [heartbeat]

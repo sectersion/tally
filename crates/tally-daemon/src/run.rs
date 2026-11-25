@@ -265,13 +265,15 @@ pub fn run_loop(store: &mut Store, cfg: &Config, home: &Path, stop: &AtomicBool)
     let mut srcs = sources(cfg, home, store)?;
     let mut hks = hooks(cfg, home);
     let mut clock = ClockGuard::new();
-    while !stop.load(Ordering::Relaxed) {
+    // `tally stop` drops <home>/paused; leave by the same path as Ctrl-C.
+    let paused = || home.join("paused").exists();
+    while !stop.load(Ordering::Relaxed) && !paused() {
         let now = clock.now(now_ms(), Instant::now());
         for e in run_once(store, &mut srcs, &mut hks, now).errors {
             eprintln!("{e}");
         }
         let deadline = Instant::now() + Duration::from_secs(effective_interval(cfg.run.interval_secs, cfg.presence.enabled));
-        while !stop.load(Ordering::Relaxed) {
+        while !stop.load(Ordering::Relaxed) && !paused() {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 break;
@@ -417,6 +419,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open(&d.path().join("tally.db")).unwrap();
         let mut cfg = Config::default();
+        cfg.heartbeat.enabled = false;
         cfg.claude_code.enabled = false;
         cfg.copilot.enabled = false;
         cfg.presence.enabled = true;
@@ -442,6 +445,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open(&d.path().join("tally.db")).unwrap();
         let mut cfg = Config::default();
+        cfg.heartbeat.enabled = false;
         cfg.claude_code.enabled = false;
         cfg.presence.enabled = false;
         let mut ids = |c: &Config| sources(c, d.path(), &mut s).unwrap().iter().map(|x| x.id().to_string()).collect::<Vec<_>>();
@@ -500,16 +504,41 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open_in_memory().unwrap();
         let mut cfg = Config::default();
+        cfg.heartbeat.enabled = false;
         cfg.run.interval_secs = 3600;
         cfg.claude_code.enabled = false;
         cfg.presence.enabled = false;
         run_loop(&mut s, &cfg, d.path(), &stop).unwrap();
     }
     #[test]
+    fn the_run_loop_exits_when_paused_appears() {
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let d = tempfile::tempdir().unwrap();
+        let mut s = Store::open_in_memory().unwrap();
+        let mut cfg = Config::default();
+        cfg.heartbeat.enabled = false;
+        cfg.run.interval_secs = 1;
+        cfg.claude_code.enabled = false;
+        cfg.presence.enabled = false;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|sc| {
+            sc.spawn(|| {
+                run_loop(&mut s, &cfg, d.path(), &stop).unwrap();
+                tx.send(()).unwrap();
+            });
+            std::thread::sleep(Duration::from_millis(300));
+            std::fs::write(d.path().join("paused"), "").unwrap();
+            let r = rx.recv_timeout(Duration::from_secs(3));
+            stop.store(true, Ordering::Relaxed); // let the scope end even on failure
+            r.expect("run_loop ignored paused");
+        });
+    }
+    #[test]
     fn a_disabled_publish_hook_makes_no_git_call() {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open_in_memory().unwrap();
         let mut cfg = Config::default();
+        cfg.heartbeat.enabled = false;
         cfg.publish.enabled = false;
         cfg.publish.remote = Some(d.path().join("nope").to_string_lossy().into_owned());
         let mut hks = hooks(&cfg, d.path());

@@ -1,0 +1,36 @@
+Tally measures how long you really work with an AI coding agent. It
+turns your activity into a verified record of time, so the hours you
+report can be checked instead of taken on trust.
+
+What is captured: when you send a prompt, when you approve or
+interrupt the agent, when you run tests, when you commit, and how
+long the keyboard and mouse were idle. Only counts and lengths are
+kept, never the words.
+
+In an editor that sends heartbeats (the Tally VS Code extension, or
+a WakaTime plugin you point at Tally), for files inside a project
+Tally tracks: when you edited the file, how many lines changed and a
+hash of its path. The path itself is dropped, not stored.
+
+What is never captured: prompt text, file contents, commands, window
+titles, web addresses, keystrokes or screenshots.
+
+What can leave this computer: nothing, until you choose it.
+If you link a project to the Tally server, its ledger entries
+(project name, action type, time, seconds, reason codes and numeric
+features such as prompt length) and the ledger head hashes are
+uploaded.
+If you publish, badge data (verified hours per project) is published.
+Planned, not built yet: `tally submit` will send scrubbed session
+text for one submission for review, only when you run it.
+
+See your data: run `tally status`.
+
+Stop it: run `tally stop`.
+
+Remove it: run `tally stop`, run `tally setup --remove` (or
+uninstall the extension or plugin yourself), then delete the Tally
+folder, which holds all your data. Nothing removes it for you.
+
+Questions: ask the person who set up Tally for you, or the Tally
+maintainers at https://github.com/sectersion/tally.
