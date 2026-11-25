@@ -293,8 +293,10 @@ export function createServer(deps: Deps) {
       "/static/:file": {
         GET: async (req) => {
           const f = req.params.file;
-          if (!STATIC.has(f)) return notFound();
-          const file = Bun.file(new URL(`../static/${f}`, import.meta.url));
+          // "fonts/x" arrives URL-encoded in one segment; decode and keep the allowlist strict.
+          const name = decodeURIComponent(f);
+          if (!STATIC.has(name)) return notFound();
+          const file = Bun.file(new URL(`../static/${name}`, import.meta.url));
           if (!(await file.exists())) return notFound();
           return new Response(file, {
             headers: {
