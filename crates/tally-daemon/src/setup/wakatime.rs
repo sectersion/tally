@@ -73,7 +73,11 @@ pub fn write_cfg(path: &Path, api_url: &str, api_key: &str, force: bool) -> CfgR
     if differs && std::fs::copy(path, &bak).is_err() {
         return CfgResult::Conflict { existing_url: "could not write the backup".into() };
     }
-    if let Err(e) = std::fs::write(path, kept.join(nl) + nl) {
+    // Write beside the target and rename over it, so a failed write cannot lose the original.
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tally-tmp");
+    if let Err(e) = std::fs::write(&tmp, kept.join(nl) + nl).and_then(|()| std::fs::rename(&tmp, path)) {
+        let _ = std::fs::remove_file(&tmp);
         return CfgResult::Conflict { existing_url: format!("unwritable: {e}") };
     }
     if differs { CfgResult::BackedUpAndWritten } else { CfgResult::Written }

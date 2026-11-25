@@ -53,10 +53,11 @@ impl Integration for VsCodeFamily {
         if !e.exists(&vsix) {
             return Err(SetupError(format!("{} is missing; pass --extras-dir", vsix.display())));
         }
+        let v = vsix.to_string_lossy();
+        super::check_cmd_args(e.os(), [cli.to_string_lossy().as_ref(), v.as_ref()]).map_err(|x| SetupError(x.to_string()))?;
         if self.installed(e, &cli)? {
             return Ok(Outcome::AlreadyInstalled);
         }
-        let v = vsix.to_string_lossy();
         let o = run_cli(e, &cli, &["--install-extension", &v, "--force"]).map_err(|x| SetupError(format!("{}: {x}", self.cli)))?;
         if o.status.success() {
             Ok(Outcome::Installed)

@@ -216,8 +216,12 @@ enum ProjectCmd {
     },
 }
 
-/// The terminal, not stdin, so a piped install can still ask. `TALLY_NO_TTY` pretends there is none (tests).
+/// The terminal, not stdin, so a piped install can still ask. Test seams: `TALLY_NO_TTY` pretends there is none,
+/// `TALLY_TTY_FILE` reads the answers from a file.
 fn terminal() -> Option<std::io::BufReader<std::fs::File>> {
+    if let Some(f) = std::env::var_os("TALLY_TTY_FILE") {
+        return std::fs::File::open(f).ok().map(std::io::BufReader::new);
+    }
     if std::env::var_os("TALLY_NO_TTY").is_some() {
         return None;
     }
@@ -234,14 +238,15 @@ fn setup(home: &std::path::Path, yes: bool, dry_run: bool, only: Vec<String>, in
         std::process::exit(2);
     }
     let extras_dir = extras_dir.unwrap_or_else(|| std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.join("extras"))).unwrap_or_default());
-    let wakatime_cfg = if include_wakatime && !dry_run && !remove {
-        let cfg = config::load(home)?;
-        let file = cfg.heartbeat.token_file.clone().unwrap_or_else(|| home.join("heartbeat.token"));
-        let key = tally_daemon::heartbeat::server::load_or_create_token(&file).context("reading or creating the heartbeat token")?;
-        Some((format!("http://127.0.0.1:{}/api", cfg.heartbeat.port), key))
-    } else {
-        None
-    };
+    let home_buf = home.to_path_buf();
+    let wakatime_cfg: Option<s::CfgSource> = (include_wakatime && !dry_run && !remove).then(|| {
+        Box::new(move || {
+            let cfg = config::load(&home_buf).ok()?;
+            let file = cfg.heartbeat.token_file.clone().unwrap_or_else(|| home_buf.join("heartbeat.token"));
+            let key = tally_daemon::heartbeat::server::load_or_create_token(&file).ok()?;
+            Some((format!("http://127.0.0.1:{}/api", cfg.heartbeat.port), key))
+        }) as s::CfgSource
+    });
     let o = s::SetupOpts { yes, dry_run, only, include_wakatime, force, remove, extras_dir, wakatime_cfg };
     let mut empty = std::io::empty();
     let input: &mut dyn std::io::BufRead = match tty.as_mut() {

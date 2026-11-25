@@ -111,9 +111,12 @@ pub struct SetupOpts {
     pub force: bool,
     pub remove: bool,
     pub extras_dir: PathBuf,
-    /// `(api_url, api_key)` for `~/.wakatime.cfg`, used only after a JetBrains install.
-    pub wakatime_cfg: Option<(String, String)>,
+    /// Yields `(api_url, api_key)` for `~/.wakatime.cfg`; called only after consent and a JetBrains install (it may create the token file).
+    pub wakatime_cfg: Option<CfgSource>,
 }
+
+/// Produces `(api_url, api_key)`.
+pub type CfgSource = Box<dyn Fn() -> Option<(String, String)>>;
 
 pub struct Row {
     pub name: String,
@@ -128,14 +131,25 @@ pub struct Report {
     pub declined: bool,
 }
 
+/// cmd expands %VAR% even inside quotes and cannot carry a quote or control character: refuse, never escape.
+pub fn check_cmd_args<'a>(os: Os, args: impl IntoIterator<Item = &'a str>) -> std::io::Result<()> {
+    match args.into_iter().find(|a| os == Os::Windows && a.chars().any(|c| c == '%' || c == '"' || c.is_control())) {
+        Some(bad) => Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("refusing to pass {bad:?} through cmd.exe"))),
+        None => Ok(()),
+    }
+}
+
 /// Runs `cli args...`; on Windows through `cmd /S /C` because the CLIs of the VS Code family are `.cmd` files.
 /// The recorded argv is `cmd /S /C <one command line>`; `RealEnv::run` wraps that line in the outer quotes `/S` strips.
 pub fn run_cli(e: &dyn Env, cli: &Path, args: &[&str]) -> std::io::Result<Output> {
     if e.os() != Os::Windows {
         return e.run(cli, &args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
     }
-    let q = |s: &str| if s.contains(' ') { format!("\"{s}\"") } else { s.to_string() };
-    let line = std::iter::once(format!("\"{}\"", cli.display())).chain(args.iter().map(|a| q(a))).collect::<Vec<_>>().join(" ");
+    let cli = cli.display().to_string();
+    check_cmd_args(e.os(), std::iter::once(cli.as_str()).chain(args.iter().copied()))?;
+    // Quote the CLI and everything that is not a plain word, so `&`, `^`, `(` and spaces in paths stay data.
+    let q = |s: &str| if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "._@=-".contains(c)) { s.to_string() } else { format!("\"{s}\"") };
+    let line = std::iter::once(format!("\"{cli}\"")).chain(args.iter().map(|a| q(a))).collect::<Vec<_>>().join(" ");
     e.run(Path::new("cmd"), &["/S".into(), "/C".into(), line])
 }
 
@@ -227,10 +241,10 @@ pub fn run(e: &dyn Env, o: &SetupOpts, input: &mut dyn BufRead, out: &mut dyn Wr
         } else {
             i.install(e, &ctx)
         };
-        if let (Ok(Outcome::Installed | Outcome::AlreadyInstalled), false, Some((u, k))) = (&r, o.remove || o.dry_run, &o.wakatime_cfg) {
-            if i.name() == wakatime::JETBRAINS {
+        if let (Ok(Outcome::Installed | Outcome::AlreadyInstalled), false, Some(f)) = (&r, o.remove || o.dry_run, &o.wakatime_cfg) {
+            if let (true, Some((u, k))) = (i.name() == wakatime::JETBRAINS, f()) {
                 let p = e.home().join(".wakatime.cfg");
-                let _ = writeln!(out, "  {}: {:?}", p.display(), wakatime::write_cfg(&p, u, k, o.force));
+                let _ = writeln!(out, "  {}: {:?}", p.display(), wakatime::write_cfg(&p, &u, &k, o.force));
             }
         }
         let r = r.map_err(|x| x.0);

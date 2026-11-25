@@ -269,3 +269,76 @@ fn remove_uninstalls_and_leaves_the_home_alone() {
     assert_eq!(std::fs::read(home.join("tally.db")).unwrap(), b"not really a database");
     assert_eq!(std::fs::read_dir(&home).unwrap().count(), 1);
 }
+
+fn win_with_extras(extras: &str) -> (Fake, PathBuf) {
+    let mut w = fake(Os::Windows, r"C:\Users\Jo");
+    w.path.insert("code".into(), r"C:\Tools\R&D\code.cmd".into());
+    let extras = PathBuf::from(extras);
+    w.files.get_mut().insert(extras.join("tally-vscode.vsix"));
+    (w, extras)
+}
+
+#[test]
+fn windows_command_line_quotes_every_path_even_without_spaces() {
+    for dir in [r"C:\R&D\extras", r"C:\a^b\extras"] {
+        let (w, extras) = win_with_extras(dir);
+        go(&w, &opts(&extras));
+        let log = w.log.borrow();
+        let line = log.iter().map(|c| c[3].clone()).find(|l| l.contains("--install-extension")).unwrap();
+        println!("{line}");
+        let vsix = extras.join("tally-vscode.vsix").display().to_string();
+        assert_eq!(line, format!("\"C:\\Tools\\R&D\\code.cmd\" --install-extension \"{vsix}\" --force"));
+    }
+}
+
+#[test]
+fn windows_arguments_that_cmd_would_expand_are_refused_and_run_nothing() {
+    let (w, extras) = win_with_extras(r"C:\%PATH%\extras");
+    let r = go(&w, &opts(&extras));
+    assert!(outcome(&r, "VS Code").is_err());
+    assert!(w.log.borrow().is_empty(), "{:?}", w.log.borrow());
+}
+
+#[test]
+fn remove_never_uninstalls_something_that_is_not_listed() {
+    let (mut e, extras) = linux_with_extras();
+    e.path.insert("claude".into(), "claude".into());
+    e.reply = Box::new(|c| if c.ends_with("list --json") { "[]".into() } else { String::new() });
+    go(&e, &SetupOpts { remove: true, ..opts(&extras) });
+    let cmds: Vec<String> = e.log.borrow().iter().map(|c| c.join(" ")).collect();
+    assert!(cmds.iter().all(|c| !c.contains("uninstall") && !c.contains("marketplace remove")), "{cmds:?}");
+}
+
+#[test]
+fn declining_the_prompt_changes_nothing() {
+    let (mut e, extras) = linux_with_extras();
+    e.path.insert("claude".into(), "claude".into());
+    let o = SetupOpts { yes: false, ..opts(&extras) };
+    let r = run(&e, &o, &mut std::io::Cursor::new(b"n\n".to_vec()), &mut std::io::sink()).unwrap();
+    assert!(r.declined && r.rows.is_empty());
+    assert!(e.log.borrow().is_empty());
+}
+
+#[test]
+fn declining_with_include_wakatime_creates_no_token_file() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let answers = t.path().join("answers");
+    std::fs::write(&answers, "n\n").unwrap();
+    let o = tally(&home, &["setup", "--include-wakatime"]).env_remove("TALLY_NO_TTY").env("TALLY_TTY_FILE", &answers).output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(String::from_utf8_lossy(&o.stdout).contains("nothing changed"));
+    assert!(!home.exists(), "home was created");
+}
+
+#[test]
+fn a_failed_cfg_write_leaves_the_original_bytes() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path().join(".wakatime.cfg");
+    let old = "[settings]\napi_url = https://wakatime.com/api\n";
+    std::fs::write(&p, old).unwrap();
+    // The temp file's name is taken by a directory, so writing it fails.
+    std::fs::create_dir(t.path().join(".wakatime.cfg.tally-tmp")).unwrap();
+    assert!(matches!(write_cfg(&p, "http://127.0.0.1:1/api", "k", true), CfgResult::Conflict { .. }));
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), old);
+}
