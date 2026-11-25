@@ -396,8 +396,10 @@ fn main() -> Result<()> {
                 cfg.run.interval_secs = n;
             }
             cfg.validate().map_err(|e| anyhow!(e))?;
-            if cfg.presence.required() && !tally_daemon::presence::supported() {
-                bail!("presence.require is true but presence is not supported on this platform; set [presence] require = false in config.toml");
+            if cfg.presence.required() {
+                if let tally_daemon::presence_select::Choice::Unsupported(why) = tally_daemon::presence_select::current_choice() {
+                    bail!("presence.require is true but presence is not supported here ({why}); set [presence] require = false in config.toml");
+                }
             }
             if once {
                 if dashboard || cfg.run.dashboard {
@@ -560,6 +562,8 @@ fn main() -> Result<()> {
             println!("horizon: {}", s.horizon.map_or("none".to_string(), |h| h.to_string()));
             println!("finalized_through: {}", s.finalized_through.map_or("none".to_string(), |t| t.to_string()));
             println!("last_hash: {}", s.last_hash);
+            let pc = config::load(&home).map(|c| c.presence).unwrap_or_default();
+            println!("{}", tally_daemon::presence_select::presence_line(&tally_daemon::presence_select::current_choice(), &pc));
             if s.blocked_on_presence {
                 println!("blocked: presence required but no presence watermark");
             }

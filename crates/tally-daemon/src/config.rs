@@ -45,10 +45,10 @@ pub struct PresenceConfig {
     pub require: Option<bool>,
 }
 
-#[allow(clippy::derivable_impls)] // default is true on windows, so not derivable there
+#[allow(clippy::derivable_impls)] // default is true on desktop OSes, so not derivable there
 impl Default for PresenceConfig {
     fn default() -> Self {
-        Self { enabled: cfg!(windows), require: None }
+        Self { enabled: cfg!(any(windows, target_os = "macos", target_os = "linux")), require: None }
     }
 }
 

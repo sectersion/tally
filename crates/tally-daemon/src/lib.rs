@@ -15,6 +15,7 @@ pub mod hosting;
 pub mod publish;
 pub mod ingest;
 pub mod presence;
+pub mod presence_select;
 #[cfg(windows)]
 mod presence_win;
 pub mod project;
