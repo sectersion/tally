@@ -429,7 +429,7 @@ export function createServer(deps: Deps) {
         GET: handle("/", async (req, server) => {
           limitPage(req, server);
           const s = await getSession(sql, req);
-          if (!s) return landingPage();
+          if (!s) return await landingPage(sql);
           return homePage(sql, req, s);
         }),
       },
