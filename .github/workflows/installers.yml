@@ -1,0 +1,29 @@
+name: installers
+# Runs each installer against a fake local release: install, install again, bad checksum, uninstall.
+on:
+  push:
+    paths: ["install/**", ".github/workflows/installers.yml"]
+  pull_request:
+    paths: ["install/**", ".github/workflows/installers.yml"]
+  workflow_dispatch:
+
+jobs:
+  unix:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p tally-daemon
+      - run: sh install/test-install.sh target/debug/tally
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p tally-daemon
+      - run: powershell -NoProfile -File install/test-install.ps1 -Bin "$PWD\target\debug\tally.exe"
