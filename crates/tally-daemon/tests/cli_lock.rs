@@ -54,6 +54,8 @@ fn second_run_on_one_home_is_refused() {
         status.is_some_and(|s| !s.success()),
         "second run was not refused"
     );
+    // 75 (EX_TEMPFAIL) lets the service units skip their restart loop: systemd RestartPreventExitStatus=75
+    assert_eq!(status.and_then(|s| s.code()), Some(75), "a held lock must exit 75");
     assert!(err(&o).contains("already"), "{}", err(&o));
 }
 

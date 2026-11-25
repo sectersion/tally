@@ -1,0 +1,4 @@
+{"v":1,"id":"p1","ts":0,"source":"evidence","project":"p","session":"s","kind":"prompt","chars":200,"relevance_pm":400,"novelty_bytes":100}
+{"v":1,"id":"b","ts":0,"source":"evidence","project":"p","session":"s","kind":"agent_busy","end_ts":3600000}
+{"v":1,"id":"i","ts":300000,"source":"evidence","project":"p","session":"s","kind":"idle","end_ts":3300000}
+{"v":1,"id":"p2","ts":3480000,"source":"evidence","project":"p","session":"s","kind":"prompt","chars":200,"relevance_pm":400,"novelty_bytes":100}

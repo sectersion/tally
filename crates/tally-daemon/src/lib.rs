@@ -15,6 +15,16 @@ pub mod hosting;
 pub mod publish;
 pub mod ingest;
 pub mod presence;
+pub mod presence_select;
+pub mod login_browser;
+pub mod service;
+pub mod service_exec;
+mod presence_macos;
+#[cfg(target_os = "linux")]
+mod presence_x11;
+#[cfg(target_os = "linux")]
+mod presence_mutter;
+mod presence_wayland;
 #[cfg(windows)]
 mod presence_win;
 pub mod project;

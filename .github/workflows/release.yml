@@ -1,0 +1,174 @@
+name: release
+# Tag `vX.Y.Z` builds six archives + SHA256SUMS and attaches them to a DRAFT release (the maintainer reads it, then publishes).
+# `workflow_dispatch` is a dry run: artifacts are uploaded to the run, nothing is released.
+# Signing/notarization runs only when its secrets exist (see docs/release.md); otherwise archives are named `-unsigned`.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/tally-daemon/Cargo.toml | head -1)
+          echo "version=$crate" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME}" != "v$crate" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match crate version $crate" >&2
+            exit 1
+          fi
+      - run: sh scripts/test-check-release-artifacts.sh
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, test: true, kind: windows }
+          - { target: aarch64-pc-windows-msvc, os: windows-latest, test: false, kind: windows }
+          - { target: x86_64-apple-darwin, os: macos-latest, test: false, kind: macos }
+          - { target: aarch64-apple-darwin, os: macos-latest, test: true, kind: macos }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, test: true, kind: linux }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest, test: false, kind: linux }
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TARGET: ${{ matrix.target }}
+      # Secrets cannot be read in `if:`; these booleans can.
+      HAS_WIN_CERT: ${{ secrets.WINDOWS_CERT_PFX_BASE64 != '' && secrets.WINDOWS_CERT_PASSWORD != '' }}
+      HAS_APPLE: ${{ secrets.APPLE_CERT_P12_BASE64 != '' && secrets.APPLE_CERT_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' && secrets.APPLE_ID != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dist-${{ matrix.target }}
+
+      - name: Tests (native targets only)
+        if: matrix.test
+        shell: bash
+        run: |
+          if [ "${{ matrix.kind }}" = linux ]; then sudo apt-get update && sudo apt-get install -y xvfb && xvfb-run -a cargo test -p tally-daemon --features test-kit
+          else cargo test -p tally-daemon --features test-kit; fi
+
+      - name: Build (Linux musl via zig)
+        if: matrix.kind == 'linux'
+        run: |
+          pip install ziglang
+          cargo install cargo-zigbuild --locked
+          cargo zigbuild --profile dist -p tally-daemon --target ${{ matrix.target }}
+      - name: Build
+        if: matrix.kind != 'linux'
+        run: cargo build --profile dist -p tally-daemon --target ${{ matrix.target }}
+
+      - name: Sign (Windows Authenticode)
+        if: matrix.kind == 'windows' && env.HAS_WIN_CERT == 'true'
+        shell: pwsh
+        env:
+          PFX_B64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          PFX_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'cert.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_B64))
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1).FullName
+          $exe = "target/${{ matrix.target }}/dist/tally.exe"
+          & $signtool sign /f $pfx /p $env:PFX_PASSWORD /tr http://timestamp.digicert.com /td sha256 /fd sha256 $exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & $signtool verify /pa $exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Remove-Item $pfx
+          'signed' | Set-Content signed.marker
+
+      - name: Sign and notarize (macOS)
+        if: matrix.kind == 'macos' && env.HAS_APPLE == 'true'
+        env:
+          CERT_B64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          kc="$RUNNER_TEMP/build.keychain"
+          echo "$CERT_B64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p tmp "$kc"
+          security set-keychain-settings -lut 3600 "$kc"
+          security unlock-keychain -p tmp "$kc"
+          security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k tmp "$kc"
+          security list-keychains -d user -s "$kc" login.keychain
+          bin="target/${{ matrix.target }}/dist/tally"
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$bin"
+          ditto -c -k --keepParent "$bin" "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait
+          codesign --verify --strict "$bin"   # a bare binary cannot be stapled; Gatekeeper checks notarization online on first launch
+          echo signed > signed.marker
+
+      - name: Package
+        shell: bash
+        run: |
+          signed=""
+          [ -f signed.marker ] || signed="-unsigned"
+          name="tally-$VERSION-$TARGET$signed"
+          mkdir -p out stage
+          if [ "${{ matrix.kind }}" = windows ]; then
+            cp "target/$TARGET/dist/tally.exe" LICENSE stage/
+            (cd stage && 7z a -tzip "../out/$name.zip" tally.exe LICENSE >/dev/null)
+            archive="$name.zip"
+          else
+            cp "target/$TARGET/dist/tally" LICENSE stage/
+            tar -C stage -czf "out/$name.tar.gz" tally LICENSE
+            archive="$name.tar.gz"
+          fi
+          [ -z "$signed" ] && : > "out/$archive.SIGNED"
+          ls -la out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum tally-* | grep -v '\.SIGNED$' > SHA256SUMS
+          cat SHA256SUMS
+      - name: Check the artifact set
+        run: sh scripts/check-release-artifacts.sh dist "$VERSION"
+      - name: Draft release (tags only)
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="Draft: read SHA256SUMS before publishing."
+          if ls dist | grep -q -- '-unsigned'; then notes="UNSIGNED BUILD. Windows SmartScreen and macOS Gatekeeper will warn. $notes"; fi
+          gh release create "$GITHUB_REF_NAME" --draft --title "$GITHUB_REF_NAME" --notes "$notes" dist/SHA256SUMS $(ls dist/tally-* | grep -v '\.SIGNED$')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-set
+          path: dist/*

@@ -24,18 +24,20 @@ impl Platform for UnsupportedPlatform {
     }
 }
 
-#[cfg(windows)]
-pub fn default_platform() -> impl Platform {
-    crate::presence_win::WindowsPlatform
-}
-#[cfg(not(windows))]
-pub fn default_platform() -> impl Platform {
-    UnsupportedPlatform
+impl Platform for Box<dyn Platform> {
+    fn idle_ms(&mut self) -> Result<u64, PlatformError> {
+        (**self).idle_ms()
+    }
 }
 
-/// Whether `default_platform()` can sample idle time.
+pub fn default_platform() -> Box<dyn Platform> {
+    let c = crate::presence_select::current_choice();
+    crate::presence_select::platform_for(&c)
+}
+
+/// Whether this desktop has an idle source.
 pub fn supported() -> bool {
-    cfg!(windows)
+    !matches!(crate::presence_select::current_choice(), crate::presence_select::Choice::Unsupported(_))
 }
 
 pub struct PresenceSource<P: Platform> {
