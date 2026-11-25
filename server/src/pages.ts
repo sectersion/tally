@@ -231,9 +231,14 @@ export const streakOf = (days: string[]): number => {
   const n = new Date();
   const today = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
   const ms = (d: string) => new Date(`${d}T00:00:00Z`).getTime();
-  if (ms(days[0]!) < today - 86_400_000) return 0;
+  const first = days[0];
+  if (first === undefined || ms(first) < today - 86_400_000) return 0;
   let c = 0;
-  for (let t = ms(days[0]!); days[c] && ms(days[c]!) === t; c++, t -= 86_400_000);
+  for (
+    let t = ms(first);
+    days[c] !== undefined && ms(days[c] as string) === t;
+    c++, t -= 86_400_000
+  );
   return c;
 };
 
