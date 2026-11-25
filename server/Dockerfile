@@ -3,7 +3,7 @@ FROM oven/bun:1.4.5 AS build
 RUN apt-get update && apt-get install -y --no-install-recommends curl build-essential && rm -rf /var/lib/apt/lists/* \
   && curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
 ENV PATH="/root/.cargo/bin:${PATH}"
-RUN rustup target add wasm32-unknown-unknown
+RUN cargo install wasm-pack --locked && rustup target add wasm32-unknown-unknown
 WORKDIR /repo
 COPY . .
 WORKDIR /repo/server
