@@ -114,6 +114,27 @@ test("project page shows averages, a trend chart and weekly totals", async () =>
   expect(t).not.toMatch(/\sstyle\s*=/i);
 });
 
+test("project page has no daily table; a pie shows verified vs unverified", async () => {
+  const { id, name } = await projectWithOwner();
+  await ledger(id, [{ ts: NOW, v: 3600, u: 1800 }]);
+  const t = await (await get(`/p/${name}`)).text();
+  expect(t).not.toContain("Daily verified time");
+  expect(t).not.toContain("<table"); // the daily rows are gone; pushes keep <thead> tables
+  expect(t).toContain('id="pie"');
+  expect(t).toContain('role="img"');
+});
+
+test("docs page renders from /docs and links from the project page", async () => {
+  const { name } = await projectWithOwner();
+  const r = await get("/docs");
+  expect(r.status).toBe(200);
+  const t = await r.text();
+  expect(t).toContain("Getting started");
+  expect(t).toContain("How verified time is computed");
+  const p = await (await get(`/p/${name}`)).text();
+  expect(p).toContain('href="/docs"');
+});
+
 test("zero-hour project page renders", async () => {
   // Review Focus 6
   const { name } = await projectWithOwner();
@@ -132,7 +153,8 @@ test("unverified shown separately and never added", async () => {
   const t = await (await get(`/p/${name}`)).text();
   expect(t).toContain("1.0 h verified");
   expect(t).toContain("30 min unverified (not counted)");
-  expect(t).not.toContain("1.5 h");
+  expect(t).not.toMatch(/\b1\.5 h\b(?= verified)/); // never shows the sum as verified
+  expect(t).toContain('1.5 h claimed'); // the pie labels it honestly
 });
 
 test("under a minute of unverified time is <1 min, never 0 min", async () => {
@@ -168,7 +190,7 @@ test("numbers section carries the live hooks", async () => {
   const t = await (await get(`/p/${name}`)).text();
   expect(t).toContain(`<section id="numbers" data-project="${id}" data-seq="${change_seq}">`);
   expect(t).toContain('<script src="/static/live.js" defer></script>');
-  expect(t).toMatch(/<progress max="\d+" value="60">/);
+  expect(t).toMatch(/<svg id="pie"/);
   expect(t).toContain(`![tracked with Tally](${ORIGIN}/badge/${name}.svg)`);
 });
 

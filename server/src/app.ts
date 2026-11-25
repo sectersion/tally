@@ -34,6 +34,7 @@ import { createLive, type Live } from "./live.ts";
 import { log } from "./log.ts";
 import {
   deleteAccount,
+  docsPage,
   homePage,
   landingPage,
   profilePage,
@@ -430,6 +431,12 @@ export function createServer(deps: Deps) {
         GET: handle("/u/:handle", async (req, server) => {
           limitPage(req, server);
           return profilePage(sql, req.params.handle, await getSession(sql, req));
+        }),
+      },
+      "/docs": {
+        GET: handle("/docs", async (req, server) => {
+          limitPage(req, server);
+          return docsPage();
         }),
       },
       "/p/:owner/:name": {

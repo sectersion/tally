@@ -264,14 +264,26 @@ async function projectMain(
       ([week, s]) =>
         html`<tr><td>week of ${week}</td><td>${formatHours(s)}</td></tr>`,
     );
-  const days = daily.length
-    ? html`<table><thead><tr><th>Day (UTC)</th><th>Verified</th><th></th><th>Unverified (not counted)</th></tr></thead><tbody>${daily
-        .toReversed()
-        .map(
-          (d) =>
-            html`<tr><td>${d.day}</td><td>${formatHours(d.verified_s)}</td><td><progress max="${max}" value="${d.verified_s}">${formatHours(d.verified_s)}</progress></td><td>${d.unverified_s > 0 ? formatMinutes(d.unverified_s) : ""}</td></tr>`,
-        )}</tbody></table>`
-    : html`<p>No verified time in the last 90 days.</p>`;
+  const days = none;
+  // ponytail: pie is a two-slice svg (verified vs unverified); a legend can come later
+  const pie = (() => {
+    const total = hours.verified_s + hours.unverified_s;
+    if (total <= 0) return none;
+    const r = 42, c = 2 * Math.PI * r;
+    const vf = hours.verified_s / total;
+    // pie slices start at 12 o'clock, sweep clockwise
+    const pieSlice = (from: number, frac: number, cls: string) => {
+      if (frac >= 0.999) return html`<circle class="${cls}" cx="60" cy="60" r="${r}" />`;
+      if (frac <= 0.0001) return none;
+      const a = (from - 0.25) * 2 * Math.PI;
+      const x = 60 + r * Math.cos(a), y = 60 + r * Math.sin(a);
+      const a2 = (from + frac - 0.25) * 2 * Math.PI;
+      const x2 = 60 + r * Math.cos(a2), y2 = 60 + r * Math.sin(a2);
+      const large = frac > 0.5 ? 1 : 0;
+      return html`<path class="${cls}" d="M60 60 L${x.toFixed(2)} ${y.toFixed(2)} A${r} ${r} 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)} Z" />`;
+    };
+    return html`<svg id="pie" viewBox="0 0 120 120" width="120" height="120" role="img" aria-label="${formatHours(hours.verified_s)} verified of ${formatHours(total)} claimed">${pieSlice(0, vf, "pv")}${pieSlice(vf, 1 - vf, "pu")}</svg>`;
+  })();
   const pushes = windows.length
     ? html`<table><thead><tr><th>Commit</th><th>Received by server</th><th>Claimed</th><th>Ledger-claimed verified time since the previous push</th><th>Note</th></tr></thead><tbody>${windows.map(
         (w) =>
@@ -293,8 +305,8 @@ async function projectMain(
     (r: { at: Date }) =>
       html`<p>GitHub App removed on ${r.at.toISOString().slice(0, 10)}; pushes after this are not witnessed</p>`,
   )}${mine ? html`<p><a href="/p/${p.public_name}/settings">Project settings</a></p>` : none}
-${numbers}${trend}
-<h2>Daily verified time</h2>${
+${numbers}${trend}${pie}
+${
     active.length ? html`<p class="avg">avg ${formatHours(avg)}/day over ${active.length} active days</p>` : none
   }${days}
 ${
@@ -304,7 +316,24 @@ ${
   }
 <h2>Witnessed pushes</h2><p>Each row sums the verified time of ledger entries timestamped after the previous witnessed push and at or before this one. The push times are the server's; the ledger times are claimed by the device. It says nothing about effort. Times marked claimed come from the push and are not checked.</p>${pushes}
 <p>Ledger head last committed ${head?.t ? utc(head.t) : "never"}</p>
-<h2>Badge</h2><pre>${`![tracked with Tally](${cfg.publicBaseUrl}/badge/${p.public_name}.svg)`}</pre>`;
+<h2>Badge</h2><pre>${`![tracked with Tally](${cfg.publicBaseUrl}/badge/${p.public_name}.svg)`}</pre>
+<p><a href="/docs">Read the docs</a></p>`;
+}
+
+/** GET /docs: plain prose; one page, no nav. */
+export function docsPage(): Response {
+  return page(
+    "Docs",
+    html`<h1>Docs</h1>
+<h2>Getting started</h2><p>Tally tracks the time you spend building with AI and proves it.</p>
+<ol><li>Sign in with Hack Club and create a project.</li><li>Run <code>tally</code> in your terminal and follow the device-link prompt.</li><li>Link a GitHub repo on the project settings page so pushes are witnessed.</li></ol>
+<p>Your project page shows your hours publicly; nothing else about you does.</p>
+<h2>How verified time is computed</h2><p>The daemon watches your AI sessions and logs <em>decisions</em> — a prompt, an approval, an edit that survives, a test run. Each decision claims the minutes you were present, capped by substance: watching the agent generate earns nothing, a real fail→pass loop earns more.</p>
+<p>Every entry is sealed into a hash chain. The server re-derives the totals with the same public ruleset before it counts them, so the numbers on this page are reproducible by anyone.</p>
+<h2>What is recorded</h2><p>Project names, action types, timestamps, seconds claimed, hashes. That is the whole list. No keystrokes, no screenshots, no window titles, no URLs. Session text leaves your machine only when you run <code>tally submit</code>, goes to the judge, and is deleted after review.</p>
+<h2>Witnessed pushes</h2><p>When you link a GitHub repo, Tally records each push it sees and attributes the ledger entries between pushes to the commit window. A push that arrives more than 7 days after its claimed time is noted, not hidden.</p>
+<h2>Badge</h2><p>Every project page has a badge URL — paste it into your README:</p><pre>![tracked with Tally](https://&lt;server&gt;/badge/&lt;handle&gt;/&lt;name&gt;.svg)</pre>`,
+  );
 }
 
 export async function projectPage(
