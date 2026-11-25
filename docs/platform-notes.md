@@ -49,3 +49,7 @@ Probe: `cargo run -p tally-daemon --example idle_spike` (prints `idle_ms` once a
 ### macOS (Apple silicon / Intel), Ubuntu X11, Fedora GNOME Wayland, Sway (ext-idle-notify-v1)
 
 NOT VERIFIED: no such machine available to the executor. Later tasks (3 to 6) must keep their manual checklists open for each of these; their sleep behaviour and the presence of `ext-idle-notify-v1` / `org.gnome.Mutter.IdleMonitor` are unknown.
+
+### Linux/X11 (plan 12 Task 4)
+
+OBSERVED 2026-11-24 in a `rust:1` Docker container under `xvfb-run`: `X11Platform` (XScreenSaver `QueryInfo`) returns `ms_since_user_input` and the value is at least 1000 after a 1.2 s sleep with no input. NOT VERIFIED on a real X11 desktop (typing resets the counter): needs a human.

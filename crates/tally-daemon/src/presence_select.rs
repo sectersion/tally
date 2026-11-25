@@ -89,6 +89,8 @@ pub fn platform_for(c: &Choice) -> Box<dyn Platform> {
         Choice::Windows => Box::new(crate::presence_win::WindowsPlatform),
         #[cfg(target_os = "macos")]
         Choice::MacOs => Box::new(crate::presence_macos::MacPlatform),
+        #[cfg(target_os = "linux")]
+        Choice::X11 => Box::new(crate::presence_x11::X11Platform::new()),
         _ => Box::new(UnsupportedPlatform),
     }
 }
