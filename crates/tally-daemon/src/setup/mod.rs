@@ -203,6 +203,10 @@ fn ask(input: &mut dyn BufRead, out: &mut dyn Write, q: &str) -> String {
 }
 
 pub fn run(e: &dyn Env, o: &SetupOpts, input: &mut dyn BufRead, out: &mut dyn Write) -> Result<Report, SetupError> {
+    let names: Vec<String> = registry(true).iter().map(|i| i.name()).collect();
+    if let Some(bad) = o.only.iter().find(|n| !names.iter().any(|k| key(k) == key(n))) {
+        return Err(SetupError(format!("unknown --only name {bad:?}; valid names: {}", names.iter().map(|n| n.to_lowercase().replace("vs code", "vscode").replace(' ', "-")).collect::<Vec<_>>().join(", "))));
+    }
     let _ = writeln!(out, "{}", crate::ensure::EXPLAINER);
     let mut rep = Report { rows: vec![], declined: false };
     if !o.yes && !o.dry_run && !ask(input, out, "Continue? [y/N] ").to_lowercase().starts_with('y') {

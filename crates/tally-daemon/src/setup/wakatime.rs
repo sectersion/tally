@@ -18,10 +18,14 @@ fn setting(line: &str) -> Option<(&str, &str)> {
     Some((k.trim(), v.trim()))
 }
 
-/// Line-based edit of `[settings]`: every other line and section is kept. Never overwrites a different `api_url`
-/// or `api_key` without `force`, and then keeps the old file as `<path>.tally-bak`. An unreadable or unwritable
+/// Line-based edit of `[settings]`: every other line and section is kept. An existing file that is not already ours
+/// is never touched without `force`, and then the old file is kept as `<path>.tally-bak`. A symlink is never replaced. An unreadable or unwritable
 /// file is reported as a `Conflict` whose `existing_url` carries the error; nothing is changed.
 pub fn write_cfg(path: &Path, api_url: &str, api_key: &str, force: bool) -> CfgResult {
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return CfgResult::Conflict { existing_url: "is a symlink; not replaced, edit the link target by hand".into() };
+    }
+    let existed = path.exists();
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -56,9 +60,9 @@ pub fn write_cfg(path: &Path, api_url: &str, api_key: &str, force: bool) -> CfgR
     if url == Some(api_url) && key == Some(api_key) {
         return CfgResult::AlreadyOurs;
     }
-    let differs = url.is_some_and(|u| u != api_url) || key.is_some_and(|k| k != api_key);
-    if differs && !force {
-        return CfgResult::Conflict { existing_url: url.unwrap_or_default().to_string() };
+    // A file Tally did not create is left alone unless `force`, whether or not it has api_url/api_key.
+    if existed && !force {
+        return CfgResult::Conflict { existing_url: url.map_or_else(|| "an existing file without api_url; use --force to replace it (a backup is kept)".to_string(), str::to_string) };
     }
     let ours = [format!("api_url = {api_url}"), format!("api_key = {api_key}")];
     match head {
@@ -70,7 +74,7 @@ pub fn write_cfg(path: &Path, api_url: &str, api_key: &str, force: bool) -> CfgR
     }
     let mut bak = path.as_os_str().to_owned();
     bak.push(".tally-bak");
-    if differs && std::fs::copy(path, &bak).is_err() {
+    if existed && std::fs::copy(path, &bak).is_err() {
         return CfgResult::Conflict { existing_url: "could not write the backup".into() };
     }
     // Write beside the target and rename over it, so a failed write cannot lose the original.
@@ -80,7 +84,7 @@ pub fn write_cfg(path: &Path, api_url: &str, api_key: &str, force: bool) -> CfgR
         let _ = std::fs::remove_file(&tmp);
         return CfgResult::Conflict { existing_url: format!("unwritable: {e}") };
     }
-    if differs { CfgResult::BackedUpAndWritten } else { CfgResult::Written }
+    if existed { CfgResult::BackedUpAndWritten } else { CfgResult::Written }
 }
 
 pub struct JetBrains;

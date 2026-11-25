@@ -203,7 +203,7 @@ fn tally(home: &Path, args: &[&str]) -> Command {
 fn no_terminal_and_no_yes_changes_nothing() {
     let t = tempfile::tempdir().unwrap();
     let home = t.path().join("home");
-    let o = tally(&home, &["setup", "--only", "none"]).output().unwrap();
+    let o = tally(&home, &["setup", "--only", "jetbrains"]).output().unwrap();
     assert_eq!(o.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&o.stderr).contains("--yes"));
     assert!(!home.exists());
@@ -233,7 +233,7 @@ fn setup_ends_with_a_running_daemon_and_a_201_test_heartbeat() {
     std::fs::create_dir_all(&home).unwrap();
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     std::fs::write(home.join("config.toml"), format!("[heartbeat]\nport = {port}\n")).unwrap();
-    let o = tally(&home, &["setup", "--yes", "--only", "none"]).output().unwrap();
+    let o = tally(&home, &["setup", "--yes", "--only", "jetbrains"]).output().unwrap();
     let up = daemon_running(&home);
     kill_daemons(&home);
     let out = String::from_utf8_lossy(&o.stdout);
@@ -264,7 +264,7 @@ fn remove_uninstalls_and_leaves_the_home_alone() {
     let home = t.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(home.join("tally.db"), b"not really a database").unwrap();
-    let o = tally(&home, &["setup", "--remove", "--yes", "--only", "none"]).output().unwrap();
+    let o = tally(&home, &["setup", "--remove", "--yes", "--only", "jetbrains"]).output().unwrap();
     assert!(o.status.success());
     assert_eq!(std::fs::read(home.join("tally.db")).unwrap(), b"not really a database");
     assert_eq!(std::fs::read_dir(&home).unwrap().count(), 1);
@@ -341,4 +341,66 @@ fn a_failed_cfg_write_leaves_the_original_bytes() {
     std::fs::create_dir(t.path().join(".wakatime.cfg.tally-tmp")).unwrap();
     assert!(matches!(write_cfg(&p, "http://127.0.0.1:1/api", "k", true), CfgResult::Conflict { .. }));
     assert_eq!(std::fs::read_to_string(&p).unwrap(), old);
+}
+
+#[test]
+fn an_existing_cfg_without_our_keys_is_left_alone_unless_forced_and_then_backed_up() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path().join(".wakatime.cfg");
+    let (url, key) = ("http://127.0.0.1:25930/api", "k");
+    let old = "[settings]
+debug = true
+";
+    std::fs::write(&p, old).unwrap();
+    match write_cfg(&p, url, key, false) {
+        CfgResult::Conflict { existing_url } => assert!(existing_url.contains("--force"), "{existing_url}"),
+        r => panic!("{r:?}"),
+    }
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), old);
+    assert_eq!(write_cfg(&p, url, key, true), CfgResult::BackedUpAndWritten);
+    assert_eq!(std::fs::read_to_string(t.path().join(".wakatime.cfg.tally-bak")).unwrap(), old);
+    assert!(std::fs::read_to_string(&p).unwrap().contains("debug = true"));
+}
+
+#[test]
+fn a_symlinked_cfg_is_never_replaced() {
+    let t = tempfile::tempdir().unwrap();
+    let real = t.path().join("real.cfg");
+    std::fs::write(&real, "[settings]
+").unwrap();
+    let link = t.path().join(".wakatime.cfg");
+    #[cfg(unix)]
+    let ok = std::os::unix::fs::symlink(&real, &link).is_ok();
+    #[cfg(windows)]
+    let ok = std::os::windows::fs::symlink_file(&real, &link).is_ok(); // needs developer mode or admin
+    if !ok {
+        eprintln!("skipped: cannot create a symlink here");
+        return;
+    }
+    assert!(matches!(write_cfg(&link, "http://127.0.0.1:1/api", "k", true), CfgResult::Conflict { .. }));
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::read_to_string(&real).unwrap(), "[settings]
+");
+}
+
+#[test]
+fn an_unknown_only_name_is_an_error_listing_the_valid_names() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let o = tally(&home, &["setup", "--yes", "--only", "vscod"]).output().unwrap();
+    assert!(!o.status.success());
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("vscod") && err.contains("vscode") && err.contains("claude-code") && err.contains("jetbrains"), "{err}");
+    assert!(!home.exists());
+}
+
+#[test]
+fn is_loopback_url_accepts_and_rejects_like_the_extension() {
+    use tally_daemon::setup::is_loopback_url as f;
+    for u in ["http://127.0.0.1:25930/api", "http://localhost:1/api", "http://[::1]:1/api"] {
+        assert!(f(u), "{u}");
+    }
+    for u in ["https://127.0.0.1:1/api", "http://example.com", "http://127.0.0.1.evil.com", "http://localhost.evil.com", "http://user@evil.com", "http://127.0.0.1@evil.com", "not a url", ""] {
+        assert!(!f(u), "{u}");
+    }
 }
