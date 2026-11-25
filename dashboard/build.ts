@@ -4,3 +4,4 @@ const r = await Bun.build({ entrypoints: ["src/main.tsx"], outdir: "dist", minif
 if (!r.success) { console.error(r.logs.join("\n")); process.exit(1); }
 copyFileSync("src/styles.css", "dist/styles.css");
 copyFileSync("index.html", "dist/index.html");
+copyFileSync("favicon.png", "dist/favicon.png");
