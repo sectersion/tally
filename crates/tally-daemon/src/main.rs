@@ -13,7 +13,7 @@ use tally_daemon::project::{project_for_dir, register_git_project_matched};
 use tally_daemon::testrun::test_run_event;
 
 #[derive(Parser)]
-#[command(name = "tally")]
+#[command(name = "tally", version)]
 struct Cli {
     /// Data directory (default: the local data dir, `tally` inside it).
     #[arg(long, global = true, env = "TALLY_HOME")]

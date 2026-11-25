@@ -584,3 +584,11 @@ fn doctor_exits_zero_on_fresh_home_corrupt_config_and_corrupt_db() {
     assert!(o.status.success(), "corrupt: {}", err(&o));
     assert!(err(&o).contains("config.toml") && err(&o).contains("tally.db"), "{}", err(&o));
 }
+
+#[test]
+fn version_flag_prints_name_and_crate_version() {
+    let o = Command::new(env!("CARGO_BIN_EXE_tally")).arg("--version").output().unwrap();
+    assert!(o.status.success());
+    let s = out(&o);
+    assert!(s.starts_with("tally ") && s.contains(env!("CARGO_PKG_VERSION")), "got {s:?}");
+}
