@@ -490,6 +490,36 @@ mod tests {
         assert_eq!(skipped_ids(&s), ["e1900"]);
         assert!(tally_scoring::verify_chain(&s.ledger().unwrap(), GENESIS_HASH).is_ok());
     }
+    /// Whatever the OS idle timer does across sleep (reset, keep counting, jump), the gap is decided by sample times:
+    /// no coverage inside it, no idle span reaching into it, and the claim that spans it is skipped.
+    #[test] fn sleep_gap_holds_for_every_idle_timer_wake_behaviour() {
+        const B: i64 = 1_000_000;
+        let t = |secs: i64| B + secs * 1000;
+        // (name, idle_ms reported by the first sample after waking)
+        for (name, wake_idle) in [("reset", 0u64), ("kept_counting", 600_000), ("jumped", 36_000_000)] {
+            let mut s = guarded();
+            s.append_events(&[edit("e200", t(200)), edit("e950", t(950))]).unwrap();
+            let mut tracker = crate::presence::Tracker::default();
+            let mut spans = vec![];
+            let samples = (0..=300).step_by(5).chain((900..=1400).step_by(5));
+            for secs in samples {
+                let idle = if secs == 900 { wake_idle } else { 0 };
+                let st = tracker.step(t(secs), idle);
+                spans.extend(st.closed.clone());
+                s.extend_coverage(&st.coverage).unwrap();
+                s.set_watermark(PRESENCE_SOURCE, st.watermark).unwrap();
+                finalize(&mut s).unwrap();
+            }
+            for (a, b) in s.coverage().unwrap() {
+                assert!(b <= t(300) || a >= t(900), "{name}: coverage ({a}, {b}) crosses the sleep");
+            }
+            for sp in &spans {
+                assert!(!(sp.end > t(300) && sp.start < t(900)), "{name}: idle span {sp:?} reaches into the sleep");
+            }
+            assert_eq!(ids(&s), ["e200"], "{name}");
+            assert_eq!(skipped_ids(&s), ["e950"], "{name}");
+        }
+    }
     #[test] fn status_reports_skipped_claims() {
         let mut s = guarded();
         gap_case(&mut s);

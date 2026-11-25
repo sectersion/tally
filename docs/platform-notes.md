@@ -57,3 +57,9 @@ OBSERVED 2026-11-24 in a `rust:1` Docker container under `xvfb-run`: `X11Platfor
 ### Linux Wayland (plan 12 Task 5)
 
 `MutterPlatform` (zbus, `GetIdletime`) and `ExtIdlePlatform` (ext-idle-notify-v1, 30 s timeout) compile and pass clippy `-D warnings` in a `rust:1` container. NOT VERIFIED on a real GNOME Wayland session, on Sway, or on a compositor with neither (needs `tally status` to print the unsupported line and `tally run` to refuse): no such desktop available. The container has no D-Bus or Wayland, so only `available() == false` paths ran.
+
+### Lid-close checklist (plan 12 Task 6)
+
+Automated: `finalize::tests::sleep_gap_holds_for_every_idle_timer_wake_behaviour` covers an idle timer that resets, keeps counting or jumps on wake (no OS needed).
+Manual, per OS (Windows, macOS, Linux/X11, Linux/GNOME-Wayland): run `tally run`, work 1 minute, close the lid 10 minutes, open, send one prompt; then `sqlite3 <home>/tally.db "select * from coverage"` must show a gap over the sleep and `tally status` must count the prompt under `skipped_claims` (`no_presence_coverage`). Windows hibernate and Linux suspend-to-RAM too if available.
+Status: NOT VERIFIED on all four (needs a human with the hardware).
