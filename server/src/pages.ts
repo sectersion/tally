@@ -238,6 +238,32 @@ async function projectMain(
       : none
   }</section>`;
   const max = Math.max(1, ...daily.map((d) => d.verified_s));
+  const active = daily.filter((d) => d.verified_s > 0);
+  const avg = active.length ? active.reduce((n, d) => n + d.verified_s, 0) / active.length : 0;
+  // ponytail: bar heights are a linear map to a 60px svg; a log or area chart can come later
+  const trend = active.length
+    ? html`<svg id="trend" viewBox="0 0 ${active.length * 4} 60" preserveAspectRatio="none" width="100%" height="60" role="img" aria-label="Verified hours per day over the last 90 days">${active.map(
+        (d, i) =>
+          html`<rect x="${i * 4}" y="${60 - Math.round((d.verified_s / max) * 60)}" width="3" height="${Math.max(1, Math.round((d.verified_s / max) * 60))}" />`,
+      )}</svg>`
+    : none;
+  const weeks = new Map<string, number>();
+  for (const d of daily) {
+    // ISO week of the day (UTC): Monday-start, same as to_char('YYYY-IW')
+    const [y, m, dd] = d.day.split("-").map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, dd));
+    const dow = (dt.getUTCDay() + 6) % 7;
+    const wk = new Date(dt);
+    wk.setUTCDate(dt.getUTCDate() - dow);
+    const key = wk.toISOString().slice(0, 10);
+    weeks.set(key, (weeks.get(key) ?? 0) + d.verified_s);
+  }
+  const weekRows = [...weeks.entries()]
+    .toSorted((a, b) => (a[0] < b[0] ? 1 : -1))
+    .map(
+      ([week, s]) =>
+        html`<tr><td>week of ${week}</td><td>${formatHours(s)}</td></tr>`,
+    );
   const days = daily.length
     ? html`<table><thead><tr><th>Day (UTC)</th><th>Verified</th><th></th><th>Unverified (not counted)</th></tr></thead><tbody>${daily
         .toReversed()
@@ -259,7 +285,7 @@ async function projectMain(
 
   return html`<h1>${p.public_name}</h1>${
     !p.public ? html`<p role="note">This project is private: only you can see this page.</p>` : none
-  }${numbers}${p.profile_public && p.handle ? html`<p>Owner: <a href="/u/${p.handle}">${p.handle}</a></p>` : none}${
+  }${p.profile_public && p.handle ? html`<p>Owner: <a href="/u/${p.handle}">${p.handle}</a></p>` : none}${
     repo
       ? html`<p>GitHub: <a href="https://github.com/${repo.full_name}">${repo.full_name}</a>${was && was !== repo.full_name ? ` (was ${was})` : ""}</p>`
       : none
@@ -267,7 +293,15 @@ async function projectMain(
     (r: { at: Date }) =>
       html`<p>GitHub App removed on ${r.at.toISOString().slice(0, 10)}; pushes after this are not witnessed</p>`,
   )}${mine ? html`<p><a href="/p/${p.public_name}/settings">Project settings</a></p>` : none}
-<h2>Daily verified time</h2>${days}
+${numbers}${trend}
+<h2>Daily verified time</h2>${
+    active.length ? html`<p class="avg">avg ${formatHours(avg)}/day over ${active.length} active days</p>` : none
+  }${days}
+${
+    weekRows.length > 1
+      ? html`<h2>Verified by week</h2><table><thead><tr><th>Week</th><th>Verified</th></tr></thead><tbody>${weekRows}</tbody></table>`
+      : none
+  }
 <h2>Witnessed pushes</h2><p>Each row sums the verified time of ledger entries timestamped after the previous witnessed push and at or before this one. The push times are the server's; the ledger times are claimed by the device. It says nothing about effort. Times marked claimed come from the push and are not checked.</p>${pushes}
 <p>Ledger head last committed ${head?.t ? utc(head.t) : "never"}</p>
 <h2>Badge</h2><pre>${`![tracked with Tally](${cfg.publicBaseUrl}/badge/${p.public_name}.svg)`}</pre>`;

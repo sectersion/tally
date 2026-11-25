@@ -98,6 +98,22 @@ async function linkRepo(projectId: string, fullName: string) {
 }
 const NOW = Date.now();
 
+test("project page shows averages, a trend chart and weekly totals", async () => {
+  const { id, name } = await projectWithOwner();
+  await ledger(id, [
+    { ts: NOW - 2 * 86_400_000, v: 3600 },
+    { ts: NOW - 86_400_000, v: 7200 },
+    { ts: NOW, v: 5400 },
+  ]);
+  const t = await (await get(`/p/${name}`)).text();
+  expect(t).toContain("avg 1.5 h/day");
+  expect(t).toContain('id="trend"');
+  expect(t).toContain("<svg");
+  expect(t).not.toContain("Verified by week"); // one week is not a summary
+  expect(t).toContain("4.5 h verified");
+  expect(t).not.toMatch(/\sstyle\s*=/i);
+});
+
 test("zero-hour project page renders", async () => {
   // Review Focus 6
   const { name } = await projectWithOwner();
