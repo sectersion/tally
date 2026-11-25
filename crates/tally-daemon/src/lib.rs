@@ -17,6 +17,7 @@ pub mod ingest;
 pub mod presence;
 pub mod presence_select;
 pub mod service;
+pub mod service_exec;
 mod presence_macos;
 #[cfg(target_os = "linux")]
 mod presence_x11;

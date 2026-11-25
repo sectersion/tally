@@ -7,7 +7,8 @@
 use std::path::{Path, PathBuf};
 
 pub const LABEL: &str = "dev.tally.agent";
-pub const TASK_NAME: &str = "Tally";
+/// Not plain "Tally": a hand-made task of that name may exist, and `/Create /F` would replace it.
+pub const TASK_NAME: &str = "dev.tally.agent";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServiceSpec {

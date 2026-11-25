@@ -127,6 +127,11 @@ enum Cmd {
     Stop,
     /// Undo `tally stop` and start the daemon if it is not running.
     Start,
+    /// Run Tally in the background from login: install, start, stop, status, uninstall.
+    Service {
+        #[command(subcommand)]
+        cmd: ServiceCmd,
+    },
     Status {
         /// One line: verified time, unverified minutes and whether the daemon is running (for status bars).
         #[arg(long)]
@@ -203,6 +208,32 @@ enum HookCmd {
 static STOP: AtomicBool = AtomicBool::new(false);
 
 #[derive(Subcommand)]
+enum ServiceCmd {
+    /// Register the background service for this user and start it.
+    Install {
+        /// Allow an executable inside a cargo `target` directory.
+        #[arg(long)]
+        force: bool,
+    },
+    Start,
+    Stop,
+    /// Installed? Running? Exit code 0 always, unless `--quiet` (0 running, 3 stopped, 4 not installed).
+    Status {
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Remove the service registration. The data directory is kept unless `--purge`.
+    Uninstall {
+        /// Also delete the data directory (store, ledger, config). Cannot be undone.
+        #[arg(long)]
+        purge: bool,
+        /// Do not ask for confirmation with `--purge`.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum ProjectCmd {
     Add {
         path: PathBuf,
@@ -265,6 +296,88 @@ fn setup(home: &std::path::Path, yes: bool, dry_run: bool, only: Vec<String>, in
     }
     if rep.rows.iter().any(|r| matches!(r.outcome, Some(Err(_)))) {
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn service_spec(home: &std::path::Path) -> Result<tally_daemon::service::ServiceSpec> {
+    let exe = std::env::current_exe().and_then(std::fs::canonicalize).context("finding this program")?;
+    // canonicalize gives `\\?\C:\...` on Windows, which Task Scheduler does not accept as a command
+    let exe = PathBuf::from(exe.to_string_lossy().trim_start_matches(r"\\?\"));
+    let user_home = dirs::home_dir().ok_or_else(|| anyhow!("no home directory"))?;
+    #[cfg(unix)]
+    let uid = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(&user_home)?);
+    #[cfg(not(unix))]
+    let uid = 0;
+    let unit_dir = match std::env::consts::OS {
+        "macos" => user_home.join("Library/LaunchAgents"),
+        "windows" => std::env::temp_dir(),
+        _ => dirs::config_dir().unwrap_or_else(|| user_home.join(".config")).join("systemd/user"),
+    };
+    let user = format!("{}\\{}", std::env::var("USERDOMAIN").unwrap_or_default(), std::env::var("USERNAME").unwrap_or_default());
+    Ok(tally_daemon::service::ServiceSpec { exe, home: home.to_path_buf(), label: tally_daemon::service::LABEL, unit_dir, uid, user })
+}
+
+fn service_cmd(home: &std::path::Path, cmd: &ServiceCmd) -> Result<()> {
+    use std::io::IsTerminal;
+    use tally_daemon::service::{plan, Action};
+    use tally_daemon::service_exec::{execute, is_build_path, uninstall, RealRunner, ServiceState};
+    let os = std::env::consts::OS;
+    let s = service_spec(home)?;
+    let mut r = RealRunner;
+    let run = |a: Action, r: &mut RealRunner| execute(&plan(os, a, &s), r).map_err(|e| anyhow!("{e}"));
+    match cmd {
+        ServiceCmd::Install { force } => {
+            if is_build_path(&s.exe) && !force {
+                bail!("{} is inside a cargo target directory; install the program first or pass --force", s.exe.display());
+            }
+            std::fs::create_dir_all(home).with_context(|| format!("creating {}", home.display()))?;
+            for l in run(Action::Install, &mut r)? {
+                println!("{l}");
+            }
+            println!("installed; data stays in {}", home.display());
+        }
+        ServiceCmd::Start => drop(run(Action::Start, &mut r)?),
+        ServiceCmd::Stop => drop(run(Action::Stop, &mut r)?),
+        ServiceCmd::Status { quiet } => {
+            let installed = execute(&plan(os, Action::Status, &s), &mut r).is_ok();
+            let st = ServiceState::of(installed, tally_daemon::ensure::daemon_running(home));
+            println!("service: {}", st.text());
+            let db = home.join("tally.db");
+            if db.exists() {
+                if let Ok(store) = Store::open(&db) {
+                    println!("ledger entries: {}", store.ledger().map_or(0, |l| l.len()));
+                }
+            }
+            let pc = config::load(home).map(|c| c.presence).unwrap_or_default();
+            println!("{}", tally_daemon::presence_select::presence_line(&tally_daemon::presence_select::current_choice(), &pc));
+            if *quiet {
+                std::process::exit(st.exit_code());
+            }
+        }
+        ServiceCmd::Uninstall { purge, yes } => {
+            if *purge {
+                let db = home.join("tally.db");
+                let n = if db.exists() { Store::open(&db).ok().and_then(|s| s.ledger().ok()).map_or(0, |l| l.len()) } else { 0 };
+                eprintln!("--purge will delete {} (ledger entries: {n})", home.display());
+            }
+            let confirm = || {
+                if !std::io::stdin().is_terminal() {
+                    return false;
+                }
+                eprint!("type delete to confirm: ");
+                let mut l = String::new();
+                std::io::stdin().read_line(&mut l).is_ok() && l.trim() == "delete"
+            };
+            let up = || tally_daemon::ensure::daemon_running(home);
+            let opts = tally_daemon::service_exec::PurgeOpts { yes: *yes, confirm: &confirm, daemon_running: &up, wait: std::time::Duration::from_secs(20) };
+            for l in uninstall(os, &s, &mut r, purge.then_some(&opts)).map_err(|e| anyhow!("{e}"))? {
+                println!("{l}");
+            }
+            if os == "windows" && !*purge {
+                println!("a running daemon keeps running until `tally stop`");
+            }
+        }
     }
     Ok(())
 }
@@ -336,6 +449,9 @@ fn main() -> Result<()> {
     }
     if let Cmd::Setup { yes, dry_run, only, include_wakatime, force, remove, extras_dir } = cli.cmd {
         return setup(&home, yes, dry_run, only, include_wakatime, force, remove, extras_dir);
+    }
+    if let Cmd::Service { cmd } = &cli.cmd {
+        return service_cmd(&home, cmd);
     }
     if let Cmd::Stop = &cli.cmd {
         // Always exits 0; the pause marker is written even with no daemon so a later session does not start one.
@@ -440,7 +556,7 @@ fn main() -> Result<()> {
             let s = ingest_ndjson(&mut store, &text, &source, watermark)?;
             println!("added {}, duplicates {}", s.added, s.duplicates);
         }
-        Cmd::HeartbeatConfig | Cmd::Ensure { .. } | Cmd::Setup { .. } | Cmd::Stop | Cmd::Start => unreachable!("handled before the store opens"),
+        Cmd::HeartbeatConfig | Cmd::Ensure { .. } | Cmd::Setup { .. } | Cmd::Stop | Cmd::Start | Cmd::Service { .. } => unreachable!("handled before the store opens"),
         Cmd::Hook { .. } | Cmd::Doctor { .. } | Cmd::VerifyPublished { .. } | Cmd::Login { .. } | Cmd::Logout { .. } | Cmd::Dashboard { .. } => {
             unreachable!("handled before the store is opened")
         }
