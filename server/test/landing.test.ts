@@ -18,9 +18,10 @@ describe("landingPage", () => {
     const body = await (await landingPage()).text();
     expect(body).toContain('<div class="console" aria-hidden="true">');
   });
-  test("CSP adds font-src only on landing", () => {
+  test("CSP self-hosts fonts on all pages; landing equals base CSP", () => {
     const res = landingPage();
-    expect(res.headers.get("content-security-policy")).toBe(CSP + " font-src 'self'");
+    expect(res.headers.get("content-security-policy")).toBe(CSP);
+    expect(CSP).toContain("font-src 'self'");
     expect(res.headers.get("content-type")).toContain("text/html");
   });
 });

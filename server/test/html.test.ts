@@ -36,7 +36,7 @@ test("page sets CSP, nosniff, referrer policy and cache by viewer", async () => 
   const anon = page("t", html`<p>x</p>`);
   const csp = anon.headers.get("content-security-policy") ?? "";
   expect(csp).toBe(
-    "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+    "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
   );
   expect(anon.headers.get("x-content-type-options")).toBe("nosniff");
   expect(anon.headers.get("referrer-policy")).toBe("same-origin");
