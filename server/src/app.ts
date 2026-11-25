@@ -34,7 +34,9 @@ import { createLive, type Live } from "./live.ts";
 import { log } from "./log.ts";
 import {
   deleteAccount,
+  docsPage,
   homePage,
+  landingPage,
   profilePage,
   projectFragment,
   projectPage,
@@ -109,7 +111,13 @@ const redirect = (to: string, setCookies: string[] = []) => {
   return new Response(null, { status: 303, headers });
 };
 
-const STATIC = new Set(["style.css", "live.js", "review.js"]);
+const STATIC = new Set([
+  "style.css",
+  "live.js",
+  "review.js",
+  "landing.css",
+  "fonts/inter-var.woff2",
+]);
 
 /** Same-site paths only. Printable ASCII: browsers strip tabs/newlines from URLs, so "/\t/evil" would become "//evil". */
 const safeReturn = (rt: string | null) => (rt && /^\/(?![/\\])[\x21-\x7e]*$/.test(rt) ? rt : "/");
@@ -292,8 +300,10 @@ export function createServer(deps: Deps) {
       "/static/:file": {
         GET: async (req) => {
           const f = req.params.file;
-          if (!STATIC.has(f)) return notFound();
-          const file = Bun.file(new URL(`../static/${f}`, import.meta.url));
+          // "fonts/x" arrives URL-encoded in one segment; decode and keep the allowlist strict.
+          const name = decodeURIComponent(f);
+          if (!STATIC.has(name)) return notFound();
+          const file = Bun.file(new URL(`../static/${name}`, import.meta.url));
           if (!(await file.exists())) return notFound();
           return new Response(file, {
             headers: {
@@ -418,13 +428,21 @@ export function createServer(deps: Deps) {
       "/": {
         GET: handle("/", async (req, server) => {
           limitPage(req, server);
-          return homePage(sql, req, await getSession(sql, req));
+          const s = await getSession(sql, req);
+          if (!s) return landingPage();
+          return homePage(sql, req, s);
         }),
       },
       "/u/:handle": {
         GET: handle("/u/:handle", async (req, server) => {
           limitPage(req, server);
           return profilePage(sql, req.params.handle, await getSession(sql, req));
+        }),
+      },
+      "/docs": {
+        GET: handle("/docs", async (req, server) => {
+          limitPage(req, server);
+          return docsPage();
         }),
       },
       "/p/:owner/:name": {

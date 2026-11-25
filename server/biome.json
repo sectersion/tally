@@ -33,5 +33,26 @@
         "organizeImports": "on"
       }
     }
+  },
+  "overrides": [
+    {
+      "includes": ["static/style.css", "static/landing.css", "tailwind/landing.src.css"],
+      "formatter": {
+        "enabled": false
+      },
+      "linter": {
+        "rules": {
+          "recommended": false
+        }
+      },
+      "assist": {
+        "enabled": false
+      }
+    }
+  ],
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
+    }
   }
 }

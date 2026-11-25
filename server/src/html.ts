@@ -38,7 +38,9 @@ export const formatMinutes = (s: number) =>
   s > 0 && s < 60 ? "<1 min" : `${Math.floor(s / 60)} min`;
 
 export const CSP =
-  "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+  "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+/** Same as CSP now that all pages self-host Inter; kept as its own name for landing-specific additions. */
+export const LandingCSP = CSP;
 
 /** The signed-in viewer, if any. handle is null until they pick one. */
 export type Viewer = { handle: string | null; csrf: string };
