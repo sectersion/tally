@@ -1,5 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tally_daemon::config;
@@ -13,7 +14,7 @@ use tally_daemon::project::{project_for_dir, register_git_project_matched};
 use tally_daemon::testrun::test_run_event;
 
 #[derive(Parser)]
-#[command(name = "tally")]
+#[command(name = "tally", version)]
 struct Cli {
     /// Data directory (default: the local data dir, `tally` inside it).
     #[arg(long, global = true, env = "TALLY_HOME")]
@@ -52,7 +53,8 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Store a project's device token (read from stdin) in the data dir; the token is never printed.
+    /// Store a project's device token (one line from stdin) in the data dir. tally never prints the token,
+    /// but a terminal echoes what you type: pipe it in (`... | tally login`) instead of typing or pasting it.
     ///
     /// With `--server`, also writes `[sync] enabled = true` into config.toml unless it already has a `[sync]` table.
     Login {
@@ -106,7 +108,49 @@ enum Cmd {
         #[arg(long)]
         to: Option<String>,
     },
-    Status,
+    /// For extensions: record consent once, register the repo (local only) and start the daemon if it is not running. Always exits 0.
+    Ensure {
+        #[arg(long)]
+        client: Option<String>,
+        #[arg(long)]
+        register_cwd: Option<PathBuf>,
+        /// Print `{"systemMessage": ...}` with the explainer on the first run (for host hooks).
+        #[arg(long)]
+        hook_json: bool,
+    },
+    /// Detect editors and clients on this machine and install their Tally extensions.
+    Setup {
+        /// Do not ask anything.
+        #[arg(long)]
+        yes: bool,
+        /// Print what would be done; run and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Only these integrations (for example `vscode`, `cursor`, `claude-code`); repeatable.
+        #[arg(long)]
+        only: Vec<String>,
+        /// Also set up stock WakaTime plugins (JetBrains) and `~/.wakatime.cfg`.
+        #[arg(long)]
+        include_wakatime: bool,
+        /// Replace an existing `~/.wakatime.cfg` (the old one is kept as `.wakatime.cfg.tally-bak`).
+        #[arg(long)]
+        force: bool,
+        /// Uninstall the extensions; the data directory is never touched.
+        #[arg(long)]
+        remove: bool,
+        /// Where `tally-vscode.vsix` is (default: `extras` next to this program).
+        #[arg(long)]
+        extras_dir: Option<PathBuf>,
+    },
+    /// Pause tally: stop the daemon and keep `ensure` from starting it until `tally start`.
+    Stop,
+    /// Undo `tally stop` and start the daemon if it is not running.
+    Start,
+    Status {
+        /// One line: verified time, unverified minutes and whether the daemon is running (for status bars).
+        #[arg(long)]
+        brief: bool,
+    },
     Verify,
     /// Check downloaded published chain files; needs no home or database. Exits 1 if any fail.
     VerifyPublished {
@@ -121,6 +165,24 @@ enum Cmd {
         /// Do one tick, print the result and exit.
         #[arg(long)]
         once: bool,
+        /// Also serve the local dashboard (or set `[run] dashboard = true`).
+        #[arg(long)]
+        dashboard: bool,
+        /// Overrides `run.dashboard_port`.
+        #[arg(long)]
+        dashboard_port: Option<u16>,
+    },
+    /// Serve the local dashboard on 127.0.0.1 until interrupted.
+    ///
+    /// Reads only the local store. There is no authentication: other users of this machine can
+    /// reach it. It shows event kinds, times and numbers only, never text.
+    Dashboard {
+        /// 0 picks a free port.
+        #[arg(long, default_value_t = 7878)]
+        port: u16,
+        /// Do not open the browser (also: TALLY_NO_OPEN).
+        #[arg(long)]
+        no_open: bool,
     },
     /// Hooks that other tools and shells call.
     ///
@@ -205,12 +267,81 @@ unknown_ids: {ids}", o.ruleset, o.claims.len(), o.verified_s, o.unverified_s);
     Ok(())
 }
 
+/// The terminal, not stdin, so a piped install can still ask. Test seams: `TALLY_NO_TTY` pretends there is none,
+/// `TALLY_TTY_FILE` reads the answers from a file.
+fn terminal() -> Option<std::io::BufReader<std::fs::File>> {
+    if let Some(f) = std::env::var_os("TALLY_TTY_FILE") {
+        return std::fs::File::open(f).ok().map(std::io::BufReader::new);
+    }
+    if std::env::var_os("TALLY_NO_TTY").is_some() {
+        return None;
+    }
+    let p = if cfg!(windows) { "CONIN$" } else { "/dev/tty" };
+    std::fs::File::open(p).ok().map(std::io::BufReader::new)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn setup(home: &std::path::Path, yes: bool, dry_run: bool, only: Vec<String>, include_wakatime: bool, force: bool, remove: bool, extras_dir: Option<PathBuf>) -> Result<()> {
+    use tally_daemon::setup as s;
+    let mut tty = if yes || dry_run { None } else { terminal() };
+    if !yes && !dry_run && tty.is_none() {
+        eprintln!("run `tally setup` in a terminal, or add --yes");
+        std::process::exit(2);
+    }
+    let extras_dir = extras_dir.unwrap_or_else(|| std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.join("extras"))).unwrap_or_default());
+    let home_buf = home.to_path_buf();
+    let wakatime_cfg: Option<s::CfgSource> = (include_wakatime && !dry_run && !remove).then(|| {
+        Box::new(move || {
+            let cfg = config::load(&home_buf).ok()?;
+            let file = cfg.heartbeat.token_file.clone().unwrap_or_else(|| home_buf.join("heartbeat.token"));
+            let key = tally_daemon::heartbeat::server::load_or_create_token(&file).ok()?;
+            Some((format!("http://127.0.0.1:{}/api", cfg.heartbeat.port), key))
+        }) as s::CfgSource
+    });
+    let o = s::SetupOpts { yes, dry_run, only, include_wakatime, force, remove, extras_dir, wakatime_cfg };
+    let mut empty = std::io::empty();
+    let input: &mut dyn std::io::BufRead = match tty.as_mut() {
+        Some(t) => t,
+        None => &mut std::io::BufReader::new(&mut empty),
+    };
+    let mut out = std::io::stdout();
+    let rep = s::run(&s::RealEnv, &o, input, &mut out)?;
+    if rep.declined {
+        println!("nothing changed");
+        return Ok(());
+    }
+    if !dry_run && !remove {
+        s::finish(home, &mut out)?;
+    }
+    if rep.rows.iter().any(|r| matches!(r.outcome, Some(Err(_)))) {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn daemon_state(home: &std::path::Path) -> &'static str {
+    if home.join("paused").exists() {
+        "paused"
+    } else if tally_daemon::ensure::daemon_running(home) {
+        "running"
+    } else {
+        "stopped"
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     if let Cmd::VerifyPublished { files } = &cli.cmd {
         let mut failed = false;
         for f in files {
-            let text = std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?;
+            let text = match std::fs::read_to_string(f) {
+                Ok(t) => t,
+                Err(e) => {
+                    println!("{}: FAIL reading file: {e}", f.display());
+                    failed = true;
+                    continue;
+                }
+            };
             match tally_daemon::published::verify_published_json(&text) {
                 Ok(c) => {
                     let h = tally_daemon::published::hours_message(c.verified_s);
@@ -239,9 +370,42 @@ fn main() -> Result<()> {
     if let Cmd::Login { server_id, server } = &cli.cmd {
         return login(&home, server_id, server.as_deref());
     }
+    if let Cmd::Dashboard { port, no_open } = &cli.cmd {
+        return dashboard(&db, *port, *no_open);
+    }
     if let Cmd::Logout { server_id } = &cli.cmd {
         let gone = tally_daemon::credentials::delete_token(&home, server_id).context("updating the token file")?;
         println!("{}", if gone { "logged out" } else { "not logged in" });
+        return Ok(());
+    }
+    if let Cmd::Ensure { client, register_cwd, hook_json } = cli.cmd {
+        let o = tally_daemon::ensure::EnsureOpts { client, register_cwd };
+        let r = tally_daemon::ensure::ensure(&home, &o, &tally_daemon::ensure::spawn_daemon);
+        if let (true, Some(n)) = (hook_json, r.notice) {
+            // `ensure` always exits 0, also when the host closed our stdout (println! would panic).
+            let _ = writeln!(std::io::stdout(), "{}", serde_json::json!({ "systemMessage": n }));
+        }
+        return Ok(());
+    }
+    if let Cmd::Setup { yes, dry_run, only, include_wakatime, force, remove, extras_dir } = cli.cmd {
+        return setup(&home, yes, dry_run, only, include_wakatime, force, remove, extras_dir);
+    }
+    if let Cmd::Stop = &cli.cmd {
+        // Always exits 0; the pause marker is written even with no daemon so a later session does not start one.
+        let _ = std::fs::create_dir_all(&home).and_then(|()| std::fs::write(home.join("paused"), ""));
+        let was_running = tally_daemon::ensure::daemon_running(&home);
+        let t0 = std::time::Instant::now();
+        while tally_daemon::ensure::daemon_running(&home) && t0.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        println!("{}", if !was_running { "not running" } else if tally_daemon::ensure::daemon_running(&home) { "still running" } else { "stopped" });
+        return Ok(());
+    }
+    if let Cmd::Start = &cli.cmd {
+        let _ = std::fs::remove_file(home.join("paused"));
+        let o = tally_daemon::ensure::EnsureOpts { client: None, register_cwd: None };
+        let r = tally_daemon::ensure::ensure(&home, &o, &tally_daemon::ensure::spawn_daemon);
+        println!("{}", if r.started { "started" } else { "already running" });
         return Ok(());
     }
     if let Cmd::HeartbeatConfig = &cli.cmd {
@@ -251,15 +415,25 @@ fn main() -> Result<()> {
         let token = tally_daemon::heartbeat::server::load_or_create_token(&file).context("reading or creating the heartbeat token")?;
         println!("api_url = http://127.0.0.1:{}/api", cfg.heartbeat.port);
         println!("api_key = {token}");
+        // wakatime-cli sends at most one request per 120 s by default and queues the rest, so heartbeats would
+        // arrive minutes late (OBSERVED, v2.28.4); this key turns that off for this config file.
+        println!("heartbeat_rate_limit_seconds = 0");
         println!("# put these under [settings] in ~/.wakatime.cfg; token file: {}", file.display());
         if !cfg.heartbeat.enabled {
-            println!("# note: set [heartbeat] enabled = true in config.toml; the server is off by default");
+            println!("# note: set [heartbeat] enabled = true in config.toml; the server is off");
         }
         return Ok(());
     }
     if let Cmd::Repair { new_epoch: true, .. } = &cli.cmd {
         eprintln!("{}", tally_daemon::repair::NEW_EPOCH_UNAVAILABLE);
         std::process::exit(1);
+    }
+    if let Cmd::Doctor { json } = cli.cmd {
+        return doctor(&home, &db, json);
+    }
+    if let (Cmd::Status { brief: true }, false) = (&cli.cmd, db.exists()) {
+        println!("Tally: 0h 0m verified (0 unverified min), daemon {}", daemon_state(&home));
+        return Ok(());
     }
     if matches!(cli.cmd, Cmd::Ingest { .. } | Cmd::Project { .. } | Cmd::Run { .. }) {
         std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
@@ -269,7 +443,7 @@ fn main() -> Result<()> {
     let mut store = Store::open(&db)?;
 
     match cli.cmd {
-        Cmd::Run { interval_secs, once } => {
+        Cmd::Run { interval_secs, once, dashboard, dashboard_port } => {
             let mut cfg = config::load(&home)?;
             if let Some(n) = interval_secs {
                 cfg.run.interval_secs = n;
@@ -279,6 +453,9 @@ fn main() -> Result<()> {
                 bail!("presence.require is true but presence is not supported on this platform; set [presence] require = false in config.toml");
             }
             if once {
+                if dashboard || cfg.run.dashboard {
+                    eprintln!("note: --once does not serve the dashboard; use `tally dashboard` or `tally run --dashboard`");
+                }
                 let mut srcs = sources(&cfg, &home, &mut store)?;
                 let r = run_once(&mut store, &mut srcs, &mut hooks(&cfg, &home), now_ms());
                 for e in &r.errors {
@@ -287,8 +464,25 @@ fn main() -> Result<()> {
                 let (skipped, total, prov) = r.finalized.map_or((0, 0, 0), |f| (f.skipped, f.final_total, f.provisional));
                 println!("added {}, duplicates {}, skipped {skipped}, final {total}, provisional {prov}", r.added, r.duplicates);
             } else {
+                // Advisory lock for the life of the process; the OS releases it on exit or crash.
+                let lock = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(home.join("run.lock"))?;
+                if lock.try_lock().is_err() {
+                    bail!("another `tally run` is already using {}", home.display());
+                }
                 ctrlc::set_handler(|| STOP.store(true, Ordering::Relaxed)).context("installing the Ctrl-C handler")?;
-                run_loop(&mut store, &cfg, &home, &STOP)?;
+                let dash = if dashboard || cfg.run.dashboard {
+                    let port = dashboard_port.unwrap_or(cfg.run.dashboard_port);
+                    let s = tally_daemon::serve::DashboardServer::start(db.clone(), port).map_err(|e| anyhow!("dashboard: port {port} is in use; use --dashboard-port 0 ({e})"))?;
+                    println!("Tally dashboard: http://127.0.0.1:{}/", s.addr.port());
+                    Some(s)
+                } else {
+                    None
+                };
+                let r = run_loop(&mut store, &cfg, &home, &STOP);
+                if let Some(s) = dash {
+                    s.stop();
+                }
+                r?;
                 println!("stopped");
             }
         }
@@ -297,18 +491,29 @@ fn main() -> Result<()> {
             let s = ingest_ndjson(&mut store, &text, &source, watermark)?;
             println!("added {}, duplicates {}", s.added, s.duplicates);
         }
-        Cmd::HeartbeatConfig => unreachable!("handled before the store opens"),
+        Cmd::HeartbeatConfig | Cmd::Ensure { .. } | Cmd::Setup { .. } | Cmd::Stop | Cmd::Start => unreachable!("handled before the store opens"),
         Cmd::Submit { project, from, to } => submit(&home, &mut store, &project, from.as_deref(), to.as_deref())?,
-        Cmd::Hook { .. } | Cmd::VerifyPublished { .. } | Cmd::Rederive { .. } | Cmd::Login { .. } | Cmd::Logout { .. } => {
+        Cmd::Hook { .. } | Cmd::Doctor { .. } | Cmd::VerifyPublished { .. } | Cmd::Rederive { .. } | Cmd::Login { .. } | Cmd::Logout { .. } | Cmd::Dashboard { .. } => {
             unreachable!("handled before the store is opened")
         }
         Cmd::Project { cmd: ProjectCmd::Add { path, name } } => {
             if let Some(n) = name.as_deref().filter(|n| !tally_daemon::published::valid_public_name(n)) {
                 bail!("invalid project name {n:?}; use owner/repo (letters, digits, '.', '_', '-')");
             }
+            if let Some(n) = name.as_deref() {
+                if tally_daemon::published::case_collides(&store, n)? {
+                    bail!("project name {n:?} differs only by case from an existing project name");
+                }
+            }
+            let before = store.project_names()?;
             let (id, adopted) = register_git_project_matched(&mut store, &path, name.as_deref())?;
             if let Some((name, via)) = adopted {
                 eprintln!("matched {name} via {via}");
+            }
+            if let (Some(old), Some(n)) = (before.get(&id), &name) {
+                if old != n {
+                    eprintln!("note: project was named {old}; renamed to {n}");
+                }
             }
             println!("{id}");
         }
@@ -334,8 +539,12 @@ fn main() -> Result<()> {
             };
             let ids = store.server_ids()?;
             let mut failed = false;
+            let mut reported = std::collections::HashSet::new();
             let mut fail = |p: &str, e: &tally_daemon::sync::SyncError| {
                 failed = true;
+                if !reported.insert(p.to_string()) {
+                    return; // one line per project, not one per phase
+                }
                 let id = ids.get(p).and_then(|v| v.first()).map_or("<id>", String::as_str);
                 match e {
                     tally_daemon::sync::SyncError::NotLoggedIn { .. } => eprintln!("{p}: no device token; run tally login --server-id {id}"),
@@ -371,6 +580,7 @@ fn main() -> Result<()> {
                 Diagnosis::ScoringChanged { index, field, .. } => Some(format!("scoring changed at entry {index} ({field}): uploads are stopped; repair needs plan 10 Task 1b merged and server epoch support; see docs/superpowers/plans/2026-11-23-07-daemon-sync.md Task 9")),
                 Diagnosis::Diverged { index, field, .. } => Some(format!("ledger diverged at entry {index} ({field}): uploads are stopped for all projects; a new epoch needs tally repair --new-epoch (not yet available: needs plan 10 Task 1b merged and server epoch support)")),
                 Diagnosis::Published(e) => Some(format!("published chains are inconsistent: {e}")),
+                Diagnosis::RulesetChanged { ledger, current } => Some(format!("ledger was written under ruleset {ledger} but this build scores with {current}: it cannot be checked against a fresh derivation")),
             };
             if let Some(m) = msg {
                 println!("{m}");
@@ -388,23 +598,13 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Doctor { json } => {
-            let cfg = config::load(&home)?;
-            let mut configured: Vec<&str> = if cfg.claude_code.enabled { vec!["claude-code"] } else { vec![] };
-            if cfg.heartbeat.enabled {
-                configured.push("heartbeat");
-            }
-            let r = tally_daemon::doctor::report(&store, &configured)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&r)?);
-            } else {
-                for h in &r {
-                    println!("{}", tally_daemon::doctor::line(h));
-                }
-            }
-        }
-        Cmd::Status => {
+        Cmd::Status { brief } => {
             let s = status(&store)?;
+            if brief {
+                let d = daemon_state(&home);
+                println!("Tally: {}h {}m verified ({} unverified min), daemon {d}", s.verified_s / 3600, s.verified_s % 3600 / 60, s.unverified_s / 60);
+                return Ok(());
+            }
             println!("events: {}", s.events);
             println!("final_claims: {}", s.final_claims);
             println!("provisional_claims: {}", s.provisional_claims);
@@ -426,6 +626,64 @@ fn main() -> Result<()> {
             }
             Err(e) => return Err(e.into()),
         },
+    }
+    Ok(())
+}
+
+/// Serves the dashboard until Ctrl-C. A missing database is fine: the page shows onboarding.
+fn dashboard(db: &std::path::Path, port: u16, no_open: bool) -> Result<()> {
+    if db.exists() {
+        Store::open(db)?; // runs the schema and index migration once; the server itself is read-only
+    }
+    let s = tally_daemon::serve::DashboardServer::start(db.to_path_buf(), port)
+        .map_err(|e| anyhow!("port {port} is in use; run tally dashboard --port 0 to pick a free one ({e})"))?;
+    let url = format!("http://127.0.0.1:{}/", s.addr.port());
+    println!("Tally dashboard: {url}");
+    if !no_open && std::env::var_os("TALLY_NO_OPEN").is_none_or(|v| v.is_empty()) {
+        let _ = open_browser(&url); // the URL is printed either way
+    }
+    ctrlc::set_handler(|| STOP.store(true, Ordering::Relaxed)).context("installing the Ctrl-C handler")?;
+    while !STOP.load(Ordering::Relaxed) {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    s.stop();
+    Ok(())
+}
+
+fn open_browser(url: &str) -> std::io::Result<std::process::Child> {
+    #[cfg(windows)]
+    return std::process::Command::new("cmd").args(["/c", "start", "", url]).spawn();
+    #[cfg(target_os = "macos")]
+    return std::process::Command::new("open").arg(url).spawn();
+    #[cfg(not(any(windows, target_os = "macos")))]
+    return std::process::Command::new("xdg-open").arg(url).spawn();
+}
+
+/// Never fails on a bad home: a missing/corrupt db or config.toml is reported on stderr and diagnosed with empty state.
+fn doctor(home: &std::path::Path, db: &std::path::Path, json: bool) -> Result<()> {
+    let cfg = config::load(home).unwrap_or_else(|e| {
+        eprintln!("config.toml: {e:#}; using defaults");
+        Default::default()
+    });
+    let store = if db.exists() { Store::open(db).map_err(|e| eprintln!("{}: {e}; reporting without it", db.display())).ok() } else { None };
+    let store = match store {
+        Some(s) => s,
+        None => Store::open_in_memory()?,
+    };
+    let mut configured: Vec<&str> = if cfg.claude_code.enabled { vec!["claude-code"] } else { vec![] };
+    if cfg.copilot.enabled {
+        configured.push("copilot");
+    }
+    if cfg.heartbeat.enabled {
+        configured.push("heartbeat");
+    }
+    let r = tally_daemon::doctor::report(&store, &configured, chrono::Utc::now().timestamp_millis())?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&r)?);
+    } else {
+        for h in &r {
+            println!("{}", tally_daemon::doctor::line(h));
+        }
     }
     Ok(())
 }
@@ -457,15 +715,19 @@ fn login(home: &std::path::Path, server_id: &str, server: Option<&str>) -> Resul
         }
     }
     // One GET /head when a server is configured. The token stays stored either way.
+    let mut verified = true;
     if let Some(url) = config::load(home)?.sync.server {
         let token = tally_daemon::credentials::load_tokens(home).context("reading device tokens")?.remove(server_id).unwrap_or_default();
         match tally_daemon::api::Api::new(&url, &token).head(server_id, tally_scoring::RULESET_VERSION) {
             Ok(_) => {}
             Err(tally_daemon::api::ApiError::Unauthorized) => bail!("device token rejected by {url}; the token is stored, run tally login again with a valid one"),
-            Err(e) => eprintln!("warning: could not check the token with {url}: {e}"),
+            Err(e) => {
+                verified = false;
+                eprintln!("warning: could not check the token with {url}: {e}");
+            }
         }
     }
-    println!("logged in");
+    println!("{}", if verified { "logged in" } else { "token stored, not verified" });
     Ok(())
 }
 

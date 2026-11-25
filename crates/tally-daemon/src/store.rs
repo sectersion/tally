@@ -3,6 +3,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::time::Duration;
 use std::collections::BTreeMap;
 use std::path::Path;
+pub use crate::snapshot::Snapshot;
 use tally_scoring::{Event, LedgerEntry, GENESIS_HASH};
 
 #[derive(thiserror::Error, Debug)]
@@ -43,17 +44,11 @@ pub struct PublishedRow {
     pub entry: LedgerEntry,
 }
 
-/// One chain (epoch) of the main ledger: it starts at `GENESIS_HASH` at `start_seq`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LedgerChain {
-    pub ruleset: String,
-    pub epoch: i64,
-    pub start_seq: i64,
-    pub entries: Vec<LedgerEntry>,
-}
-
 /// `(start, end)` in ms.
 pub type Interval = (i64, i64);
+
+/// Longest stored project label; bounds every API response that repeats it.
+pub const PROJECT_MAX_BYTES: usize = 256;
 
 pub struct Store {
     pub(crate) conn: Connection,
@@ -75,6 +70,7 @@ CREATE TABLE IF NOT EXISTS coverage(start_ts INTEGER NOT NULL, end_ts INTEGER NO
 CREATE TABLE IF NOT EXISTS adapter_health(source TEXT PRIMARY KEY, found_files INTEGER NOT NULL, records INTEGER NOT NULL, skipped INTEGER NOT NULL, errors INTEGER NOT NULL, format TEXT NOT NULL, last_event_ts INTEGER, counters TEXT NOT NULL, checked_ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS agent_writes(file_hash TEXT NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY(file_hash, ts));
 CREATE TABLE IF NOT EXISTS skipped_claims(action_id TEXT PRIMARY KEY, ts INTEGER NOT NULL, reason TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS skipped_ts ON skipped_claims(ts);
 CREATE TRIGGER IF NOT EXISTS skipped_no_update BEFORE UPDATE ON skipped_claims
 BEGIN SELECT RAISE(ABORT, 'skipped_claims is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS skipped_no_delete BEFORE DELETE ON skipped_claims
@@ -87,12 +83,6 @@ CREATE TRIGGER IF NOT EXISTS published_no_update BEFORE UPDATE ON published_ledg
 BEGIN SELECT RAISE(ABORT, 'published ledger is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS published_no_delete BEFORE DELETE ON published_ledger
 BEGIN SELECT RAISE(ABORT, 'published ledger is append-only'); END;
-CREATE TABLE IF NOT EXISTS ledger_chains(
-  start_seq INTEGER PRIMARY KEY, ruleset TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 0, UNIQUE (ruleset, epoch));
-CREATE TRIGGER IF NOT EXISTS ledger_chains_no_update BEFORE UPDATE ON ledger_chains
-BEGIN SELECT RAISE(ABORT, 'ledger_chains is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS ledger_chains_no_delete BEFORE DELETE ON ledger_chains
-BEGIN SELECT RAISE(ABORT, 'ledger_chains is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS ledger_no_update BEFORE UPDATE ON ledger
 BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS ledger_no_delete BEFORE DELETE ON ledger
@@ -115,6 +105,14 @@ impl Store {
         Self::init(conn)
     }
 
+    /// Read-only handle for the dashboard: no schema, no migration, a missing file is an error.
+    pub fn open_read_only(path: &Path) -> Result<Store, StoreError> {
+        use rusqlite::OpenFlags;
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        Ok(Store { conn })
+    }
+
     pub fn open_in_memory() -> Result<Store, StoreError> {
         Self::init(Connection::open_in_memory()?)
     }
@@ -135,18 +133,30 @@ impl Store {
                 }
             }
         }
-        // Pre-chains ledgers hold one ruleset (plan 05's guard): mark it as the first chain.
+        // Virtual generated columns over the event JSON, so window queries by kind or project use an index.
+        for (col, path) in [("kind", "$.kind"), ("project", "$.project")] {
+            let have: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('events') WHERE name = ?1)",
+                [col],
+                |r| r.get(0),
+            )?;
+            if !have {
+                match conn.execute_batch(&format!(
+                    "ALTER TABLE events ADD COLUMN {col} TEXT GENERATED ALWAYS AS (json_extract(json, '{path}')) VIRTUAL"
+                )) {
+                    Err(e) if e.to_string().contains("duplicate column name") => {}
+                    r => r?,
+                }
+            }
+        }
         conn.execute_batch(
-            "BEGIN IMMEDIATE;
-             INSERT INTO ledger_chains(start_seq, ruleset, epoch)
-               SELECT seq, json_extract(entry_json, '$.ruleset'), 0 FROM ledger
-               WHERE seq = (SELECT MIN(seq) FROM ledger) AND NOT EXISTS (SELECT 1 FROM ledger_chains);
-             COMMIT;",
+            "CREATE INDEX IF NOT EXISTS events_kind_ts ON events(kind, ts);
+             CREATE INDEX IF NOT EXISTS events_project_ts ON events(project, ts);",
         )?;
         Ok(Store { conn })
     }
 
-    /// One transaction. Already-stored ids are duplicates (checked first, even if late);
+    /// One transaction. Project labels are cut to `PROJECT_MAX_BYTES`. Already-stored ids are duplicates (checked first, even if late);
     /// otherwise `ts <= finalized_through` fails the whole batch with `LateEvent`.
     pub fn append_events(&mut self, events: &[Event]) -> Result<AppendSummary, StoreError> {
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -160,9 +170,13 @@ impl Store {
             } else if e.ts <= fin {
                 return Err(StoreError::LateEvent { id: e.id.clone(), ts: e.ts, finalized_through: fin });
             } else {
+                let mut e = e.clone();
+                if let Some(p) = e.project.as_mut().filter(|p| p.len() > PROJECT_MAX_BYTES) {
+                    p.truncate((0..=PROJECT_MAX_BYTES).rev().find(|&i| p.is_char_boundary(i)).unwrap_or(0));
+                }
                 tx.execute(
                     "INSERT INTO events(id, ts, json) VALUES (?1, ?2, ?3)",
-                    params![e.id, e.ts, serde_json::to_string(e)?],
+                    params![e.id, e.ts, serde_json::to_string(&e)?],
                 )?;
                 added += 1;
             }
@@ -475,29 +489,25 @@ impl Store {
                 return Err(StoreError::Conflict);
             }
         }
-        let last: Option<String> = tx
-            .query_row("SELECT hash FROM ledger ORDER BY seq DESC LIMIT 1", [], |r| r.get(0))
+        let last: Option<(String, String)> = tx
+            .query_row("SELECT hash, json_extract(entry_json, '$.ruleset') FROM ledger ORDER BY seq DESC LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()?;
         if let Some(first) = entries.first() {
-            if entries.iter().any(|e| e.ruleset != first.ruleset) {
+            // One ruleset per call. The same ruleset as the tip extends its chain; a different one
+            // opens a new chain at genesis, once: a ruleset that already has a chain cannot return.
+            let expected = match &last {
+                Some((hash, ruleset)) if *ruleset == first.ruleset => hash.as_str(),
+                Some(_) => {
+                    let seen: i64 = tx.query_row("SELECT COUNT(*) FROM ledger WHERE json_extract(entry_json, '$.ruleset') = ?1", [&first.ruleset], |r| r.get(0))?;
+                    if seen > 0 {
+                        return Err(StoreError::ChainBroken);
+                    }
+                    GENESIS_HASH
+                }
+                None => GENESIS_HASH,
+            };
+            if first.prev_hash != expected || entries.iter().any(|e| e.ruleset != first.ruleset) {
                 return Err(StoreError::ChainBroken);
-            }
-            let cur: Option<String> = tx
-                .query_row("SELECT ruleset FROM ledger_chains ORDER BY start_seq DESC LIMIT 1", [], |r| r.get(0))
-                .optional()?;
-            if cur.as_deref() == Some(first.ruleset.as_str()) {
-                if first.prev_hash != last.as_deref().unwrap_or(GENESIS_HASH) {
-                    return Err(StoreError::ChainBroken);
-                }
-            } else {
-                // a new chain: at genesis, and its ruleset must not name an earlier chain
-                let named: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM ledger_chains WHERE ruleset = ?1)", [&first.ruleset], |r| r.get(0))?;
-                if first.prev_hash != GENESIS_HASH || named {
-                    return Err(StoreError::ChainBroken);
-                }
-                let start: i64 = tx.query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM ledger", [], |r| r.get(0))?;
-                tx.execute("INSERT INTO ledger_chains(start_seq, ruleset, epoch) VALUES (?1, ?2, 0)", params![start, first.ruleset])?;
             }
         }
         for e in entries {
@@ -583,21 +593,11 @@ impl Store {
         Ok(out)
     }
 
-    /// The main ledger split into chains in `start_seq` order; concatenated they equal `ledger()`.
-    pub fn ledger_chains(&self) -> Result<Vec<LedgerChain>, StoreError> {
-        let mut st = self.conn.prepare("SELECT start_seq, ruleset, epoch FROM ledger_chains ORDER BY start_seq")?;
-        let heads = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))?
-            .collect::<Result<Vec<_>, _>>()?;
-        let rows = self.ledger_rows()?;
-        let mut out: Vec<LedgerChain> = heads.into_iter()
-            .map(|(start_seq, ruleset, epoch)| LedgerChain { ruleset, epoch, start_seq, entries: Vec::new() })
-            .collect();
-        for (seq, e) in rows {
-            if let Some(c) = out.iter_mut().rev().find(|c| c.start_seq <= seq) {
-                c.entries.push(e);
-            }
-        }
-        Ok(out)
+    /// The `hash` column of each ledger row, in append order (the chain tip `append_ledger` extends).
+    pub fn ledger_hash_columns(&self) -> Result<Vec<String>, StoreError> {
+        let mut st = self.conn.prepare("SELECT hash FROM ledger ORDER BY seq")?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Main ledger with its `seq`, in append order.
@@ -777,6 +777,14 @@ mod tests {
         let ids: Vec<_> = s.events().unwrap().into_iter().map(|e| e.id).collect();
         assert_eq!(ids, ["a", "b"]);
     }
+    #[test] fn long_project_labels_are_cut_on_a_char_boundary() {
+        let mut s = Store::open_in_memory().unwrap();
+        let mut e = ev("a", 1);
+        e.project = Some("\u{e9}".repeat(PROJECT_MAX_BYTES));
+        s.append_events(&[e]).unwrap();
+        let p = s.events().unwrap()[0].project.clone().unwrap();
+        assert!(p.len() <= PROJECT_MAX_BYTES && p.chars().all(|c| c == '\u{e9}'), "{}", p.len());
+    }
     #[test] fn late_events_reject_the_whole_batch_but_duplicates_pass() {
         let mut s = Store::open_in_memory().unwrap();
         s.append_events(&[ev("old", 500)]).unwrap();
@@ -836,6 +844,25 @@ mod tests {
         assert!(matches!(s.append_ledger(&[entry("a3", GENESIS_HASH)], 20, 0, &[]), Err(StoreError::ChainBroken)));
         assert_eq!(s.ledger().unwrap().len(), 2);
         assert_eq!(s.finalized_through().unwrap(), 10);
+    }
+    #[test] fn a_new_ruleset_opens_a_chain_at_genesis() {
+        let mut s = Store::open_in_memory().unwrap();
+        let at = |id: &str, ruleset: &str, prev: &str| {
+            let mut e = LedgerEntry { v: 1, ruleset: ruleset.into(), action_id: id.into(), ts: 1, project: None, kind: "k".into(),
+                verified_s: 1, unverified_s: 0, reasons: vec![], features: Default::default(), prev_hash: prev.into(), hash: String::new() };
+            e.hash = tally_scoring::ledger::entry_hash(&e);
+            e
+        };
+        let a = at("a", "old-0", GENESIS_HASH);
+        s.append_ledger(std::slice::from_ref(&a), 10, 0, &[]).unwrap();
+        // chained to the old head under a new ruleset, or back to the old ruleset, is refused
+        assert!(matches!(s.append_ledger(&[at("b", "new-0", &a.hash)], 20, 0, &[]), Err(StoreError::ChainBroken)));
+        let b = at("b", "new-0", GENESIS_HASH);
+        s.append_ledger(std::slice::from_ref(&b), 20, 0, &[]).unwrap();
+        assert!(matches!(s.append_ledger(&[at("c", "old-0", GENESIS_HASH)], 30, 0, &[]), Err(StoreError::ChainBroken)));
+        assert!(matches!(s.append_ledger(&[at("c", "old-0", &b.hash)], 30, 0, &[]), Err(StoreError::ChainBroken)));
+        s.append_ledger(&[at("c", "new-0", &b.hash)], 30, 0, &[]).unwrap();
+        assert_eq!(s.ledger().unwrap().len(), 3);
     }
     #[test] fn ledger_rows_cannot_be_updated_or_deleted() {
         let mut s = Store::open_in_memory().unwrap();
@@ -937,51 +964,6 @@ mod tests {
         assert_eq!(s.project_names().unwrap().len(), 1);
         s.register_project("id1", "C:/r", Some("owner/renamed")).unwrap();
         assert_eq!(s.project_names().unwrap().get("id1").map(String::as_str), Some("owner/renamed"));
-    }
-    fn rentry(action_id: &str, prev: &str, ruleset: &str) -> LedgerEntry {
-        let mut e = entry(action_id, prev);
-        e.ruleset = ruleset.into();
-        e.hash = tally_scoring::ledger::entry_hash(&e);
-        e
-    }
-    fn old_two() -> (LedgerEntry, LedgerEntry) {
-        let a = rentry("a1", GENESIS_HASH, "old-0");
-        let b = rentry("a2", &a.hash, "old-0");
-        (a, b)
-    }
-    #[test] fn migration_marks_the_existing_chain() {
-        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("t.db");
-        let (a, b) = old_two();
-        Store::open(&path).unwrap().append_ledger(&[a.clone(), b.clone()], 10, 0, &[]).unwrap();
-        // simulate a pre-chains database
-        { let s = Store::open(&path).unwrap(); s.conn.execute_batch("DROP TRIGGER ledger_chains_no_delete; DELETE FROM ledger_chains;").unwrap(); }
-        for _ in 0..2 {
-            let s = Store::open(&path).unwrap();
-            let c = s.ledger_chains().unwrap();
-            assert_eq!(c.len(), 1);
-            assert_eq!((c[0].ruleset.as_str(), c[0].epoch, c[0].start_seq, c[0].entries.clone()), ("old-0", 0, 1, vec![a.clone(), b.clone()]));
-        }
-    }
-    #[test] fn two_epochs_of_one_ruleset_are_allowed_in_the_table() {
-        let s = Store::open_in_memory().unwrap();
-        let ins = |r: &str, e: i64, seq: i64| s.conn.execute("INSERT INTO ledger_chains(start_seq, ruleset, epoch) VALUES (?1, ?2, ?3)", params![seq, r, e]);
-        ins("old-0", 0, 1).unwrap();
-        ins("old-0", 1, 5).unwrap();
-        assert!(ins("old-0", 0, 9).is_err());
-    }
-    #[test] fn a_new_ruleset_opens_a_chain_at_genesis() {
-        let mut s = Store::open_in_memory().unwrap();
-        let (a, b) = old_two();
-        s.append_ledger(&[a, b.clone()], 10, 0, &[]).unwrap();
-        assert!(matches!(s.append_ledger(&[rentry("n1", &b.hash, "new-0")], 20, 0, &[]), Err(StoreError::ChainBroken)));
-        let n1 = rentry("n1", GENESIS_HASH, "new-0");
-        s.append_ledger(std::slice::from_ref(&n1), 20, 0, &[]).unwrap();
-        let c = s.ledger_chains().unwrap();
-        assert_eq!(c.iter().map(|c| (c.ruleset.as_str(), c.start_seq, c.entries.len())).collect::<Vec<_>>(), [("old-0", 1, 2), ("new-0", 3, 1)]);
-        assert!(matches!(s.append_ledger(&[rentry("o3", GENESIS_HASH, "old-0")], 30, 0, &[]), Err(StoreError::ChainBroken)));
-        assert!(matches!(s.append_ledger(&[rentry("o3", &n1.hash, "old-0")], 30, 0, &[]), Err(StoreError::ChainBroken)));
-        assert!(s.conn.execute("UPDATE ledger_chains SET epoch = 3", []).is_err());
-        assert!(s.conn.execute("DELETE FROM ledger_chains", []).is_err());
     }
 
 }

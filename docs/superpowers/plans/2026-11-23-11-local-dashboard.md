@@ -78,7 +78,8 @@ crates/tally-daemon/
   src/status.rs                    status() in one read transaction
   src/analytics.rs                 bugs fixed, prompt-after-failure, hours per day/project, time removed
   src/replay.rs                    sessions list and timeline items
-  src/api.rs                       pure router: Request -> Response, Host allowlist, JSON
+  src/dash_api.rs                  pure router: Request -> Response, Host allowlist, JSON (replaces the planned api.rs)
+  src/snapshot.rs                  `Snapshot` read transaction and its queries (split out of store.rs)
   src/assets.rs                    include_dir of dashboard/dist, content types
   src/serve.rs                     tiny_http loop bound to 127.0.0.1
   src/main.rs                      `tally dashboard`, `--dashboard` on `tally run`
@@ -416,7 +417,7 @@ And in `status.rs`:
 ### Task 6: API router, Host allowlist, JSON
 
 **Files:**
-- Create: `crates/tally-daemon/src/api.rs`
+- Create: `crates/tally-daemon/src/dash_api.rs`
 - Modify: `crates/tally-daemon/src/lib.rs` (`pub mod api;`)
 
 **Interfaces:**

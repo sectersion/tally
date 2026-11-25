@@ -32,7 +32,7 @@ let chainNo = 0;
 /** Inserts a chain with the given (verified, unverified) rows straight into the tables. */
 async function ledgerRows(db: SQL, projectId: string, ruleset: string, rows: [number, number][]) {
   const [c] =
-    await db`insert into chains (project_id, ruleset, head_hash) values (${projectId}, ${ruleset}, ${GENESIS}) returning id`;
+    await db`insert into chains (project_id, ruleset, head_hash, verified_s, unverified_s) values (${projectId}, ${ruleset}, ${GENESIS}, ${rows.reduce((s, r) => s + r[0], 0)}, ${rows.reduce((s, r) => s + r[1], 0)}) returning id`;
   for (const [i, [v, u]] of rows.entries()) {
     const hash = `${++chainNo}`.padStart(64, "0");
     await db`insert into ledger_entries (chain_id, seq, hash, prev_hash, action_id, ts, kind, verified_s, unverified_s, entry)
@@ -123,8 +123,12 @@ test("token.ts claim sets an owner, and replaces one only with --force", async (
       cwd: `${import.meta.dir}/..`,
       env: process.env,
     }).exitCode;
+  const seq = async (pid: string) =>
+    Number((await sql`select change_seq from projects where id = ${pid}`)[0].change_seq);
+  const seq0 = await seq(unowned.projectId);
   expect(claim(unowned.projectId)).toBe(0);
   expect(await owner(unowned.projectId)).toBe(b.id);
+  expect(await seq(unowned.projectId)).toBe(seq0 + 1);
   expect(claim(owned.id)).toBe(1);
   expect(await owner(owned.id)).toBe(a.id);
   expect(claim(owned.id, "--force")).toBe(0);
@@ -186,6 +190,15 @@ test("projectHours agrees with chains.verified_s after real uploads", async () =
   const hrs = await projectHours(sql, p.projectId);
   expect(hrs.verified_s).toBe(Number(ch.s));
   expect(hrs.verified_s).toBeGreaterThan(0);
+  const [u] = await sql`select (select coalesce(sum(unverified_s), 0) from ledger_entries e
+    where e.chain_id = c.id) as eu, c.unverified_s as cu from chains c where c.project_id = ${p.projectId}`;
+  expect(Number(u.cu)).toBe(Number(u.eu));
+  expect(hrs.unverified_s).toBe(Number(u.eu));
+});
+test("projectHours reads the maintained chain totals, not the entry rows", async () => {
+  const { id } = await newProject();
+  await sql`insert into chains (project_id, ruleset, head_hash, verified_s, unverified_s) values (${id}, 'r', ${GENESIS}, 7, 3)`;
+  expect(await projectHours(sql, id)).toEqual({ verified_s: 7, unverified_s: 3 });
 });
 test("an upload that inserts bumps change_seq once; a replayed upload does not", async () => {
   const p = await seed(sql, "acme/demo-15");

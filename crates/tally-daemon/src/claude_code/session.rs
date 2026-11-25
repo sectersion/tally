@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use tally_scoring::text::Vocab;
 use tally_scoring::{Actor, Event, Kind};
 
+use crate::adapters::common::safe_id;
 use super::features::{prompt_numbers, ContextTail};
 use super::line::{Entry, Meta};
 
@@ -19,11 +20,14 @@ pub enum BashKind {
 }
 
 /// Per-file state. Text fields are memory only; `open_turn` is persisted by the caller as "<uuid> <ts>".
-#[derive(Default)]
 pub struct Session {
     pub open_turn: Option<(String, i64)>, // (prompt uuid, prompt ts)
     pub last_seen_ts: i64,
+    /// Entry timestamps above this are future-dated (clock skew, bad line) and do not move `last_seen_ts`,
+    /// so a far-future line cannot pin the open turn past expiry. `i64::MAX` = no bound.
+    pub ts_ceiling: i64,
     pending: BTreeMap<String, (Meta, String, BashKind)>, // Bash tool_use id -> (meta, cmd_hash, kind)
+    write_paths: BTreeMap<String, String>, // Edit/Write tool_use id -> file_path, awaiting its tool_result
     tail: ContextTail,
     last_output: String,
     last_error: String,
@@ -39,6 +43,7 @@ pub struct Ctx<'a> {
 }
 
 fn event(session: &str, uuid: &str, suffix: &str, ts: i64, project: &Option<String>, kind: Kind) -> Event {
+    let (session, uuid) = (safe_id(session), safe_id(uuid));
     Event {
         v: 1,
         // ponytail: the session id is part of the id (Decision 1), so a forked/resumed session that copies
@@ -48,8 +53,24 @@ fn event(session: &str, uuid: &str, suffix: &str, ts: i64, project: &Option<Stri
         ts,
         source: "claude-code".into(),
         project: project.clone(),
-        session: Some(session.to_owned()),
+        session: Some(session),
         kind,
+    }
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Session {
+            open_turn: None,
+            last_seen_ts: 0,
+            ts_ceiling: i64::MAX,
+            pending: BTreeMap::new(),
+            write_paths: BTreeMap::new(),
+            tail: ContextTail::default(),
+            last_output: String::new(),
+            last_error: String::new(),
+            agent_writes: Vec::new(),
+        }
     }
 }
 
@@ -60,7 +81,9 @@ impl Session {
     pub fn feed(&mut self, e: Entry, ctx: &Ctx, out: &mut Vec<Event>) {
         let prev_seen = self.last_seen_ts;
         let m = e.meta();
-        self.last_seen_ts = self.last_seen_ts.max(m.ts);
+        if m.ts <= self.ts_ceiling {
+            self.last_seen_ts = self.last_seen_ts.max(m.ts);
+        }
         let ev = |uuid: &str, suffix: &str, ts: i64, kind: Kind| event(&m.session, uuid, suffix, ts, &ctx.project, kind);
         match &e {
             Entry::HumanPrompt { meta, text, queued } => {
@@ -93,10 +116,17 @@ impl Session {
                         self.pending.insert(id.clone(), (meta.clone(), cmd_hash(c), k));
                     }
                 }
-                ("Edit" | "Write" | "MultiEdit" | "NotebookEdit", _, Some(p)) => self.agent_writes.push((meta.ts, p.clone())),
+                ("Edit" | "Write" | "MultiEdit" | "NotebookEdit", _, Some(p)) => {
+                    // Also stamped at the tool_result: in default permission mode the file lands after approval, long after tool_use.
+                    self.write_paths.insert(id.clone(), p.clone());
+                    self.agent_writes.push((meta.ts, p.clone()));
+                }
                 _ => {}
             },
-            Entry::ToolResult { tool_use_id, is_error, text, .. } => {
+            Entry::ToolResult { meta, tool_use_id, is_error, text } => {
+                if let Some(p) = self.write_paths.remove(tool_use_id).filter(|_| !is_error) {
+                    self.agent_writes.push((meta.ts, p));
+                }
                 if let Some((tm, hash, k)) = self.pending.remove(tool_use_id) {
                     let kind = match k {
                         BashKind::Test => Some(("test_run", Kind::TestRun {
@@ -104,12 +134,13 @@ impl Session {
                             exit_code: *is_error as i32,
                             initiator: Actor::Agent,
                         })),
-                        BashKind::Commit if !is_error => Some(("commit", Kind::Commit {
-                            sha: format!("claude:{tool_use_id}"),
+                        // Marked even when the chain exits non-zero (`commit && push` failing): the commit may exist, and
+                        // a false positive only makes a commit agent-owned (the safe direction).
+                        BashKind::Commit => Some(("commit", Kind::Commit {
+                            sha: format!("claude:{}", safe_id(tool_use_id)),
                             by: Actor::Agent,
                             lines_changed: 0,
                         })),
-                        BashKind::Commit => None,
                     };
                     // Id has no block index: two Bash blocks in one entry would collide (FORMAT.md: one block per entry).
                     if let Some((suffix, kind)) = kind {
@@ -179,26 +210,40 @@ fn is_env_assign(tok: &str) -> bool {
 fn is_git_commit(seg: &str) -> bool {
     let toks: Vec<&str> = seg
         .split_whitespace()
-        .map(|t| t.trim_start_matches(['(', '"', '\'']).trim_end_matches([')', '"', '\'']))
+        .map(|t| t.trim_start_matches(['(', '"', '\'', '$']).trim_end_matches([')', '"', '\'']))
         .filter(|t| !t.is_empty())
         .collect();
+    let flags = |r: &[&str]| r.iter().take_while(|f| f.starts_with('-')).count();
     let mut t = &toks[..];
-    loop {
-        match t {
-            [w, f, rest @ ..] if matches!(*w, "bash" | "sh" | "zsh") && f.starts_with('-') && f.contains('c') => t = rest,
-            [w, rest @ ..] if matches!(*w, "env" | "sudo" | "time" | "command") || is_env_assign(w) => t = rest,
-            // `pwsh [-flags [values]] -Command "..."`: skip to after `-c`/`-Command`; without one, skip leading flags.
-            [w, rest @ ..] if matches!(w.to_ascii_lowercase().as_str(), "pwsh" | "pwsh.exe" | "powershell" | "powershell.exe") => {
-                let cmd = rest.iter().position(|f| f.eq_ignore_ascii_case("-c") || f.eq_ignore_ascii_case("-command"));
-                t = match cmd {
-                    Some(i) => &rest[i + 1..],
-                    None => &rest[rest.iter().take_while(|f| f.starts_with('-')).count()..],
-                };
+    while let Some((w, rest)) = t.split_first() {
+        t = match prog(w).as_str() {
+            "bash" | "sh" | "zsh" => {
+                let n = flags(rest);
+                if rest[..n].iter().any(|f| f.contains('c')) { &rest[n..] } else { break }
             }
+            "cmd" if rest.first().is_some_and(|f| f.eq_ignore_ascii_case("/c")) => &rest[1..],
+            // `pwsh [-flags [values]] -Command "..."`: skip to after `-c`/`-Command`; without one, skip leading flags.
+            "pwsh" | "powershell" => match rest.iter().position(|f| f.eq_ignore_ascii_case("-c") || f.eq_ignore_ascii_case("-command")) {
+                Some(i) => &rest[i + 1..],
+                None => &rest[flags(rest)..],
+            },
+            "env" | "sudo" => &rest[flags(rest)..],
+            // `timeout [-flags] DURATION cmd`
+            "timeout" => rest.get(flags(rest) + 1..).unwrap_or(&[]),
+            "time" | "command" | "exec" | "nohup" | "eval" | "invoke-expression" | "iex" | "!" | "then" | "do" | "else"
+            | "if" | "elif" | "while" | "until" | "&" => rest,
+            p if is_env_assign(w) || (p != "git" && w.contains(['/', '\\'])) => rest,
             _ => break,
-        }
+        };
     }
-    matches!(t, ["git", rest @ ..] if rest.contains(&"commit"))
+    matches!(t, [g, rest @ ..] if prog(g) == "git"
+        && rest.iter().any(|a| matches!(*a, "commit" | "merge" | "rebase" | "revert" | "cherry-pick" | "am")))
+}
+
+/// Program name of a token: directory and `.exe` stripped, lowercased (`C:\Git\git.exe` -> `git`).
+fn prog(tok: &str) -> String {
+    let b = tok.rsplit(['/', '\\']).next().unwrap_or(tok).to_ascii_lowercase();
+    b.strip_suffix(".exe").map_or(b.clone(), str::to_string)
 }
 
 /// Lowercase hex SHA-256 of the command string.
@@ -238,6 +283,18 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn non_uuid_log_ids_are_hashed_out_of_event_ids_and_session() {
+        let (mut s, v) = (Session::default(), Vocab::default());
+        let mut out = vec![];
+        let ctx = Ctx { project: None, vocab: &v };
+        let m = Meta { uuid: "QACANARY_UUID_1".into(), session: "QACANARY_SESS_5".into(), ts: 1, cwd: None };
+        s.feed(Entry::HumanPrompt { meta: m, text: "hi".into(), queued: false }, &ctx, &mut out);
+        for e in &out {
+            assert!(!e.id.contains("QACANARY") && !e.session.as_deref().unwrap().contains("QACANARY"), "{e:?}");
+        }
     }
 
     #[test]
@@ -310,11 +367,12 @@ mod tests {
         let c = out.last().unwrap();
         assert_eq!((c.id.as_str(), c.ts), ("claude:s:a2:commit", 3_000));
         assert_eq!(c.kind, Kind::Commit { sha: "claude:t2".into(), by: Actor::Agent, lines_changed: 0 });
-        // a failed commit gives nothing
+        // a commit chain that exits non-zero (e.g. failing push) is still marked (GIT-1)
         let n = out.len();
         s.feed(tool("a3", 4_000, "t3", "Bash", Some("git commit -m y"), None), &ctx, &mut out);
-        s.feed(result("r3", 4_100, "t3", true, "nothing to commit"), &ctx, &mut out);
-        assert_eq!(out.len(), n);
+        s.feed(result("r3", 4_100, "t3", true, "push failed"), &ctx, &mut out);
+        assert_eq!(out.len(), n + 1);
+        assert!(matches!(out.last().unwrap().kind, Kind::Commit { by: Actor::Agent, .. }));
         s.feed(tool("a4", 5_000, "t4", "Bash", Some("ls"), None), &ctx, &mut out);
         assert_eq!(s.limit(), i64::MAX);
         assert!(!serde_json::to_string(&out).unwrap().contains("cargo"));
@@ -427,6 +485,16 @@ mod tests {
         s.feed(tool("a2", 4_100, "t2", "Read", None, Some("src/b.rs")), &ctx, &mut out);
         assert_eq!(s.agent_writes, [(4_000, "src/a.rs".to_owned())]);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn agent_edit_is_also_stamped_at_its_slow_tool_result() {
+        let (mut s, v) = (Session::default(), Vocab::default());
+        let mut out = vec![];
+        let ctx = Ctx { project: None, vocab: &v };
+        s.feed(tool("a1", 4_000, "t1", "Edit", None, Some("src/a.rs")), &ctx, &mut out);
+        s.feed(result("r1", 35_000, "t1", false, "ok"), &ctx, &mut out);
+        assert_eq!(s.agent_writes, [(4_000, "src/a.rs".to_owned()), (35_000, "src/a.rs".to_owned())]);
     }
 
     #[test]

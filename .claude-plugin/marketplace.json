@@ -1,0 +1,11 @@
+{
+  "name": "tally",
+  "owner": { "name": "sectersion" },
+  "plugins": [
+    {
+      "name": "tally",
+      "source": "./integrations/claude-code",
+      "description": "Starts the Tally daemon when a Claude Code session starts, so your coding time is tracked."
+    }
+  ]
+}

@@ -366,6 +366,8 @@ Expected from memory (UNVERIFIED): VS Code stores chat sessions per workspace as
 
 ### Task 12: Copilot parser and source
 
+> As built (PR #12): the adapter targets the Copilot CLI log, `~/.copilot/session-state/<id>/events.jsonl` (override with `COPILOT_HOME`), not VS Code `chatSessions` JSON; see `docs/adapters/copilot.md`. Interrupt, tool_decision and agent writes are never emitted.
+
 **Files:**
 - Create: `crates/tally-daemon/src/adapters/copilot.rs`
 - Modify: `adapters/mod.rs`, config (`[copilot] enabled, user_data_dirs = [...]`, default list per OS for Code, Code - Insiders), `run.rs` (register in `sources()`)

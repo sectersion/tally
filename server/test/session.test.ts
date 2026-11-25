@@ -230,3 +230,10 @@ test("creating a session deletes expired ones", async () => {
     await sql`select token_hash from sessions where user_id = ${id} and token_hash like '%!%'`;
   expect(left.map((r: { token_hash: string }) => r.token_hash)).toEqual([`live!${id}`]);
 });
+
+test("a github-connect state is not accepted by /auth/callback", async () => {
+  const state = `tly_${crypto.randomUUID()}`;
+  await sql`insert into oauth_states (state_hash, verifier, nonce, return_to, expires_at)
+    values (${hashToken(state)}, 'v', 'gh:someuser', '/', now() + interval '10 minutes')`;
+  expect((await callback(state, `tally_oauth=${state}`)).status).toBe(400);
+});

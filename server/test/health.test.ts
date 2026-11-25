@@ -1,7 +1,33 @@
 import { expect, spyOn, test } from "bun:test";
 import { createServer } from "../src/app.ts";
 import { loadConfig, testConfig } from "../src/config.ts";
-import { log } from "../src/log.ts";
+import { log, setLogLevel } from "../src/log.ts";
+
+test("LOG_LEVEL filters lines below it", () => {
+  const spy = spyOn(process.stdout, "write").mockImplementation(() => true);
+  setLogLevel("warn");
+  log("info", "quiet");
+  log("debug", "quiet");
+  log("warn", "loud");
+  log("error", "loud");
+  setLogLevel("info");
+  const n = spy.mock.calls.length;
+  spy.mockRestore();
+  expect(n).toBe(2);
+});
+
+test("a body over 1 MiB is a JSON 413 even past Bun's old 2 MiB cap", async () => {
+  const s = createServer({ cfg: testConfig(), sql: null as never, port: 0 });
+  for (const size of [2_000_000, 5_000_000]) {
+    const r = await fetch(`http://localhost:${s.port}/v1/device/token`, {
+      method: "POST",
+      body: "x".repeat(size),
+    });
+    expect(r.status).toBe(413);
+    expect(await r.json()).toEqual({ error: "body_too_large", max: 1_048_576 });
+  }
+  s.stop(true);
+});
 
 test("healthz is ok", async () => {
   const s = createServer({ cfg: testConfig(), sql: null as never, port: 0 });
@@ -73,4 +99,12 @@ test("log redacts secrets", () => {
   expect(out).toContain("[redacted]");
   expect(out).not.toContain("abc");
   expect(JSON.parse(out).ok).toBe(1);
+});
+
+test("NUL in a public path parameter is a 404, not a database error", async () => {
+  const s = createServer({ cfg: testConfig(), sql: null as never, port: 0 });
+  for (const p of ["/p/%00/a", "/u/%00", "/v1/projects/%00/summary", "/badge/%00/x.svg"]) {
+    expect((await fetch(`http://localhost:${s.port}${p}`)).status).toBe(404);
+  }
+  s.stop(true);
 });

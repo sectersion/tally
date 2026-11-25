@@ -27,7 +27,7 @@ export async function gunzipLimited(req: Request): Promise<Uint8Array> {
   try {
     const reader = req.body
       .pipeThrough(count)
-      .pipeThrough(new DecompressionStream("gzip"))
+      .pipeThrough(new DecompressionStream("gzip") as ReadableWritablePair<Uint8Array, Uint8Array>)
       .getReader();
     for (;;) {
       const { value, done } = await reader.read();

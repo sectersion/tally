@@ -55,6 +55,23 @@ test("failed auth is limited by ip", async () => {
   }
 });
 
+test("cross-project 403 is limited by ip", async () => {
+  const a = await seedFixture(sql, "acme/demo-13a");
+  const b = await seedFixture(sql, "acme/demo-13b");
+  const s = createServer({ cfg: testConfig(), sql, port: 0, limiter: createLimiter(1, 2) });
+  try {
+    const bad = async () =>
+      (
+        await fetch(`http://localhost:${s.port}/v1/ledger/${b.projectId}/head`, {
+          headers: { authorization: `Bearer ${a.token}` },
+        })
+      ).status;
+    expect([await bad(), await bad(), await bad()]).toEqual([403, 403, 429]);
+  } finally {
+    s.stop(true);
+  }
+});
+
 test("request log has route pattern and no secrets", async () => {
   const p = await seedFixture(sql, "acme/demo-12");
   const s = createServer({ cfg: testConfig(), sql, port: 0 });

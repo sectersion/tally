@@ -77,8 +77,9 @@ test("no public route shows a private value, and receipts never store them", asy
   const pid = r.id;
 
   // Ledger: one entry whose reasons and features carry the needles.
-  const [c] = await sql`insert into chains (project_id, ruleset, head_hash, count, verified_s)
-    values (${pid}, ${`r${tag}`}, ${"0".repeat(64)}, 1, 1800) returning id`;
+  const [c] =
+    await sql`insert into chains (project_id, ruleset, head_hash, count, verified_s, unverified_s)
+    values (${pid}, ${`r${tag}`}, ${"0".repeat(64)}, 1, 1800, 60) returning id`;
   const entry = { reasons: [P.reason], features: { [P.feature]: 7 } };
   await sql`insert into ledger_entries (chain_id, seq, hash, prev_hash, action_id, ts, kind, verified_s, unverified_s, entry)
     values (${c.id}, 0, ${`${tag}`.padStart(64, "0")}, ${"0".repeat(64)}, 'a0', ${Date.now() - 60_000}, 'prompt', 1800, 60, ${JSON.stringify(entry)}::json)`;

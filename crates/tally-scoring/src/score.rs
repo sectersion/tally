@@ -21,7 +21,7 @@ pub struct Claim {
     pub features: BTreeMap<String, i64>,
 }
 
-/// Claims for every human action, in `(ts, id)` order. Input order and duplicate ids do not matter.
+/// Claims for every human action, in `(ts, kind, id)` order. Input order and duplicate ids do not matter.
 pub fn score(events: &[Event]) -> Vec<Claim> {
     let sorted = sort_dedup(events);
     let mut prev = None;
@@ -44,18 +44,16 @@ pub fn score(events: &[Event]) -> Vec<Claim> {
         }
         // iv.start never decreases, so a span ending at or before it can never overlap again.
         open.retain(|e| span_end(e).is_some_and(|end| end > iv.start));
-        let lo = sorted.partition_point(|e| e.ts < iv.start);
-        let hi = sorted.partition_point(|e| e.ts <= a.ts);
-        out.push(claim(&sorted, i, iv, new_run, open.iter().copied(), &sorted[lo..hi]));
+        out.push(claim(&sorted, i, iv, new_run, open.iter().copied()));
         prev = Some(a.ts);
     }
     out
 }
 
-/// Sorted by `(ts, id)`, first occurrence of each id kept.
+/// Sorted by `(ts, kind, id)` so equal-ts order does not hinge on the id string; first occurrence of each id kept.
 pub(crate) fn sort_dedup(events: &[Event]) -> Vec<Event> {
     let mut sorted = events.to_vec();
-    sorted.sort_by(|a, b| (a.ts, &a.id).cmp(&(b.ts, &b.id)));
+    sorted.sort_by_cached_key(|e| (e.ts, kind_features(&e.kind).0, e.id.clone()));
     let mut seen = BTreeSet::new();
     sorted.retain(|e| seen.insert(e.id.clone()));
     sorted
@@ -77,28 +75,13 @@ fn span_end(e: &Event) -> Option<i64> {
 }
 
 /// `ev` sorted by `(ts, id)`. `spans` must include every idle/busy event overlapping `iv` and
-/// `outputs` every event with ts in `[iv.start, t]`; extra events are filtered out here.
-fn claim<'a>(
-    ev: &[Event],
-    i: usize,
-    iv: Span,
-    new_run: bool,
-    spans: impl Iterator<Item = &'a Event>,
-    outputs: &[Event],
-) -> Claim {
+/// extra events are filtered out here.
+fn claim<'a>(ev: &[Event], i: usize, iv: Span, new_run: bool, spans: impl Iterator<Item = &'a Event>) -> Claim {
     let a = &ev[i];
     let t = a.ts;
     let overlaps = |s: &Span| s.end > iv.start && s.start < iv.end;
 
-    let (mut reading, mut idle_part, mut agent_idle, mut busy) = (vec![], vec![], vec![], vec![]);
-    for e in outputs {
-        if let Kind::AgentOutput { chars } = e.kind {
-            if iv.start <= e.ts && e.ts <= t {
-                let len = (chars as i64 * 1000 / READ_CPS).min(MAX_READ_MS);
-                reading.push(Span { start: e.ts, end: e.ts.saturating_add(len) });
-            }
-        }
-    }
+    let (mut idle_part, mut agent_idle, mut busy) = (vec![], vec![], vec![]);
     // Spans not overlapping iv cannot change anything below: every result is clipped to iv.
     for e in spans {
         match e.kind {
@@ -120,13 +103,12 @@ fn claim<'a>(
     };
 
     let all = [idle_part.as_slice(), &busy_part].concat();
-    let prot = [reading.as_slice(), &think].concat();
     let removed = |src: &[Span], prot: &[Span]| total_ms(&clip(&subtract(src, prot), iv));
-    let removed_ms = removed(&all, &prot);
+    let removed_ms = removed(&all, &think);
 
     let ctx = CapContext {
         interrupt_followed_by_prompt: matches!(a.kind, Kind::Interrupt)
-            && ev[i + 1..]
+            && ev[ev.partition_point(|e| e.ts < t)..]
                 .iter()
                 .take_while(|e| e.ts.saturating_sub(t) <= INTERRUPT_FOLLOW_MS)
                 .any(|e| matches!(e.kind, Kind::Prompt { .. })),
@@ -138,10 +120,9 @@ fn claim<'a>(
 
     let reasons = [
         ("first_action", new_run),
-        ("read_protected", removed(&all, &think) != removed_ms),
-        ("think_protected", removed(&all, &reading) != removed_ms),
-        ("idle_subtracted", removed(&idle_part, &prot) > 0),
-        ("agent_busy_subtracted", removed(&busy_part, &prot) > 0),
+        ("think_protected", removed(&all, &[]) != removed_ms),
+        ("idle_subtracted", removed(&idle_part, &think) > 0),
+        ("agent_busy_subtracted", removed(&busy_part, &think) > 0),
         ("fail_pass_loop", ctx.completes_fail_pass_loop),
         ("interrupt_followed", ctx.interrupt_followed_by_prompt),
         ("capped", raw_ms > cap),
@@ -153,7 +134,7 @@ fn claim<'a>(
         project: a.project.clone(),
         kind: kind.into(),
         verified_s: (verified_ms / 1000) as u32,
-        unverified_s: ((raw_ms - verified_ms) / 1000).min(u32::MAX as i64) as u32,
+        unverified_s: (raw_ms / 1000 - verified_ms / 1000).min(u32::MAX as i64) as u32,
         reasons: reasons.iter().filter(|r| r.1).map(|r| r.0.to_string()).collect(),
         features: features.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
     }
@@ -194,7 +175,7 @@ pub(crate) mod tests {
         for (i, a) in sorted.iter().enumerate() {
             if a.is_human_action() {
                 let (iv, new_run) = interval(a.ts, prev);
-                out.push(claim(&sorted, i, iv, new_run, sorted.iter(), &sorted));
+                out.push(claim(&sorted, i, iv, new_run, sorted.iter()));
                 prev = Some(a.ts);
             }
         }
@@ -239,7 +220,7 @@ pub(crate) mod tests {
         let events = synthetic(4000);
         let got = score(&events);
         assert_eq!(got, score_reference(&events));
-        for r in ["first_action", "idle_subtracted", "agent_busy_subtracted", "read_protected", "think_protected", "fail_pass_loop", "capped"] {
+        for r in ["first_action", "idle_subtracted", "agent_busy_subtracted", "think_protected", "fail_pass_loop", "capped"] {
             assert!(got.iter().any(|c| c.reasons.iter().any(|x| x == r)), "generator never hits {r}");
         }
     }

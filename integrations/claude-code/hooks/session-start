@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Claude Code SessionStart hook. Prints only hook JSON, never waits for a download, always exits 0.
+# `session-start tally <args>` runs the located tally binary instead (used by the slash commands).
+ROOT=${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
+VER=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$ROOT/.claude-plugin/plugin.json" | head -n1)
+
+if [ -n "${TALLY_HOME:-}" ]; then HOME_DIR=$TALLY_HOME
+else case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) HOME_DIR=$(cygpath -u "${LOCALAPPDATA:-$HOME/AppData/Local}" 2>/dev/null || echo "$HOME/AppData/Local")/tally ;;
+  Darwin) HOME_DIR=$HOME/Library/Application\ Support/tally ;;
+  *) HOME_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/tally ;;
+esac; fi
+LOG=$HOME_DIR/ensure.log
+note() { mkdir -p "$HOME_DIR" && echo "$(date -u +%FT%TZ) session-start: $*" >> "$LOG"; }
+
+TO=; TV=; command -v timeout >/dev/null && { TO="timeout 4"; TV="timeout 2"; }  # ensure 4 s + version probe 2 s: worst case about 6 s
+# `tally --version` of $1 is parseable and at least $VER; no parseable version means stale.
+fresh() { local v; v=$($TV "$1" --version | sed -n 's/[^0-9]*\([0-9][0-9.]*\).*/\1/p' | head -n1)
+  [ -n "$v" ] && [ "$(printf '%s\n%s\n' "$v" "$VER" | sort -V | head -n1)" = "$VER" ]; }
+# stdin must be one JSON object: checked with node when present, else a conservative shape check.
+json_object() { local t; t=$(cat); if command -v node >/dev/null; then
+    printf '%s' "$t" | node -e 'const j=JSON.parse(require("fs").readFileSync(0,"utf8"));process.exit(j&&typeof j=="object"&&!Array.isArray(j)?0:1)'
+  else case "$t" in "{"*"}") true ;; *) false ;; esac; fi; }
+# Run ensure time-bounded; print its stdout only on exit 0 and when it is one JSON object. A file, not $(...), so a stray grandchild cannot hold the hook open.
+run_ensure() { local o rc; o=$(mktemp) || return 0
+  $TO "$1" ensure --client claude-code --register-cwd "${CLAUDE_PROJECT_DIR:-$PWD}" --hook-json >"$o" 2>/dev/null; rc=$?
+  if [ $rc -ne 0 ]; then note "ensure exited $rc"
+  elif [ -s "$o" ]; then if json_object <"$o"; then cat "$o"; else note "ensure printed non-JSON output, dropped"; fi; fi
+  rm -f "$o"; }
+find_tally() { local c; for c in "$HOME_DIR/bin/tally.exe" "$HOME_DIR/bin/tally"; do [ -x "$c" ] && { echo "$c"; return; }; done; command -v tally; }
+
+if [ "${1:-}" = tally ]; then shift; B=$(find_tally); [ -n "$B" ] && exec "$B" "$@"; echo "tally is not installed; reinstall the Tally plugin."; exit 0; fi
+
+exec 2>/dev/null  # only the session-start path is silent; the slash commands above show tally's errors
+trap 'exit 0' EXIT
+B=$(find_tally)
+if [ -n "$B" ] && fresh "$B"; then
+  run_ensure "$B"
+  exit 0
+fi
+
+INST=$ROOT/install/install.sh
+if [ ! -f "$INST" ]; then
+  note "no usable tally and no installer in $ROOT/install"
+  echo '{"systemMessage": "Tally is not installed and the plugin has no installer. Reinstall the Tally plugin."}'
+  exit 0
+fi
+# Detached: download, then ensure with the fresh binary. Output goes to the log, never to the hook's stdout.
+export TALLY_VERSION=$VER TALLY_INSTALL_DIR=$HOME_DIR/bin
+mkdir -p "$HOME_DIR" || exit 0
+(
+  if bash "$INST" --binary-only; then
+    N=$(find_tally); if [ -n "$N" ] && fresh "$N"; then "$N" ensure --client claude-code --register-cwd "${CLAUDE_PROJECT_DIR:-$PWD}" --hook-json >/dev/null; else note "installed binary missing or too old"; fi
+  else
+    note "installer failed (exit $?) for version $VER"
+  fi
+) </dev/null >>"$LOG" 2>&1 &
+disown 2>/dev/null
+echo "{\"systemMessage\": \"Tally is installing (version $VER); tracking starts in a minute. See $LOG if it does not.\"}"

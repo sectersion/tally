@@ -6,7 +6,7 @@
 
 Tally passively measures the hours of *productive struggle* you spend building projects with AI. Hackatime counts how active your editor (and your AI agent) is. Tally counts how often **you** decide something, and how long you spent getting to that decision.
 
-> Status: **pre-alpha, in planning.** Built for the [Hack Club AI time tracking bounty](PITCH.md). Nothing to install yet.
+> Status: **pre-alpha.** Built for the [Hack Club AI time tracking bounty](PITCH.md). The daemon, the badge and the server exist. There is no release and no installer yet: build from source (see below).
 
 ## How it works
 
@@ -16,10 +16,22 @@ Tally passively measures the hours of *productive struggle* you spend building p
 4. **Struggle check on submission.** When you submit a project, you can send an evidence bundle to a pinned, self-hosted, open-weight judge that labels each turn. Hours are re-derivable from the stored labels.
 5. **Trust anchors.** A hash-chained ledger committed in real time, server-witnessed GitHub pushes, and a cap based on how the repo actually evolved.
 
+## Install and use
+
+What works today, from a clone of this repo:
+
+- `cargo install --path crates/tally-daemon` puts `tally` on PATH.
+- The Claude Code plugin installs from the clone: `claude plugin marketplace add <path to clone>`, then `claude plugin install tally@tally`.
+- The VS Code extension is built from `integrations/vscode` with `bun install && bun run package`, which writes `tally-vscode.vsix`; `tally setup --only vscode --extras-dir integrations/vscode` installs it.
+- `tally setup --dry-run` shows what setup would install without changing anything.
+- `tally status --brief` prints one line; `tally stop` pauses tracking across sessions until `tally start`.
+
+The one-line installers, release downloads, a published plugin marketplace and an OS service that starts the daemon at boot are planned, not built. Until then the daemon starts with your first Claude Code session or VS Code window. Details and what is verified: [docs/extensions.md](docs/extensions.md).
+
 ## Privacy
 
-- **Logged hours:** only an action ledger leaves your machine (project, action type, seconds, reason code). No text, titles, or URLs. Nothing about projects you don't track.
-- **Submitted hours:** prompt text leaves only for projects you choose to submit, goes to a self-hosted judge, and is deleted after review.
+- **Logged hours:** what can leave your machine is listed here, and nothing else. Sync uploads ledger entries (project, action type, action id, timestamps, seconds, reason code, numeric text features) and head hashes with commit timestamps. Publish writes badge data and public ledger files to the `tally-data` branch. No text, titles, or URLs. Nothing about projects you don't track.
+- **Submitted hours:** scrubbed session text leaves only on an explicit `tally submit`, for projects you choose, and goes to a self-hosted judge that deletes it after review. Planned (plan 10); not built yet, so no text leaves today.
 
 ## Why keep it installed
 
@@ -42,7 +54,7 @@ tally verify-published ledger-2026.12-0.json
 
 Expected output, once per file: `ok: ledger-<ruleset>.json: N entries, project sectersion/tally, ruleset <ruleset>, verified_hours N.N`.
 
-This proves the chain is intact and the hours add up. A ledger holds claims, not events, so it cannot be re-scored. Each entry's timestamp is public and permanent in the branch history. A new ruleset starts a new file, and the badge sums all files.
+This proves the chain is intact and the hours add up. A chain cut to its first N entries still verifies, so compare the entry count and hours with the badge. A ledger holds claims, not events, so it cannot be re-scored. Each entry's timestamp is public and permanent in the branch history. A new ruleset starts a new file, and the badge sums all files.
 
 ## Planned stack
 
@@ -53,6 +65,7 @@ This proves the chain is intact and the hours add up. A ledger holds claims, not
 ## Docs
 
 - [PITCH.md](PITCH.md): the full design, threat model, cost estimate, and evidence plan.
+- [docs/extensions.md](docs/extensions.md): the Claude Code plugin, the VS Code extension and `tally setup`.
 
 ## License
 

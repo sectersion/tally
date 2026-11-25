@@ -23,6 +23,7 @@ pub fn save_token(home: &Path, server_id: &str, token: &str) -> io::Result<()> {
     if token.is_empty() || !token.bytes().all(|b| (b'!'..=b'~').contains(&b)) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "token must be non-empty visible ASCII"));
     }
+    let _lock = lock(home)?;
     let mut all = load_tokens(home)?;
     all.insert(server_id.to_string(), token.to_string());
     write_all(home, &all)
@@ -30,12 +31,20 @@ pub fn save_token(home: &Path, server_id: &str, token: &str) -> io::Result<()> {
 
 /// True if a line was removed.
 pub fn delete_token(home: &Path, server_id: &str) -> io::Result<bool> {
+    let _lock = lock(home)?;
     let mut all = load_tokens(home)?;
     let removed = all.remove(server_id).is_some();
     if removed {
         write_all(home, &all)?;
     }
     Ok(removed)
+}
+
+/// Exclusive advisory lock (threads and processes) held for the read-modify-write; released on drop.
+fn lock(home: &Path) -> io::Result<std::fs::File> {
+    let f = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(home.join("device_tokens.lock"))?;
+    f.lock()?;
+    Ok(f)
 }
 
 fn write_all(home: &Path, all: &BTreeMap<String, String>) -> io::Result<()> {
@@ -85,6 +94,19 @@ mod tests {
             assert_eq!(save_token(d.path(), "srv_1", bad).unwrap_err().kind(), io::ErrorKind::InvalidInput, "{bad:?}");
         }
         assert!(!token_path(d.path()).exists());
+    }
+
+    #[test]
+    fn concurrent_saves_lose_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let hs: Vec<_> = (0..8)
+            .map(|k| {
+                let p = d.path().to_path_buf();
+                std::thread::spawn(move || (0..40).for_each(|i| save_token(&p, &format!("s{k}_{i}"), "tok").unwrap()))
+            })
+            .collect();
+        hs.into_iter().for_each(|h| h.join().unwrap());
+        assert_eq!(load_tokens(d.path()).unwrap().len(), 320);
     }
 
     #[cfg(unix)]

@@ -16,7 +16,6 @@ jobs:
   e2e:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
-    continue-on-error: true
     services:
       postgres:
         image: postgres:16
@@ -28,6 +27,14 @@ jobs:
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
       PORT: "8080"
+      # Placeholders so loadConfig passes; the e2e never signs in or calls GitHub.
+      PUBLIC_BASE_URL: http://localhost:8080
+      HCA_CLIENT_ID: ci-placeholder
+      HCA_CLIENT_SECRET: ci-placeholder
+      GITHUB_APP_SLUG: ci-placeholder
+      GITHUB_APP_CLIENT_ID: ci-placeholder
+      GITHUB_APP_CLIENT_SECRET: ci-placeholder
+      GITHUB_WEBHOOK_SECRET: ci-placeholder
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -66,6 +66,15 @@ impl Hosting {
         Err(HostingError::Git { args: args[0].into(), stderr: self.scrub(&String::from_utf8_lossy(&out.stderr)) })
     }
 
+    /// Blocks until no other publish is using this clone; the lock is released when the file drops.
+    /// The lock file sits beside the clone, since `sync_down` runs `git clean`.
+    pub fn lock(&self) -> Result<std::fs::File, HostingError> {
+        std::fs::create_dir_all(&self.dir)?;
+        let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(self.dir.with_extension("lock"))?;
+        f.lock()?;
+        Ok(f)
+    }
+
     /// Makes the clone match the remote branch, or an empty unborn branch when the remote has none.
     pub fn sync_down(&self) -> Result<(), HostingError> {
         std::fs::create_dir_all(&self.dir)?;
@@ -148,5 +157,17 @@ mod tests {
         let h = Hosting::new(Path::new("h"), "https://user:p@ss@example.invalid/x.git", "b");
         let out = h.scrub("fatal: unable to access 'https://user:p@ss@example.invalid/x.git/' as user:p@ss");
         assert!(!out.contains("p@ss") && !out.contains("ss@") && !out.contains("user"), "{out}");
+    }
+
+    #[test]
+    fn lock_excludes_a_second_publish_until_dropped() {
+        let home = std::env::temp_dir().join(format!("tally-hosting-lock-{}", std::process::id()));
+        let h = Hosting::new(&home, "https://example.invalid/x.git", "b");
+        let first = h.lock().unwrap();
+        let other = std::fs::OpenOptions::new().write(true).open(h.dir.with_extension("lock")).unwrap();
+        assert!(matches!(other.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
+        drop(first);
+        assert!(other.try_lock().is_ok());
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

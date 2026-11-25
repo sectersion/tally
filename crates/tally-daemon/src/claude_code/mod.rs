@@ -1,5 +1,5 @@
-//! The Claude Code session-log source: tails `<projects_dir>/*/*.jsonl` (main sessions only; subagent
-//! files under `<session>/subagents/` are never read). Text stays in memory; state keys per file are
+//! The Claude Code session-log source: tails `<projects_dir>/*/*.jsonl`. Subagent files under
+//! `<dir>/<session>/subagents/` are read only for their file writes (agent-write filter): no events, no watermark. Text stays in memory; state keys per file are
 //! `off:<rel>` (byte cursor), `last_ts:<rel>` (newest event ts sent), `open:<rel>` (`"<uuid> <ts>"` or `-`).
 pub mod features;
 pub mod line;
@@ -15,7 +15,7 @@ use tally_scoring::text::Vocab;
 use tally_scoring::Event;
 
 use crate::project::project_for_dir;
-use crate::source::{Poll, Source, SourceError, SourceState};
+use crate::source::{Health, Poll, Source, SourceError, SourceState};
 use session::{Ctx, Session};
 
 /// Covers entries whose timestamp is earlier than the moment their line is flushed, and a partial last line.
@@ -36,12 +36,14 @@ struct File {
     /// Byte offset the in-memory session has consumed up to. If the saved `off:` differs (the last tick's
     /// state was not persisted, or another process moved it), the session is rebuilt from the saved cursor.
     fed_to: u64,
+    /// A subagent file: only `agent_writes` are kept.
+    sub: bool,
 }
 
 impl File {
-    fn new(path: &Path) -> Self {
+    fn new(path: &Path, sub: bool) -> Self {
         let sid = path.file_stem().map_or(String::new(), |s| s.to_string_lossy().into_owned());
-        File { session: Session::default(), sid, project: None, root: None, floor: None, fed_to: 0 }
+        File { session: Session::default(), sid, project: None, root: None, floor: None, fed_to: 0, sub }
     }
 }
 
@@ -56,6 +58,10 @@ pub struct ClaudeCode {
     budget: usize,
     /// Hashed agent file writes `(file_hash, ts)` since the last `take_agent_writes`; never a path.
     agent_writes: Vec<(String, i64)>,
+    /// `now_ms` of the poll in progress; entry timestamps past it (plus slack) do not count as seen.
+    now_ms: i64,
+    /// Doctor stats, cumulative since start.
+    health: Health,
 }
 
 /// `(file_hash, ts)` for each write under `root`; paths outside it are dropped, the path text is not kept.
@@ -64,7 +70,7 @@ fn hash_writes(writes: &[(i64, String)], root: &Path, project_id: &str) -> Vec<(
     writes
         .iter()
         .filter_map(|(ts, p)| {
-            let rel = crate::heartbeat::rel_under(&root, &crate::project::normalize_path(p))?;
+            let rel = crate::heartbeat::rel_under_canon(&root, &crate::project::normalize_path(p))?;
             Some((crate::heartbeat::file_hash(project_id, &rel), *ts))
         })
         .collect()
@@ -80,6 +86,8 @@ impl ClaudeCode {
             vocabs: HashMap::new(),
             vocab_failed: HashSet::new(),
             agent_writes: Vec::new(),
+            now_ms: i64::MAX,
+            health: Health::default(),
         }
     }
 
@@ -101,11 +109,11 @@ impl ClaudeCode {
     }
 
     /// Feeds lines to the file's session; returns the number of unreadable lines.
-    fn feed<'a>(&mut self, rel: &str, lines: impl Iterator<Item = &'a [u8]>, out: &mut Vec<Event>) -> usize {
+    fn feed<'a>(&mut self, rel: &str, sub: bool, lines: impl Iterator<Item = &'a [u8]>, out: &mut Vec<Event>) -> usize {
         let empty = Vocab::default();
         let mut skipped = 0;
         for l in lines {
-            let Ok(entries) = line::classify(l) else {
+            let Ok(entries) = line::classify_with(l, sub) else {
                 skipped += 1;
                 continue;
             };
@@ -116,6 +124,7 @@ impl ClaudeCode {
                 f.sid.clone_from(&e.meta().session);
                 f.project.clone_from(&project);
                 f.root.clone_from(&root);
+                f.session.ts_ceiling = self.now_ms.saturating_add(WRITE_SLACK_MS);
                 f.session.feed(e, &Ctx { project, vocab }, out);
             }
         }
@@ -125,12 +134,23 @@ impl ClaudeCode {
     /// After a restart: replays the last 64 KiB before `off` (events discarded) to rebuild the context tail
     /// and pending tool uses, then restores the open turn from state.
     fn warm_up(&mut self, rel: &str, path: &Path, off: u64, open: Option<String>) {
-        let start = off.saturating_sub(WARM_UP_BYTES);
-        let mut buf = Vec::new();
-        let read = std::fs::File::open(path).and_then(|mut f| {
-            f.seek(SeekFrom::Start(start))?;
-            f.take(off - start).read_to_end(&mut buf)
-        });
+        // Pending tool uses live in the open turn, so widen the window until it starts before that turn's prompt.
+        let open_ts = open.as_deref().and_then(|o| o.split_once(' ')?.1.parse::<i64>().ok());
+        let mut window = WARM_UP_BYTES;
+        let (mut start, mut buf, mut read);
+        loop {
+            start = off.saturating_sub(window);
+            buf = Vec::new();
+            read = std::fs::File::open(path).and_then(|mut f| {
+                f.seek(SeekFrom::Start(start))?;
+                f.take(off - start).read_to_end(&mut buf)
+            });
+            let first_ts = buf.split(|b| *b == b'\n').nth(1).and_then(|l| line::classify(l).ok()?.first().map(|e| e.meta().ts));
+            if read.is_err() || start == 0 || open_ts.is_none_or(|t| first_ts.is_some_and(|f| f < t)) {
+                break;
+            }
+            window *= 2;
+        }
         if read.is_ok() {
             let body = match (start, buf.iter().position(|b| *b == b'\n')) {
                 (0, _) => &buf[..],
@@ -138,7 +158,7 @@ impl ClaudeCode {
                 (_, None) => &buf[..0],
             };
             let lines = body.split(|b| *b == b'\n').map(|l| l.strip_suffix(b"\r").unwrap_or(l)).filter(|l| !l.is_empty());
-            self.feed(rel, lines, &mut Vec::new());
+            self.feed(rel, rel.contains("/subagents/"), lines, &mut Vec::new());
         }
         self.files.get_mut(rel).expect("registered").session.agent_writes.clear(); // warm-up writes are old news
         let s = &mut self.files.get_mut(rel).expect("registered").session;
@@ -166,8 +186,17 @@ fn session_files(dir: &Path) -> Vec<(String, PathBuf)> {
     for d in std::fs::read_dir(dir).into_iter().flatten().flatten().filter(|d| d.path().is_dir()) {
         for f in std::fs::read_dir(d.path()).into_iter().flatten().flatten() {
             let p = f.path();
+            let rel = format!("{}/{}", d.file_name().to_string_lossy(), f.file_name().to_string_lossy());
             if p.extension().is_some_and(|e| e == "jsonl") && p.is_file() {
-                v.push((format!("{}/{}", d.file_name().to_string_lossy(), f.file_name().to_string_lossy()), p));
+                v.push((rel, p));
+            } else if p.is_dir() {
+                // <dir>/<session>/subagents/agent-*.jsonl
+                for a in std::fs::read_dir(p.join("subagents")).into_iter().flatten().flatten() {
+                    let ap = a.path();
+                    if ap.extension().is_some_and(|e| e == "jsonl") && ap.is_file() {
+                        v.push((format!("{rel}/subagents/{}", a.file_name().to_string_lossy()), ap));
+                    }
+                }
             }
         }
     }
@@ -181,6 +210,7 @@ impl Source for ClaudeCode {
     }
 
     fn poll(&mut self, now_ms: i64, state: &mut dyn SourceState) -> Result<Poll, SourceError> {
+        self.now_ms = now_ms;
         let files = session_files(&self.projects_dir);
         if state.get("started").is_none() {
             // Live capture: history before the first run is not read. Nothing read, so no promise either.
@@ -189,10 +219,12 @@ impl Source for ClaudeCode {
                 state.set(&format!("off:{rel}"), &len.to_string());
             }
             state.set("started", &now_ms.to_string());
+            self.health.files_found = files.len();
+            self.health.format = "session-jsonl".into();
             return Ok(Poll { events: vec![], watermark: None });
         }
         self.files.retain(|k, _| files.iter().any(|(rel, _)| rel == k));
-        let (mut events, mut skipped) = (Vec::new(), 0);
+        let (mut events, mut skipped, mut records, mut last_event_ts) = (Vec::new(), 0, 0, None);
         // A file with complete lines left unread (budget hit or read error) holds the watermark below the
         // newest timestamp it has shown, minus the write slack (unread lines may be a little older), and below
         // a persisted open turn (`open_ts`, for a file not registered in this process yet); one that has shown
@@ -204,6 +236,7 @@ impl Source for ClaudeCode {
             cap = cap.and_then(|c| seen.map(|t| c.min(t.saturating_sub(1 + WRITE_SLACK_MS)).min(open)));
         };
         for (rel, path) in &files {
+            let sub = rel.contains("/subagents/");
             let (off_key, last_key, open_key) = (format!("off:{rel}"), format!("last_ts:{rel}"), format!("open:{rel}"));
             let off: u64 = state.get(&off_key).and_then(|v| v.parse().ok()).unwrap_or(0);
             let last_ts: Option<i64> = state.get(&last_key).and_then(|v| v.parse().ok());
@@ -217,22 +250,29 @@ impl Source for ClaudeCode {
                 }
             };
             if chunk.rotated {
-                self.files.insert(rel.clone(), File { floor: last_ts, ..File::new(path) });
+                // The open turn's agent_busy was not sent yet; its ts is the prompt ts, so keep the floor below it
+                // (re-sent events dedupe by id, and the open turn held the watermark below its start).
+                let open_ts: Option<i64> = state.get(&open_key).and_then(|o| o.split_once(' ')?.1.parse().ok());
+                let floor = last_ts.map(|l| open_ts.map_or(l, |t| l.min(t - 1)));
+                self.files.insert(rel.clone(), File { floor, ..File::new(path, sub) });
             } else if self.files.get(rel).is_none_or(|f| {
                 // Saved state differs from memory (last tick not persisted, e.g. an expiry with no new lines).
                 f.fed_to != off || open_str(&f.session) != state.get(&open_key).unwrap_or_else(|| "-".into())
             }) {
                 let floor = self.files.get(rel).and_then(|f| f.floor);
-                self.files.insert(rel.clone(), File { floor, ..File::new(path) });
+                self.files.insert(rel.clone(), File { floor, ..File::new(path, sub) });
                 if off > 0 {
                     self.warm_up(rel, path, off, state.get(&open_key));
                 }
             }
             let mut out = Vec::new();
-            skipped += self.feed(rel, chunk.lines.iter().map(Vec::as_slice), &mut out);
+            records += chunk.lines.len();
+            skipped += self.feed(rel, sub, chunk.lines.iter().map(Vec::as_slice), &mut out);
             let f = self.files.get_mut(rel).expect("registered");
             f.fed_to = chunk.end;
-            if chunk.budget_hit {
+            if sub {
+                out.clear(); // subagent files feed the agent-write filter only
+            } else if chunk.budget_hit {
                 // The session's own limit() covers its open turn. No expiry: the rest of the turn may be unread.
                 hold(Some(f), last_ts, None);
             } else {
@@ -250,17 +290,29 @@ impl Source for ClaudeCode {
             }
             state.set(&off_key, &chunk.end.to_string());
             state.set(&open_key, &open_str(&f.session));
+            last_event_ts = last_event_ts.max(out.iter().map(|e| e.ts).max());
             events.extend(out);
         }
+        let h = &mut self.health;
+        h.files_found = files.len();
+        h.format = "session-jsonl".into();
+        h.records += records;
+        h.errors += skipped;
+        h.skipped += skipped;
+        h.last_event_ts = h.last_event_ts.max(last_event_ts);
         if skipped > 0 {
             eprintln!("source claude-code: skipped {skipped} unreadable lines");
         }
-        let w = self.files.values().map(|f| f.session.limit()).fold(now_ms - WRITE_SLACK_MS, i64::min);
+        let w = self.files.values().filter(|f| !f.sub).map(|f| f.session.limit()).fold(now_ms - WRITE_SLACK_MS, i64::min);
         Ok(Poll { events, watermark: cap.map(|c| c.min(w)) })
     }
 
     fn take_agent_writes(&mut self) -> Vec<(String, i64)> {
         std::mem::take(&mut self.agent_writes)
+    }
+
+    fn take_health(&mut self) -> Option<Health> {
+        Some(self.health.clone())
     }
 }
 
@@ -290,6 +342,21 @@ mod tests {
         assert!(!format!("{got:?}").contains("src/a.rs"));
         // production roots are canonicalized: verbatim prefix and backslashes
         assert_eq!(hash_writes(&w, Path::new(r"\\?\C:\tallyproj"), "p"), got);
+    }
+
+    #[test]
+    fn hash_writes_resolves_a_link_into_the_canonical_root() {
+        let d = tempfile::tempdir().unwrap();
+        let repo = std::fs::canonicalize(d.path()).unwrap().join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        let link = d.path().join("link");
+        #[cfg(windows)]
+        assert!(std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(&link).arg(&repo).output().unwrap().status.success());
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo, &link).unwrap();
+        let via_link = crate::project::normalize_path(&link.join("src/a.rs").to_string_lossy());
+        let got = hash_writes(&[(1, via_link)], &repo, "p");
+        assert_eq!(got, [(crate::heartbeat::file_hash("p", "src/a.rs"), 1)]);
     }
 
     #[test]
@@ -324,6 +391,28 @@ mod tests {
     }
 
     #[test]
+    fn a_subagent_write_is_an_agent_write_but_makes_no_events() {
+        let d = tempfile::tempdir().unwrap();
+        let repo = std::fs::canonicalize(d.path()).unwrap().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let sub = d.path().join("p/s/subagents");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(d.path().join("p/s.jsonl"), "\n").unwrap();
+        let file = crate::project::normalize_path(&repo.join("src/a.rs").to_string_lossy());
+        let cwd = crate::project::normalize_path(&repo.to_string_lossy());
+        let t0 = ts(0);
+        let line = format!(
+            r#"{{"type":"assistant","uuid":"a1","sessionId":"s","isSidechain":true,"timestamp":"{t0}","cwd":"{cwd}","message":{{"content":[{{"type":"tool_use","id":"t1","name":"Write","input":{{"file_path":"{file}"}}}}]}}}}"#
+        );
+        std::fs::write(sub.join("agent-a1.jsonl"), line + "\n").unwrap();
+        let mut src = ClaudeCode::new(d.path().to_path_buf());
+        let mut st = BTreeMap::from([("started".to_owned(), "1".to_owned())]);
+        let p = src.poll(parse_rfc3339_ms(&t0).unwrap() + 3_600_000, &mut st).unwrap();
+        assert!(p.events.is_empty());
+        assert_eq!(src.take_agent_writes().len(), 1);
+    }
+
+    #[test]
     fn an_expiry_whose_state_was_not_saved_is_redone() {
         let d = tempfile::tempdir().unwrap();
         std::fs::create_dir(d.path().join("p")).unwrap();
@@ -340,6 +429,34 @@ mod tests {
         let p = src.poll(late, &mut st).unwrap();
         let ids: Vec<_> = p.events.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, ["claude:s:p1:agent_busy"]);
+    }
+
+    #[test]
+    fn a_rotation_keeps_the_busy_span_of_the_turn_open_at_rotation() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("p")).unwrap();
+        let f = d.path().join("p/s.jsonl");
+        let head = |ty: &str, u: &str, i: usize| {
+            let t = ts(i);
+            format!(r#"{{"type":"{ty}","uuid":"{u}","sessionId":"s","timestamp":"{t}""#)
+        };
+        let p = head("user", "p1", 0) + r#","origin":{"kind":"human"},"message":{"content":"go"}}"#;
+        let a = head("assistant", "a1", 1) + r#","message":{"content":[{"type":"text","text":"working"}]}}"#;
+        let end = head("system", "d1", 3) + r#","subtype":"turn_duration"}"#;
+        std::fs::write(&f, [p.as_str(), a.as_str(), &"x".repeat(500)].join("
+") + "
+").unwrap();
+        let now = parse_rfc3339_ms(&ts(0)).unwrap() + 30_000;
+        let mut src = ClaudeCode::new(d.path().to_path_buf());
+        let mut st = BTreeMap::from([("started".to_owned(), "1".to_owned())]);
+        src.poll(now, &mut st).unwrap();
+        assert_eq!(src.poll(now, &mut st).unwrap().events.len(), 0);
+        // The file shrinks (rewritten), still holding the open turn, and now ends it.
+        std::fs::write(&f, [p, a, end].join("
+") + "
+").unwrap();
+        let ids: Vec<_> = src.poll(now, &mut st).unwrap().events.into_iter().map(|e| e.id).collect();
+        assert!(ids.contains(&"claude:s:p1:agent_busy".to_owned()), "{ids:?}");
     }
 
     #[test]
@@ -373,6 +490,37 @@ mod tests {
         let ids: Vec<_> = p.events.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, ["claude:s:a1:test_run", "claude:s:p1:agent_busy"]);
         assert!(matches!(p.events[1].kind, tally_scoring::Kind::AgentBusy { end_ts } if end_ts == parse_rfc3339_ms(&ts(3)).unwrap()));
+    }
+
+    #[test]
+    fn a_pending_tool_use_survives_a_restart_beyond_the_warm_up_window() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("p")).unwrap();
+        let f = d.path().join("p/s.jsonl");
+        let head = |ty: &str, u: &str, i: usize| {
+            let t = ts(i);
+            format!(r#"{{"type":"{ty}","uuid":"{u}","sessionId":"s","timestamp":"{t}""#)
+        };
+        let append = |lines: &[String]| {
+            std::fs::OpenOptions::new().create(true).append(true).open(&f).unwrap().write_all((lines.join("\n") + "\n").as_bytes()).unwrap();
+        };
+        let now = parse_rfc3339_ms(&ts(0)).unwrap() + 3_600_000;
+        let mut st = BTreeMap::from([("started".to_owned(), "1".to_owned())]);
+        append(&[
+            head("user", "p1", 0) + r#","origin":{"kind":"human"},"message":{"content":"go"}}"#,
+            head("assistant", "a1", 1)
+                + r#","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+        ]);
+        ClaudeCode::new(d.path().to_path_buf()).poll(now, &mut st).unwrap(); // restart 1
+        let filler = "y".repeat(WARM_UP_BYTES as usize + 1000);
+        append(&[head("assistant", "a2", 2) + &format!(r#","message":{{"content":[{{"type":"text","text":"{filler}"}}]}}}}"#)]);
+        ClaudeCode::new(d.path().to_path_buf()).poll(now, &mut st).unwrap(); // restart 2
+        append(&[
+            head("user", "r1", 3) + r#","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"x"}]}}"#,
+            head("system", "d1", 4) + r#","subtype":"turn_duration"}"#,
+        ]);
+        let p = ClaudeCode::new(d.path().to_path_buf()).poll(now, &mut st).unwrap();
+        assert!(p.events.iter().any(|e| e.id == "claude:s:a1:test_run"), "{:?}", p.events.iter().map(|e| &e.id).collect::<Vec<_>>());
     }
 
     #[test]
@@ -472,5 +620,23 @@ mod tests {
         // nothing seen at all: no promise
         st.remove("last_ts:p/s.jsonl");
         assert_eq!(ClaudeCode::new(d.path().to_path_buf()).poll(now, &mut st).unwrap().watermark, None);
+    }
+
+    #[test]
+    fn reports_health_for_doctor() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("p")).unwrap();
+        let t0 = ts(0);
+        let line = format!(r#"{{"type":"user","uuid":"p1","sessionId":"s","timestamp":"{t0}","origin":{{"kind":"human"}},"message":{{"content":"go"}}}}"#);
+        std::fs::write(d.path().join("p/s.jsonl"), line + "
+not json
+").unwrap();
+        let mut src = ClaudeCode::new(d.path().to_path_buf());
+        let mut st = BTreeMap::from([("started".to_owned(), "1".to_owned())]);
+        src.poll(parse_rfc3339_ms(&t0).unwrap() + 3_600_000, &mut st).unwrap();
+        let h = src.take_health().expect("claude-code reports health");
+        assert_eq!((h.files_found, h.records, h.errors), (1, 2, 1));
+        assert_eq!(h.last_event_ts, Some(parse_rfc3339_ms(&t0).unwrap()));
+        assert_ne!(h.format, "unknown");
     }
 }

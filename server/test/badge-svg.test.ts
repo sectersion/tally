@@ -33,7 +33,7 @@ async function project(o: { public?: boolean; owned?: boolean } = {}) {
 /** One chain: verified/unverified seconds, stored on both the entries and the chain row. */
 async function ledger(projectId: string, v: number, u: number) {
   const [c] =
-    await sql`insert into chains (project_id, ruleset, head_hash, count, verified_s) values (${projectId}, ${`r${rnd()}`}, ${GENESIS}, 1, ${v}) returning id`;
+    await sql`insert into chains (project_id, ruleset, head_hash, count, verified_s, unverified_s) values (${projectId}, ${`r${rnd()}`}, ${GENESIS}, 1, ${v}, ${u}) returning id`;
   await sql`insert into ledger_entries (chain_id, seq, hash, prev_hash, action_id, ts, kind, verified_s, unverified_s, entry)
     values (${c.id}, 0, ${`${++hashNo}`.padStart(64, "0")}, ${GENESIS}, 'a0', ${Date.now()}, 'k', ${v}, ${u}, '{}'::json)`;
   await sql`update projects set change_seq = change_seq + 1 where id = ${projectId}`;
@@ -253,4 +253,11 @@ test("private never answers 304", async () => {
   const etag = (await get(`/badge/${p.name}.svg`)).headers.get("etag") ?? "";
   for (const inm of [etag, "*"])
     expect((await get(`/badge/${p.name}.svg`, { "if-none-match": inm })).status).toBe(200);
+});
+
+test("private project badge carries no etag (no project id or change_seq leak)", async () => {
+  const p = await project({ public: false });
+  const r = await get(`/badge/${p.name}.json`);
+  expect(r.status).toBe(200);
+  expect(r.headers.get("etag")).toBeNull();
 });

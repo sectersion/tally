@@ -62,6 +62,24 @@ fn lunch_scenario_end_to_end() {
 }
 
 #[test]
+fn verify_published_rejects_an_empty_chain_and_continues_past_unreadable_files() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let claims = [tally_scoring::Claim {
+        action_id: "a0".into(), ts: 0, project: Some("o/r".into()), kind: "prompt".into(),
+        verified_s: 360, unverified_s: 0, reasons: vec![], features: Default::default(),
+    }];
+    let (gf, ef, mf) = (t.path().join("good.json"), t.path().join("empty.json"), t.path().join("missing.json"));
+    std::fs::write(&gf, serde_json::to_string(&tally_scoring::chain(&claims, tally_scoring::GENESIS_HASH)).unwrap()).unwrap();
+    std::fs::write(&ef, "[]").unwrap();
+    let o = tally(&home, &["verify-published", ef.to_str().unwrap(), mf.to_str().unwrap(), gf.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(!out(&o).contains("ok: ") || out(&o).matches("ok: ").count() == 1, "{}", out(&o));
+    assert!(out(&o).contains("empty chain") && out(&o).contains("FAIL reading file"), "{}", out(&o));
+    assert!(out(&o).contains(&format!("ok: {}", gf.display())), "{}", out(&o));
+}
+
+#[test]
 fn project_add_rejects_a_directory_outside_git_and_prints_the_id_inside_one() {
     let t = tempfile::tempdir().unwrap();
     let home = t.path().join("home");
@@ -157,7 +175,7 @@ fn run_once_with_an_empty_projects_dir_finalizes_and_exits() {
     let home = t.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     let empty = tempfile::tempdir().unwrap();
-    std::fs::write(home.join("config.toml"), format!("[claude_code]\nprojects_dir = '{}'\n", empty.path().display())).unwrap();
+    std::fs::write(home.join("config.toml"), format!("[copilot]\nenabled = false\n[claude_code]\nprojects_dir = '{}'\n", empty.path().display())).unwrap();
     let o = tally(&home, &["run", "--once"]);
     assert!(o.status.success(), "{}", err(&o));
     assert_eq!(out(&o), "added 0, duplicates 0, skipped 0, final 0, provisional 0");
@@ -339,6 +357,20 @@ fn verify_published_checks_files_without_creating_a_database() {
 }
 
 #[test]
+fn verify_published_continues_past_unreadable_files_and_flags_empty_chains() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let (bin, empty, missing) = (t.path().join("rnd.bin"), t.path().join("empty.json"), t.path().join("missing.json"));
+    std::fs::write(&bin, [0xffu8, 0xfe, 0x80, 0x81]).unwrap();
+    std::fs::write(&empty, "[]").unwrap();
+    let o = tally(&home, &["verify-published", bin.to_str().unwrap(), missing.to_str().unwrap(), empty.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    let s = out(&o);
+    assert!(s.contains(&format!("{}: FAIL reading file", bin.display())), "{s}");
+    assert!(s.contains(&format!("{}: FAIL: empty chain", empty.display())), "{s}");
+}
+
+#[test]
 fn project_add_rejects_a_name_that_is_not_owner_slash_repo() {
     let t = tempfile::tempdir().unwrap();
     let o = tally(&t.path().join("home"), &["project", "add", t.path().to_str().unwrap(), "--name", "foo"]);
@@ -446,6 +478,18 @@ fn login_checks_the_token_against_a_configured_server() {
     let o = login(t.path(), "tok", &[]);
     assert!(o.status.success(), "{}", err(&o));
     assert!(err(&o).contains("warning"), "{}", err(&o));
+    assert_eq!(out(&o), "token stored, not verified");
+}
+
+#[test]
+fn sync_with_a_rejected_token_prints_one_line_per_project() {
+    let f = FakeServer::start("tok");
+    let t = tempfile::tempdir().unwrap();
+    let home = synced_home(t.path(), &f.url);
+    login(&home, "tok_wrong", &[]); // rejected, but the token stays stored
+    let o = tally(&home, &["sync"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(err(&o).matches("device token rejected").count(), 1, "{}", err(&o));
 }
 
 #[test]
@@ -471,9 +515,19 @@ fn doctor_prints_a_line_per_configured_source() {
     tally_daemon::store::Store::open(&home.join("tally.db")).unwrap();
     let o = tally(&home, &["doctor"]);
     assert!(o.status.success(), "{}", err(&o));
-    assert_eq!(out(&o), "claude-code  no_logs  files=0  last=never  format=-  errors=0/0");
+    assert_eq!(
+        out(&o),
+        "aider  unsupported  no adapter built; see docs/adapters/aider.md
+claude-code  no_logs  files=0  last=never  format=-  errors=0/0
+codex  unsupported  no adapter built; see docs/adapters/codex.md
+copilot  no_logs  files=0  last=never  format=-  errors=0/0  unsupported_signals=interrupt,tool_decision,agent_write
+cursor  unsupported  no adapter built; see docs/adapters/cursor.md
+gemini-cli  unsupported  no adapter built; see docs/adapters/gemini-cli.md
+heartbeat  no_logs  files=0  last=never  format=-  errors=0/0"
+    );
     let o = tally(&home, &["doctor", "--json"]);
     assert!(out(&o).contains("\"status\": \"no_logs\""), "{}", out(&o));
+    assert!(out(&o).contains("\"status\": \"unsupported\""), "{}", out(&o));
 }
 
 #[test]
@@ -485,7 +539,9 @@ fn heartbeat_config_prints_loopback_url_and_token_and_creates_token_file() {
     let s = out(&o);
     assert!(s.lines().any(|l| l == "api_url = http://127.0.0.1:25930/api"), "{s}");
     let key = s.lines().find_map(|l| l.strip_prefix("api_key = ")).expect("api_key line").to_string();
-    assert!(key.len() >= 32, "{s}");
+    // wakatime-cli rejects any key that is not UUID-shaped ("invalid api key format"): 8-4-4-4-12 hex digits
+    assert_eq!(key.split('-').map(str::len).collect::<Vec<_>>(), [8, 4, 4, 4, 12], "{s}");
+    assert!(s.lines().any(|l| l == "heartbeat_rate_limit_seconds = 0"), "{s}");
     let file = std::fs::read_to_string(home.join("heartbeat.token")).unwrap();
     assert_eq!(file.trim(), key);
     assert!(s.contains("heartbeat.token"), "{s}");
@@ -660,4 +716,25 @@ fn submit_declined_uploads_nothing() {
         assert_eq!(rx.try_iter().filter(|(h, _)| h.starts_with("POST ")).count(), 0);
         assert!(submissions_empty(&home));
     }
+}
+
+#[test]
+fn doctor_exits_zero_on_fresh_home_corrupt_config_and_corrupt_db() {
+    let d = tempfile::tempdir().unwrap();
+    let o = tally(d.path(), &["doctor"]);
+    assert!(o.status.success(), "fresh home: {}", err(&o));
+    assert!(out(&o).contains("no_logs"), "{}", out(&o));
+    std::fs::write(d.path().join("config.toml"), "x=[[").unwrap();
+    std::fs::write(d.path().join("tally.db"), "notadb").unwrap();
+    let o = tally(d.path(), &["doctor"]);
+    assert!(o.status.success(), "corrupt: {}", err(&o));
+    assert!(err(&o).contains("config.toml") && err(&o).contains("tally.db"), "{}", err(&o));
+}
+
+#[test]
+fn version_flag_prints_name_and_crate_version() {
+    let o = Command::new(env!("CARGO_BIN_EXE_tally")).arg("--version").output().unwrap();
+    assert!(o.status.success());
+    let s = out(&o);
+    assert!(s.starts_with("tally ") && s.contains(env!("CARGO_PKG_VERSION")), "got {s:?}");
 }

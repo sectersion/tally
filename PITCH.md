@@ -52,7 +52,7 @@ Every **human action** earns the human-present time since your previous action, 
 - approving or rejecting an agent's change,
 - an edit that survives (measured as surviving diff, not keystrokes),
 - a test or build run,
-- a commit made by you (agent commits are identified from transcript tool calls).
+- a commit made by you (agent commits are identified from transcript tool calls; only Claude Code transcripts are recognised today, so commits made by other agent harnesses are counted as yours).
 
 From each claim, Tally subtracts:
 
@@ -123,12 +123,12 @@ The judge routes work to humans. Reviewers can overturn any label, and the least
 | Planting a failing test, Esc spam, trivial commits | Each is neutralized by its own rule |
 | Hourly bot pushes | Server-witnessed time without human actions earns nothing |
 | Prompt injection inside the transcript | The judge only routes to humans; red-teamed with published results |
-| **Hardware input faker, fully modified client** | **Out of scope.** Faking work live costs real time, and sampling remains |
+| **Hardware input faker, software input jiggler (e.g. `mouse_event`), fully modified client** | **Out of scope.** Idle is read from `GetLastInputInfo`, which any process in the session can reset; detecting that needs input hooks, which Tally promises not to use. Faking work live costs real time, and sampling remains |
 
 ## Privacy
 
-- **Logged hours:** only an action ledger leaves your machine: project, action type, seconds claimed, and a reason code. No text, no window titles, no URLs, and nothing about projects you don't track.
-- **Submitted hours:** prompt text leaves only for projects you choose to submit. It goes to a **self-hosted** judge, never a third-party model provider, and is deleted after review. Only labels and rationale are kept.
+- **Logged hours:** everything that can leave your machine is listed here. Sync uploads ledger entries (project, action type, action id, timestamps, features, seconds claimed, reason code) and head hashes with their commit timestamps. Publish writes badge data and public ledger files to the `tally-data` branch. No text, no window titles, no URLs, and nothing about projects you don't track.
+- **Submitted hours:** scrubbed session text leaves only on an explicit `tally submit` (planned, plan 10; not built yet), for projects you choose to submit. It goes to a **self-hosted** judge, never a third-party model provider, and is deleted after review. Only labels and rationale are kept.
 - **No keylogger APIs, no screen capture, no all-sites browser permissions.**
 - A one-page explainer for parents ships with the installer.
 
@@ -195,7 +195,7 @@ Public profiles show verified hours next to linked commits. It's useful even if 
 | Motivating on its own | Craft-focused local dashboard, session replay, public profiles |
 | Passive | Reads existing logs, heartbeats, git, and idle time; no user effort after install |
 | Central server, accounts, profiles, projects, git, real-time dashboard | TypeScript server, Hack Club Auth, GitHub App, server-sent events |
-| Privacy friendly | Ledger only for logged hours; text only for chosen submissions, self-hosted, deleted after review |
+| Privacy friendly | Ledger, head hashes and badge data only for logged hours; text only for chosen submissions, self-hosted, deleted after review |
 | All models and harnesses | Harness-agnostic core with small per-harness plugins |
 | Windows, macOS, Linux on low-spec machines | One Rust binary per platform; measured on a 2016 laptop |
 | Trustworthy | Agent time earns zero, caps, judge, trust anchors, sampling |

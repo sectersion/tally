@@ -24,6 +24,8 @@ pub enum FinalizeError {
     Divergence { index: usize, action_id: String, field: &'static str },
     #[error("ledger was written under ruleset {ledger} but this build scores with {current}; finalize will not append across a ruleset change")]
     RulesetChanged { ledger: String, current: String },
+    #[error("another finalize kept changing the ledger while this one ran; nothing is wrong with the ledger, try again")]
+    Busy,
 }
 
 /// A claim is final iff `ts + INTERRUPT_FOLLOW_MS <= horizon`. The stored ledger must be a
@@ -34,7 +36,7 @@ pub enum FinalizeError {
 /// never withdrawn and `finalized_through` never moves back; later claims wait for the new
 /// horizon. If another writer adds an event at or below the horizon while this runs (a new
 /// source with no watermark yet), the append is refused with `Conflict` and everything is
-/// re-read; up to 3 attempts in total on `Conflict` or `ChainBroken`.
+/// re-read; up to 8 attempts in total, with backoff on `Conflict` or `ChainBroken`.
 ///
 /// Presence guard ("live capture only"), active iff `store.presence_required()`; off, no
 /// claim is ever skipped:
@@ -59,15 +61,29 @@ pub fn finalize(store: &mut Store) -> Result<FinalizeSummary, FinalizeError> {
         let p = prepare(store)?;
         commit(store, p)
     })
+    .map_err(busy_if_contended)
 }
 
-const ATTEMPTS: usize = 3;
+/// `Conflict`/`ChainBroken` out of `retry` only mean a peer kept winning the race (the ledger prefix was
+/// verified in `prepare`), so say that instead of "ledger chain broken".
+fn busy_if_contended(e: FinalizeError) -> FinalizeError {
+    match e {
+        FinalizeError::Store(StoreError::Conflict | StoreError::ChainBroken) => FinalizeError::Busy,
+        e => e,
+    }
+}
+
+// A busy peer finalizer makes our read stale; back off so it can finish (about 1 s in total).
+const ATTEMPTS: usize = 8;
 
 fn retry<T>(mut attempt: impl FnMut() -> Result<T, FinalizeError>) -> Result<T, FinalizeError> {
     let mut n = 1;
     loop {
         match attempt() {
-            Err(FinalizeError::Store(StoreError::Conflict | StoreError::ChainBroken)) if n < ATTEMPTS => n += 1,
+            Err(FinalizeError::Store(StoreError::Conflict | StoreError::ChainBroken)) if n < ATTEMPTS => {
+                std::thread::sleep(std::time::Duration::from_millis(10 * n as u64));
+                n += 1
+            }
             r => return r,
         }
     }
@@ -92,10 +108,7 @@ struct Derived {
     scored_events: usize,
     claims: Vec<tally_scoring::Claim>,
     skipped: BTreeSet<String>,
-    /// Entries of all chains but the current one.
-    before: usize,
-    /// The chain of `RULESET_VERSION` (empty right after a bump).
-    current: Vec<LedgerEntry>,
+    ledger: Vec<LedgerEntry>,
 }
 
 fn derive(store: &Store) -> Result<Derived, FinalizeError> {
@@ -116,23 +129,24 @@ fn derive(store: &Store) -> Result<Derived, FinalizeError> {
         }
     }
     let skipped: BTreeSet<String> = store.skipped()?.into_iter().map(|(id, ..)| id).collect();
-    let mut chains = store.ledger_chains()?;
-    let current_ruleset = tally_scoring::RULESET_VERSION;
-    let last_is_current = chains.last().is_some_and(|c| c.ruleset == current_ruleset);
-    if !last_is_current && chains.iter().any(|c| c.ruleset == current_ruleset) {
-        // an older build after a newer one
+    let ledger = store.ledger()?;
+    // Each ruleset has its own chain starting at `GENESIS_HASH`. `before` is how many entries sit in
+    // earlier chains: they were scored under other rules, so only the current chain is re-checked.
+    let before = ledger.iter().rposition(|e| e.ruleset != tally_scoring::RULESET_VERSION).map_or(0, |i| i + 1);
+    // The current ruleset already has a chain that is not the last one: an older build after a newer one.
+    if ledger[..before].iter().any(|e| e.ruleset == tally_scoring::RULESET_VERSION) {
         return Err(FinalizeError::RulesetChanged {
-            ledger: chains.last().map(|c| c.ruleset.clone()).unwrap_or_default(),
-            current: current_ruleset.to_string(),
+            ledger: ledger[before - 1].ruleset.clone(),
+            current: tally_scoring::RULESET_VERSION.to_string(),
         });
     }
-    let current = if last_is_current { chains.pop().map(|c| c.entries).unwrap_or_default() } else { Vec::new() };
-    let before = chains.iter().map(|c| c.entries.len()).sum::<usize>();
-    if let Some((index, field)) = first_divergence(&current, before, &claims, &skipped) {
-        let action_id = current[index - before].action_id.clone();
+    // ponytail: alignment is by count, which holds while a ruleset changes seconds but not which
+    // actions are claims; a ruleset that adds or removes claims needs alignment by `action_id`.
+    if let Some((index, field)) = first_divergence(&ledger, before, &claims, &skipped) {
+        let action_id = ledger[index].action_id.clone();
         return Err(FinalizeError::Divergence { index, action_id, field });
     }
-    Ok(Derived { guard, horizon, scored_events, claims, skipped, before, current })
+    Ok(Derived { guard, horizon, scored_events, claims, skipped, ledger })
 }
 
 /// Verifies the stored ledger is a prefix of the re-scored claims; writes nothing.
@@ -147,14 +161,13 @@ pub(crate) fn rescored_seconds(store: &Store, index: usize) -> Result<Option<(u3
     Ok(score(&store.events()?).into_iter().filter(|c| !skipped.contains(&c.action_id)).nth(index).map(|c| (c.verified_s, c.unverified_s)))
 }
 
-/// First ledger index that differs from the claims (minus `skipped`, never ledgered) and the
-/// first differing field; `"missing"` when the ledger is longer than the claims. `project` is
-/// not compared.
-/// `ledger` is the current chain, aligned with the kept claims from `before`; the index returned is global.
-fn first_divergence(ledger: &[LedgerEntry], before: usize, claims: &[tally_scoring::Claim], skipped: &BTreeSet<String>) -> Option<(usize, &'static str)> {
-    let mut kept = claims.iter().filter(|c| !skipped.contains(&c.action_id)).skip(before);
-    ledger.iter().enumerate().find_map(|(i, e)| {
-        let Some(c) = kept.next() else { return Some((before + i, "missing")) };
+/// First ledger index at or after `from` that differs from the claims (minus `skipped`, never
+/// ledgered) and the first differing field; `"missing"` when the ledger is longer than the claims.
+/// Entries before `from` belong to earlier rulesets and are not compared. `project` is not compared.
+fn first_divergence(ledger: &[LedgerEntry], from: usize, claims: &[tally_scoring::Claim], skipped: &BTreeSet<String>) -> Option<(usize, &'static str)> {
+    let mut kept = claims.iter().filter(|c| !skipped.contains(&c.action_id)).skip(from);
+    ledger.iter().enumerate().skip(from).find_map(|(i, e)| {
+        let Some(c) = kept.next() else { return Some((i, "missing")) };
         let field = if c.action_id != e.action_id { "action_id" }
             else if c.ts != e.ts { "ts" }
             else if c.kind != e.kind { "kind" }
@@ -163,22 +176,19 @@ fn first_divergence(ledger: &[LedgerEntry], before: usize, claims: &[tally_scori
             else if c.reasons != e.reasons { "reasons" }
             else if c.features != e.features { "features" }
             else { return None };
-        Some((before + i, field))
+        Some((i, field))
     })
 }
 
 fn prepare(store: &Store) -> Result<Prepared, FinalizeError> {
-    let Derived { guard, horizon, scored_events, claims, skipped, before, current } = derive(store)?;
-    // ponytail: alignment is by count, which holds while a ruleset changes seconds but not which actions are
-    // claims; a ruleset that adds or removes claims needs alignment by `action_id`.
-    let have = before + current.len();
+    let Derived { guard, horizon, scored_events, claims, skipped, ledger } = derive(store)?;
     // Read after the horizon, so it holds every interval the horizon implies.
     let coverage = if guard { store.coverage()? } else { Vec::new() };
     // Indexes into `claims` of every claim not already skipped.
     let kept: Vec<usize> = (0..claims.len()).filter(|&i| !skipped.contains(&claims[i].action_id)).collect();
 
     let (mut new, mut skips) = (Vec::new(), Vec::new());
-    for &i in kept.get(have..).unwrap_or(&[]) {
+    for &i in kept.get(ledger.len()..).unwrap_or(&[]) {
         let c = &claims[i];
         if horizon.is_none_or(|h| c.ts.saturating_add(INTERRUPT_FOLLOW_MS) > h) {
             break;
@@ -194,8 +204,10 @@ fn prepare(store: &Store) -> Result<Prepared, FinalizeError> {
             skips.push((c.action_id.clone(), c.ts, NO_COVERAGE.to_string()));
         }
     }
-    let entries = chain(&new, current.last().map_or(GENESIS_HASH, |e| e.hash.as_str()));
-    let final_total = have + entries.len();
+    // A new ruleset opens its own chain at genesis; `derive` already refused a ledger that went back.
+    let prev = ledger.last().filter(|e| e.ruleset == tally_scoring::RULESET_VERSION).map_or(GENESIS_HASH, |e| e.hash.as_str());
+    let entries = chain(&new, prev);
+    let final_total = ledger.len() + entries.len();
     let summary = FinalizeSummary {
         appended: entries.len(),
         skipped: skips.len(),
@@ -228,62 +240,50 @@ mod tests {
         e.hash = tally_scoring::ledger::entry_hash(&e);
         e
     }
-    fn entry_of(ruleset: &str, action: &str, prev: &str) -> LedgerEntry {
-        let mut e = LedgerEntry { ruleset: ruleset.into(), action_id: action.into(), prev_hash: prev.into(), ..old_ruleset_entry() };
-        e.hash = tally_scoring::ledger::entry_hash(&e);
-        e
-    }
-    fn old_then_events() -> Store {
+    fn two_old_chain_store() -> Store {
         let mut s = Store::open_in_memory().unwrap();
         s.append_ledger(&[old_ruleset_entry()], 5, 0, &[]).unwrap();
         s.append_events(&[prompt("a", 10, 600), edit("b", 100_000)]).unwrap();
-        s.set_watermark("src", 1_000_000).unwrap();
+        s.set_watermark("src", 10_000_000).unwrap();
         s
     }
     #[test] fn finalize_after_a_ruleset_change_starts_a_new_chain() {
-        let mut s = old_then_events();
-        let r = finalize(&mut s).unwrap();
-        assert_eq!((r.appended, r.final_total), (1, 2));
+        let mut s = two_old_chain_store();
+        finalize(&mut s).unwrap();
         let l = s.ledger().unwrap();
+        // the old entry stands in for claim 0, so only the second claim is new
+        assert_eq!(l.len(), 2);
+        assert_eq!(l[0].ruleset, "old-0");
         assert_eq!((l[1].ruleset.as_str(), l[1].prev_hash.as_str()), (tally_scoring::RULESET_VERSION, GENESIS_HASH));
-        s.append_events(&[prompt("c", 2_000_000, 600)]).unwrap();
-        s.set_watermark("src", 20_000_000).unwrap();
-        assert_eq!(finalize(&mut s).unwrap().appended, 1);
-        let c = s.ledger_chains().unwrap();
-        assert_eq!((c.len(), c[1].entries.len()), (2, 2));
-        assert_eq!(c[1].entries[1].prev_hash, c[1].entries[0].hash);
-    }
-    #[test] fn a_2026_11_ledger_finalizes_into_a_new_2026_12_chain() {
-        let mut s = Store::open_in_memory().unwrap();
-        s.append_ledger(&[entry_of("2026.11-0", "a", GENESIS_HASH)], 5, 0, &[]).unwrap();
-        s.append_events(&[prompt("b", 10, 600), edit("c", 100_000)]).unwrap();
-        s.set_watermark("src", 1_000_000).unwrap();
-        assert_eq!(finalize(&mut s).unwrap().appended, 1);
+        // a second finalize appends nothing and does not diverge
+        assert_eq!(finalize(&mut s).unwrap().appended, 0);
+        s.append_events(&[edit("c", 20_000_000)]).unwrap();
+        s.set_watermark("src", 30_000_000).unwrap();
+        finalize(&mut s).unwrap();
         let l = s.ledger().unwrap();
-        assert_eq!((l[1].ruleset.as_str(), l[1].prev_hash.as_str()), ("2026.12-0", GENESIS_HASH));
+        assert_eq!(l.len(), 3);
+        assert_eq!(l[2].prev_hash, l[1].hash);
     }
     #[test] fn divergence_only_compares_the_current_chain() {
-        let mut s = Store::open_in_memory().unwrap();
-        s.append_ledger(&[old_ruleset_entry()], -1, 0, &[]).unwrap();   // 1s, unlike what score gives now
-        s.append_events(&[prompt("a", 0, 600), prompt("b", 600_000, 400)]).unwrap();
-        s.set_watermark("src", 1_000_000).unwrap();
-        finalize(&mut s).unwrap();
-        assert_eq!(finalize(&mut s).unwrap().appended, 0);
-        let idle = Event { id: "i".into(), ts: 100_000, kind: Kind::Idle { end_ts: 590_000 }, ..prompt("x", 0, 0) };
-        s.conn.execute("INSERT INTO events (id, ts, json) VALUES (?1, ?2, ?3)",
-            rusqlite::params![idle.id, idle.ts, serde_json::to_string(&idle).unwrap()]).unwrap();
+        // the old entry's seconds and id differ from anything `score` gives now; finalize still works
+        let mut s = two_old_chain_store();
+        assert!(finalize(&mut s).is_ok());
+        // but an edited past event inside the current chain's range still diverges
+        let mut e = s.ledger().unwrap().remove(1);
+        e.verified_s += 1;
+        e.hash = tally_scoring::ledger::entry_hash(&e);
+        s.conn.execute_batch("DROP TRIGGER IF EXISTS ledger_no_update").unwrap();
+        s.conn.execute("UPDATE ledger SET hash = ?1, entry_json = ?2 WHERE seq = 2",
+            rusqlite::params![e.hash, serde_json::to_string(&e).unwrap()]).unwrap();
         assert!(matches!(finalize(&mut s), Err(FinalizeError::Divergence { index: 1, .. })));
     }
     #[test] fn going_back_to_an_older_build_is_refused() {
-        let mut s = Store::open_in_memory().unwrap();
-        let o = old_ruleset_entry();
-        let cur = entry_of(tally_scoring::RULESET_VERSION, "b", GENESIS_HASH);
-        let z = entry_of("zzz-0", "c", GENESIS_HASH);
-        for e in [o, cur, z] { s.append_ledger(&[e], 5, 0, &[]).unwrap(); }
-        s.append_events(&[prompt("a", 10, 600)]).unwrap();
-        s.set_watermark("src", 10_000_000).unwrap();
+        let mut s = two_old_chain_store();
+        finalize(&mut s).unwrap();
+        let mut z = LedgerEntry { ruleset: "zzz-0".into(), action_id: "z".into(), ..old_ruleset_entry() };
+        z.hash = tally_scoring::ledger::entry_hash(&z);
+        s.append_ledger(&[z], 6, 0, &[]).unwrap();
         assert!(matches!(finalize(&mut s), Err(FinalizeError::RulesetChanged { ledger, .. }) if ledger == "zzz-0"));
-        assert_eq!(s.ledger().unwrap().len(), 3);
     }
     #[test] fn final_prefix_boundary_is_exact() {
         let mut s = Store::open_in_memory().unwrap();
@@ -570,11 +570,21 @@ mod tests {
         check_derivation(&s).unwrap();
         finalize(&mut s).unwrap();
     }
-    #[test] fn retry_gives_up_after_three_attempts_and_only_on_conflict_or_chain_broken() {
+    #[test] fn persistent_contention_reports_busy_not_chain_broken() {
+        assert!(matches!(busy_if_contended(FinalizeError::Store(StoreError::ChainBroken)), FinalizeError::Busy));
+        assert!(matches!(busy_if_contended(FinalizeError::Store(StoreError::Conflict)), FinalizeError::Busy));
+        assert!(matches!(busy_if_contended(FinalizeError::Divergence { index: 0, action_id: "x".into(), field: "ts" }), FinalizeError::Divergence { .. }));
+    }
+    #[test] fn retry_outlasts_a_busy_peer_that_breaks_the_chain_five_times() {
+        let mut calls = 0;
+        let r = retry(|| { calls += 1; if calls <= 5 { Err(FinalizeError::Store(StoreError::ChainBroken)) } else { Ok(()) } });
+        assert!(r.is_ok());
+    }
+    #[test] fn retry_gives_up_after_eight_attempts_and_only_on_conflict_or_chain_broken() {
         let mut calls = 0;
         let r: Result<(), _> = retry(|| { calls += 1; Err(FinalizeError::Store(StoreError::Conflict)) });
         assert!(matches!(r, Err(FinalizeError::Store(StoreError::Conflict))));
-        assert_eq!(calls, 3);
+        assert_eq!(calls, ATTEMPTS);
         calls = 0;
         let r: Result<(), _> = retry(|| { calls += 1; Err(FinalizeError::Divergence { index: 0, action_id: "x".into(), field: "ts" }) });
         assert!(r.is_err());

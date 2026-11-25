@@ -66,7 +66,11 @@ export function encrypted(raw: Storage, keyB64: string): Storage {
     async put(k, bytes) {
       const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
       const ct = new Uint8Array(
-        await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await key, bytes),
+        await crypto.subtle.encrypt(
+          { name: "AES-GCM", iv },
+          await key,
+          bytes as Uint8Array<ArrayBuffer>,
+        ),
       );
       const out = new Uint8Array(IV_BYTES + ct.length);
       out.set(iv);
@@ -76,9 +80,13 @@ export function encrypted(raw: Storage, keyB64: string): Storage {
     async get(k) {
       const o = await raw.get(k);
       if (!o) return null;
-      const iv = o.subarray(0, IV_BYTES);
+      const iv = o.subarray(0, IV_BYTES) as Uint8Array<ArrayBuffer>;
       return new Uint8Array(
-        await crypto.subtle.decrypt({ name: "AES-GCM", iv }, await key, o.subarray(IV_BYTES)),
+        await crypto.subtle.decrypt(
+          { name: "AES-GCM", iv },
+          await key,
+          o.subarray(IV_BYTES) as Uint8Array<ArrayBuffer>,
+        ),
       );
     },
     del: (k) => raw.del(k),

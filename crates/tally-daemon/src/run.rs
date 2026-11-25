@@ -139,6 +139,11 @@ pub fn sources(cfg: &Config, home: &Path, store: &mut Store) -> Result<Vec<Box<d
             v.push(Box::new(crate::claude_code::ClaudeCode::new(dir)));
         }
     }
+    if cfg.copilot.enabled {
+        v.push(Box::new(crate::adapters::copilot::CopilotSource::new(
+            cfg.copilot.home.clone().or_else(crate::adapters::copilot::default_home),
+        )));
+    }
     if cfg.heartbeat.enabled {
         let seed = store.agent_writes_since(now_ms() - crate::heartbeat::SEED_WINDOW_MS).unwrap_or_default();
         let token_file = cfg.heartbeat.token_file.clone().unwrap_or_else(|| home.join("heartbeat.token"));
@@ -171,6 +176,9 @@ pub fn sources(cfg: &Config, home: &Path, store: &mut Store) -> Result<Vec<Box<d
     }
     if !cc.enabled {
         disabled.push("claude-code");
+    }
+    if !cfg.copilot.enabled {
+        disabled.push("copilot");
     }
     if !cfg.heartbeat.enabled {
         disabled.push("heartbeat");
@@ -205,20 +213,67 @@ pub fn sync_hook(cfg: &Config, home: &Path) -> Option<TickHook> {
 }
 
 /// Seconds between ticks: 0 would busy-loop and a huge value overflows `Instant`, so 1 s to 24 h.
-pub fn effective_interval(secs: u64) -> u64 {
-    secs.clamp(1, 86_400)
+/// With presence enabled the cap is half the coverage gap, else samples count as a gap and no coverage is stored.
+pub fn effective_interval(secs: u64, presence: bool) -> u64 {
+    let max = if presence { crate::presence::COVERAGE_MAX_GAP_MS as u64 / 2000 } else { 86_400 };
+    secs.clamp(1, max)
+}
+
+/// A wall clock this far ahead of the monotonic clock is a jump, not time passing.
+const CLOCK_JUMP_MS: i64 = 5 * 60_000;
+/// Consecutive jump ticks before the new wall time is believed (a real clock change, not a glitch).
+const CLOCK_JUMP_TICKS: u32 = 3;
+
+/// Turns the wall clock into the tick's `now_ms`. One forward jump (bad NTP, VM resume) would push every
+/// source watermark and `finalized_through` into the future and drop all later real events as late
+/// (REDTEAM-2, r2b-2), so a jump ahead of the monotonic clock is replaced by monotonic time for a few ticks.
+/// Backward jumps pass through: they only delay finalization.
+pub struct ClockGuard {
+    last: Option<(i64, Instant)>,
+    strikes: u32,
+}
+
+impl ClockGuard {
+    pub fn new() -> Self {
+        ClockGuard { last: None, strikes: 0 }
+    }
+
+    pub fn now(&mut self, wall: i64, mono: Instant) -> i64 {
+        let mut now = wall;
+        if let Some((w, m)) = self.last {
+            let expected = w + mono.saturating_duration_since(m).as_millis() as i64;
+            if wall - expected > CLOCK_JUMP_MS && self.strikes < CLOCK_JUMP_TICKS {
+                self.strikes += 1;
+                now = expected;
+            } else {
+                self.strikes = 0;
+            }
+        }
+        self.last = Some((now, mono));
+        now
+    }
+}
+
+impl Default for ClockGuard {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Tick every `cfg.run.interval_secs` until `stop` is set. The current tick always completes.
 pub fn run_loop(store: &mut Store, cfg: &Config, home: &Path, stop: &AtomicBool) -> Result<(), StoreError> {
     let mut srcs = sources(cfg, home, store)?;
     let mut hks = hooks(cfg, home);
-    while !stop.load(Ordering::Relaxed) {
-        for e in run_once(store, &mut srcs, &mut hks, now_ms()).errors {
+    let mut clock = ClockGuard::new();
+    // `tally stop` drops <home>/paused; leave by the same path as Ctrl-C.
+    let paused = || home.join("paused").exists();
+    while !stop.load(Ordering::Relaxed) && !paused() {
+        let now = clock.now(now_ms(), Instant::now());
+        for e in run_once(store, &mut srcs, &mut hks, now).errors {
             eprintln!("{e}");
         }
-        let deadline = Instant::now() + Duration::from_secs(effective_interval(cfg.run.interval_secs));
-        while !stop.load(Ordering::Relaxed) {
+        let deadline = Instant::now() + Duration::from_secs(effective_interval(cfg.run.interval_secs, cfg.presence.enabled));
+        while !stop.load(Ordering::Relaxed) && !paused() {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 break;
@@ -364,7 +419,9 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open(&d.path().join("tally.db")).unwrap();
         let mut cfg = Config::default();
+        cfg.heartbeat.enabled = false;
         cfg.claude_code.enabled = false;
+        cfg.copilot.enabled = false;
         cfg.presence.enabled = true;
         s.set_watermark("presence", 5).unwrap();
         s.set_watermark("git", 100).unwrap();
@@ -384,10 +441,42 @@ mod tests {
         assert_eq!(s.horizon().unwrap(), Some(100));
     }
     #[test]
+    fn sources_registers_copilot_by_default_and_not_when_disabled() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = Store::open(&d.path().join("tally.db")).unwrap();
+        let mut cfg = Config::default();
+        cfg.heartbeat.enabled = false;
+        cfg.claude_code.enabled = false;
+        cfg.presence.enabled = false;
+        let mut ids = |c: &Config| sources(c, d.path(), &mut s).unwrap().iter().map(|x| x.id().to_string()).collect::<Vec<_>>();
+        assert_eq!(ids(&cfg), ["copilot", "git"]);
+        cfg.copilot.enabled = false;
+        assert_eq!(ids(&cfg), ["git"]);
+    }
+    #[test]
+    fn one_forward_clock_jump_is_not_believed_but_a_lasting_one_is() {
+        let (mut g, t, w) = (ClockGuard::new(), Instant::now(), 1_800_000_000_000i64);
+        let sec = Duration::from_secs;
+        assert_eq!(g.now(w, t), w);
+        let jumped = w + 30 * 86_400_000;
+        assert_eq!(g.now(jumped, t + sec(60)), w + 60_000); // glitch tick: monotonic time
+        assert_eq!(g.now(w + 120_000, t + sec(120)), w + 120_000); // clock corrected
+        let (mut g, mut at) = (ClockGuard::new(), t);
+        g.now(w, at);
+        for _ in 0..CLOCK_JUMP_TICKS {
+            at += sec(60);
+            assert!(g.now(jumped, at) < jumped);
+        }
+        at += sec(60);
+        assert_eq!(g.now(jumped, at), jumped); // it stayed: believed
+    }
+
+    #[test]
     fn a_zero_interval_ticks_every_second() {
-        assert_eq!((effective_interval(0), effective_interval(15)), (1, 15));
-        assert_eq!(effective_interval(u64::MAX), 86_400);
-        let _ = Instant::now() + Duration::from_secs(effective_interval(u64::MAX)); // no overflow panic
+        assert_eq!((effective_interval(0, false), effective_interval(15, false)), (1, 15));
+        assert_eq!(effective_interval(u64::MAX, false), 86_400);
+        assert_eq!((effective_interval(65, true), effective_interval(65, false)), (30, 65)); // presence needs ticks well under COVERAGE_MAX_GAP_MS
+        let _ = Instant::now() + Duration::from_secs(effective_interval(u64::MAX, false)); // no overflow panic
     }
     #[test]
     fn a_failing_hook_does_not_stop_the_next() {
@@ -415,16 +504,41 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open_in_memory().unwrap();
         let mut cfg = Config::default();
+        cfg.heartbeat.enabled = false;
         cfg.run.interval_secs = 3600;
         cfg.claude_code.enabled = false;
         cfg.presence.enabled = false;
         run_loop(&mut s, &cfg, d.path(), &stop).unwrap();
     }
     #[test]
+    fn the_run_loop_exits_when_paused_appears() {
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let d = tempfile::tempdir().unwrap();
+        let mut s = Store::open_in_memory().unwrap();
+        let mut cfg = Config::default();
+        cfg.heartbeat.enabled = false;
+        cfg.run.interval_secs = 1;
+        cfg.claude_code.enabled = false;
+        cfg.presence.enabled = false;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|sc| {
+            sc.spawn(|| {
+                run_loop(&mut s, &cfg, d.path(), &stop).unwrap();
+                tx.send(()).unwrap();
+            });
+            std::thread::sleep(Duration::from_millis(300));
+            std::fs::write(d.path().join("paused"), "").unwrap();
+            let r = rx.recv_timeout(Duration::from_secs(3));
+            stop.store(true, Ordering::Relaxed); // let the scope end even on failure
+            r.expect("run_loop ignored paused");
+        });
+    }
+    #[test]
     fn a_disabled_publish_hook_makes_no_git_call() {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open_in_memory().unwrap();
         let mut cfg = Config::default();
+        cfg.heartbeat.enabled = false;
         cfg.publish.enabled = false;
         cfg.publish.remote = Some(d.path().join("nope").to_string_lossy().into_owned());
         let mut hks = hooks(&cfg, d.path());

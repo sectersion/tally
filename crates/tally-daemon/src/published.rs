@@ -19,10 +19,21 @@ pub enum PublishError {
     PublishedChain { project: String, ruleset: String, index: usize, reason: &'static str },
 }
 
-/// `owner/repo`: two non-empty segments of `[A-Za-z0-9._-]`, neither `.` nor `..`.
+/// `owner/repo`: two segments of `[A-Za-z0-9._-]`, 1..=100 chars, not `.`/`..`/`.git` (git ignores it),
+/// not ending in `.` (Windows aliases it) and not a Windows device name (`con`, `aux.x`, `com1`, ...).
 pub fn valid_public_name(name: &str) -> bool {
     let seg = |s: &str| {
-        !s.is_empty() && s != "." && s != ".." && s.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+        let stem = s.split('.').next().unwrap_or("").to_ascii_uppercase();
+        let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+        !s.is_empty()
+            && s.len() <= 100
+            && s != "."
+            && s != ".."
+            && !s.eq_ignore_ascii_case(".git")
+            && !s.ends_with('.')
+            && !device
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
     };
     matches!(name.split_once('/'), Some((a, b)) if seg(a) && seg(b))
 }
@@ -34,10 +45,22 @@ fn resolve<'a>(names: &'a BTreeMap<String, String>, p: &str) -> Option<&'a str> 
 
 fn valid_names(store: &Store) -> Result<BTreeMap<String, String>, PublishError> {
     let names = store.project_names()?;
-    match names.values().find(|n| !valid_public_name(n)) {
-        Some(bad) => Err(PublishError::BadName(bad.clone())),
-        None => Ok(names),
+    if let Some(bad) = names.values().find(|n| !valid_public_name(n)) {
+        return Err(PublishError::BadName(bad.clone()));
     }
+    // Names differing only by case share a directory on case-insensitive filesystems.
+    let mut seen = HashSet::new();
+    for n in names.values().collect::<HashSet<_>>() {
+        if !seen.insert(n.to_ascii_lowercase()) {
+            return Err(PublishError::BadName(n.clone()));
+        }
+    }
+    Ok(names)
+}
+
+/// True if `name` differs only by case from a different already-registered public name.
+pub fn case_collides(store: &Store, name: &str) -> Result<bool, PublishError> {
+    Ok(store.project_names()?.values().any(|n| n != name && n.eq_ignore_ascii_case(name)))
 }
 
 /// Rows to append; writes nothing.
@@ -143,6 +166,14 @@ pub struct PublishedCheck {
 /// Checks a downloaded public chain file: valid chain from genesis, one project, one ruleset.
 pub fn verify_published_json(json: &str) -> Result<PublishedCheck, String> {
     let entries: Vec<LedgerEntry> = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    // unhashed fields (unknown keys) would pass the chain check, so require a lossless round trip
+    let raw: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    if serde_json::to_value(&entries).map_err(|e| e.to_string())? != raw {
+        return Err("FAIL: entries contain unknown or unhashed fields".into());
+    }
+    if entries.is_empty() {
+        return Err("FAIL: empty chain".into());
+    }
     verify_chain(&entries, GENESIS_HASH).map_err(|e| format!("FAIL at entry {}: {}", e.index, e.reason))?;
     let first = entries.first();
     if entries.iter().any(|e| Some(&e.project) != first.map(|f| &f.project) || Some(&e.ruleset) != first.map(|f| &f.ruleset)) {
@@ -189,6 +220,22 @@ mod tests {
         for n in names { s.conn.execute(&format!("DROP TRIGGER {n}"), []).unwrap(); }
     }
 
+    #[test] fn case_differing_names_are_rejected() {
+        let mut s = store_with_ledger(Some("Owner/Repo"));
+        assert!(case_collides(&s, "owner/repo").unwrap());
+        assert!(!case_collides(&s, "Owner/Repo").unwrap());
+        s.register_project("p2", "C:/r2", Some("owner/repo")).unwrap();
+        assert!(matches!(pending(&s), Err(PublishError::BadName(_))));
+    }
+    #[test] fn verify_published_rejects_unhashed_extra_fields() {
+        let mut s = store_with_ledger(Some("owner/repo"));
+        sync(&mut s, true).unwrap();
+        let entries: Vec<_> = s.published_rows("owner/repo").unwrap().into_iter().map(|r| r.entry).collect();
+        let mut v = serde_json::to_value(&entries).unwrap();
+        assert!(verify_published_json(&v.to_string()).is_ok());
+        v[0]["extra"] = "smuggled text".into();
+        assert!(verify_published_json(&v.to_string()).unwrap_err().contains("unknown"));
+    }
     #[test] fn unnamed_projects_publish_nothing() {
         let mut s = store_with_ledger(None);
         assert!(sync(&mut s, true).unwrap().is_empty());
@@ -266,19 +313,16 @@ mod tests {
     #[test] fn a_new_ruleset_starts_a_new_published_chain() {
         let mut s = Store::open_in_memory().unwrap();
         s.register_project("p1", "C:/r", Some("owner/repo")).unwrap();
-        let mut prev = GENESIS_HASH.to_string();
-        let mut entries = Vec::new();
+        // the main ledger holds one chain per ruleset, each starting at genesis
         for (i, rs) in ["r1", "r2"].into_iter().enumerate() {
             let mut e = LedgerEntry {
                 v: 1, ruleset: rs.into(), action_id: format!("a{i}"), ts: i as i64, project: Some("owner/repo".into()),
                 kind: "prompt".into(), verified_s: 10, unverified_s: 0, reasons: vec![], features: Default::default(),
-                prev_hash: prev.clone(), hash: String::new(),
+                prev_hash: GENESIS_HASH.into(), hash: String::new(),
             };
             e.hash = entry_hash(&e);
-            prev = GENESIS_HASH.to_string();   // each ruleset is its own main chain, at genesis
-            entries.push(e);
+            s.append_ledger(&[e], 0, 0, &[]).unwrap();
         }
-        for e in &entries { s.append_ledger(std::slice::from_ref(e), 0, 0, &[]).unwrap(); }
         let rows = sync(&mut s, true).unwrap();
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|r| r.entry.prev_hash == GENESIS_HASH));
@@ -309,7 +353,10 @@ mod tests {
         assert_eq!(after[0], before[0]);
     }
     #[test] fn bad_public_names_are_rejected() {
-        for bad in ["", "owner", "a/b/c", "../x", "o/..", "o/r r", "o/r?x"] { assert!(!valid_public_name(bad), "{bad}"); }
+        for bad in ["", "owner", "a/b/c", "../x", "o/..", "o/r r", "o/r?x",
+            "o/.git", "o/.GIT", "o/r.", "o/con", "o/CON", "o/aux.x", "o/com1", "o/lpt9.txt"] { assert!(!valid_public_name(bad), "{bad}"); }
+        assert!(!valid_public_name(&format!("o/{}", "a".repeat(101))));
+        for ok in ["o/.github", "o/console", "o/com0", "o/com10", "o/r.x", &format!("o/{}", "a".repeat(100))] { assert!(valid_public_name(ok), "{ok}"); }
         assert!(valid_public_name("sectersion/tally"));
         let mut s = store_with_ledger(None);
         s.register_project("p1", "C:/r", Some("o/r r")).unwrap();
@@ -333,7 +380,7 @@ mod tests {
         let bad = good.replacen("\"verified_s\":100", "\"verified_s\":999", 1);
         assert!(verify_published_json(&bad).unwrap_err().starts_with("FAIL at entry"));
         assert_eq!(verify_published_json(&chain_json(&["o/r", "o/x"])).unwrap_err(), "FAIL: file mixes projects or rulesets");
-        assert_eq!(verify_published_json("[]").unwrap().entries, 0);
+        assert_eq!(verify_published_json("[]").unwrap_err(), "FAIL: empty chain");
         assert!(verify_published_json("nope").is_err());
     }
     #[test] fn badge_hours_floor_to_one_decimal() {

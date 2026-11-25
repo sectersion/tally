@@ -1,7 +1,7 @@
 import type { BunRequest, Server, SQL } from "bun";
 import { hashToken, newToken, requireToken } from "./auth.ts";
 import { badgeResponse, rateLimited } from "./badge.ts";
-import { BUNDLE_MAX_COMPRESSED, type Config, MAX_BATCH, MAX_BODY_BYTES } from "./config";
+import { type Config, MAX_BATCH, MAX_BODY_BYTES } from "./config";
 import {
   createDeviceCode,
   decide,
@@ -9,7 +9,7 @@ import {
   pendingDevice,
   pollDeviceToken,
 } from "./device.ts";
-import { HttpError, json, parse, readJson } from "./errors.ts";
+import { HttpError, json, parse, readCapped, readJson } from "./errors.ts";
 import {
   accessibleRepos,
   dispatch,
@@ -151,6 +151,10 @@ const formError = (e: HttpError) => {
   return r;
 };
 
+/** lock_not_available / query_canceled (lock_timeout, statement_timeout). */
+const isDbTimeout = (e: unknown) =>
+  ["55P03", "57014"].includes((e as { errno?: string })?.errno ?? "");
+
 /**
  * The router's one try/catch: HttpError becomes its response, anything else a logged 500.
  * Also writes the one request log line (route pattern only; never headers, body, query or token).
@@ -163,6 +167,9 @@ function handle<P extends string>(
     const t0 = performance.now();
     let res: Response;
     try {
+      // A decoded NUL in a path parameter can never match a row and makes Postgres throw.
+      if (Object.values(req.params as Record<string, string>).some((v) => v.includes("\0")))
+        throw new HttpError(404, { error: "not_found" });
       res = await f(req, server);
     } catch (e) {
       if (e instanceof HttpError && e.location) res = redirect(e.location);
@@ -171,7 +178,10 @@ function handle<P extends string>(
       else if (e instanceof HttpError && req.method === "POST" && isForm(route)) res = formError(e);
       else if (e instanceof HttpError)
         res = json(e.status, e.body, e.status === 429 ? { "retry-after": "60" } : undefined);
-      else {
+      else if (isDbTimeout(e)) {
+        log("warn", "db timeout");
+        res = json(503, { error: "unavailable" }, { "retry-after": "3" });
+      } else {
         log("error", e instanceof Error ? e.message : String(e)); // message only: never bodies or tokens
         res = json(500, { error: "internal" });
       }
@@ -202,13 +212,14 @@ export function createServer(deps: Deps) {
   };
   const limitAuth = (req: Request, server: Srv) => limit(`auth:${ip(req, server)}`, rates.auth);
   const limitPage = (req: Request, server: Srv) => limit(`page:${ip(req, server)}`, rates.page);
-  /** Token auth, then the per-token bucket; failed auth spends the caller's ip bucket instead. */
+  /** Token auth, then the per-token bucket; failed auth (401 or 403) spends the caller's ip bucket instead. */
   const authed = async (req: Request, server: Srv, projectId: string) => {
     let tokenId: number;
     try {
       ({ tokenId } = await requireToken(sql, req, projectId));
     } catch (e) {
-      if (e instanceof HttpError && e.status === 401) limit(`ip:${ip(req, server)}`);
+      if (e instanceof HttpError && (e.status === 401 || e.status === 403))
+        limit(`ip:${ip(req, server)}`);
       throw e;
     }
     limit(`tok:${tokenId}`);
@@ -228,7 +239,11 @@ export function createServer(deps: Deps) {
     return `user:${u.userId}`;
   };
   /** Read the body once per request. */
-  const formOf = (req: Request) => req.formData().catch(() => new FormData());
+  const formOf = async (req: Request) => {
+    const bytes = await readCapped(req); // 413 past MAX_BODY_BYTES, before parsing
+    const headers = { "content-type": req.headers.get("content-type") ?? "" };
+    return new Response(bytes as BodyInit, { headers }).formData().catch(() => new FormData());
+  };
   /** Every session POST: the signed-in user, their form:<user_id> bucket, then CSRF. */
   const sessionForm = async (req: Request) => {
     const s = await requireUser(sql, req);
@@ -270,11 +285,9 @@ export function createServer(deps: Deps) {
   return Bun.serve({
     port: deps.port,
     development: false,
-    // Transport hard cap only: Bun resets the connection past it, so it sits above MAX_BODY_BYTES
-    // and readJson answers the JSON 413 for everything in between (Content-Length is checked first).
-    // Bun has one cap for every route: it is the bundle upload's, and the other routes keep
-    // their own 1 MiB checks (readJson, the webhook).
-    maxRequestBodySize: BUNDLE_MAX_COMPRESSED + MAX_BODY_BYTES,
+    // Transport cap only: Bun answers an empty 413 past it, so it sits far above MAX_BODY_BYTES and
+    // readCapped answers the JSON 413 (Content-Length first, then a streamed count).
+    maxRequestBodySize: 256 * MAX_BODY_BYTES,
     routes: {
       "/static/:file": {
         GET: async (req) => {
@@ -378,7 +391,7 @@ export function createServer(deps: Deps) {
           const bound = cookieValue(req, OAUTH_COOKIE);
           if (!bound || !same(bound, state)) throw new HttpError(400, { error: "bad_state" });
           const [st] =
-            await sql`delete from oauth_states where state_hash = ${hashToken(state)} and expires_at > now() returning verifier, nonce, return_to`;
+            await sql`delete from oauth_states where state_hash = ${hashToken(state)} and nonce not like 'gh:%' and expires_at > now() returning verifier, nonce, return_to`;
           if (!st) throw new HttpError(400, { error: "bad_state" });
           let u: Awaited<ReturnType<typeof exchange>>;
           try {
@@ -434,7 +447,7 @@ export function createServer(deps: Deps) {
           const { owner, name } = req.params;
           const p = await visibleProject(sql, owner, name, await getSession(sql, req));
           if (!p) return notFound();
-          return live.stream(req, server, p.id, ip(req, server));
+          return live.stream(req, server, p.id, ip(req, server), p.public);
         }),
       },
       "/settings": {
@@ -489,6 +502,7 @@ export function createServer(deps: Deps) {
         GET: handle("/device", async (req) => {
           const s = await requireUser(sql, req);
           const code = new URL(req.url).searchParams.get("code") ?? "";
+          if (code.trim()) limit(`form:${s.userId}`, rates.form); // code lookup is an oracle
           const viewer = viewerOf(s);
           if (!code.trim())
             return page(
@@ -562,7 +576,7 @@ export function createServer(deps: Deps) {
           );
           await sql`delete from oauth_states where expires_at < now()`;
           await sql`insert into oauth_states (state_hash, verifier, nonce, return_to, expires_at)
-            values (${hashToken(state)}, ${verifier}, ${s.userId}, ${safeReturn(new URL(req.url).searchParams.get("return_to"))}, now() + interval '10 minutes')`;
+            values (${hashToken(state)}, ${verifier}, ${`gh:${s.userId}`}, ${safeReturn(new URL(req.url).searchParams.get("return_to"))}, now() + interval '10 minutes')`;
           return redirect(ghAuthorizeUrl(cfg, state, challenge), [ghOauthCookie(cfg, state)]);
         }),
       },
@@ -580,9 +594,9 @@ export function createServer(deps: Deps) {
           if (!code || !state) throw new HttpError(400, { error: "bad_callback" });
           const bound = cookieValue(req, GH_OAUTH_COOKIE);
           if (!bound || !same(bound, state)) throw new HttpError(400, { error: "bad_state" });
-          // nonce holds the user who started the flow: a state cannot be completed by someone else.
+          // nonce holds gh:<user who started the flow> (the prefix keeps /auth/callback from taking it): a state cannot be completed by someone else.
           const [st] =
-            await sql`delete from oauth_states where state_hash = ${hashToken(state)} and nonce = ${s.userId} and expires_at > now() returning verifier, return_to`;
+            await sql`delete from oauth_states where state_hash = ${hashToken(state)} and nonce = ${`gh:${s.userId}`} and expires_at > now() returning verifier, return_to`;
           if (!st) throw new HttpError(400, { error: "bad_state" });
           let g: Awaited<ReturnType<typeof exchangeCode>>;
           try {
@@ -686,8 +700,13 @@ export function createServer(deps: Deps) {
           // Re-derived from the live list: the form only names a candidate.
           if (!(await findUpdEntries(full, fetchFn)).some((e) => e.id === id))
             throw new HttpError(400, { error: "not a match for the linked repo" });
+          // The Ships fetch above can outlive an unlink-repo: only write while the link is live.
           await sql.begin(async (tx) => {
-            await tx`update projects set upd_record_id = ${id} where id = ${p.id}`;
+            const r = await tx`update projects set upd_record_id = ${id}
+              where id = ${p.id} and exists (select 1 from project_repos
+                where project_id = ${p.id} and unlinked_at is null) returning id`;
+            if (!r.length)
+              throw new HttpError(409, { error: "repo was unlinked; link a repo first" });
             await bumpChange(tx, p.id);
           });
           return redirect(`/p/${p.public_name}/settings`);
@@ -774,10 +793,7 @@ export function createServer(deps: Deps) {
       "/github/webhook": {
         // No cookies and no rate limit (GitHub's addresses are shared): the signature is the auth.
         POST: handle("/github/webhook", async (req) => {
-          const tooBig = () => new HttpError(413, { error: "body_too_large", max: MAX_BODY_BYTES });
-          if (Number(req.headers.get("content-length")) > MAX_BODY_BYTES) throw tooBig();
-          const raw = new Uint8Array(await req.arrayBuffer());
-          if (raw.byteLength > MAX_BODY_BYTES) throw tooBig();
+          const raw = await readCapped(req);
           if (
             !verifySignature(cfg.githubWebhookSecret, raw, req.headers.get("x-hub-signature-256"))
           )
