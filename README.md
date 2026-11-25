@@ -70,3 +70,8 @@ This proves the chain is intact and the hours add up. A chain cut to its first N
 ## License
 
 [AGPL-3.0](LICENSE)
+
+## Attribution
+
+Everything in the datamining/ folder is external analyses and does not contain code or implementatations.
+Credit to flaticon.com for the "tally" favicon on tally.dino.icu.
