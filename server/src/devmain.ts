@@ -19,7 +19,7 @@ const sweep = () =>
     log("error", "sweep failed", { reason: e instanceof Error ? e.message : String(e) }),
   );
 void sweep();
-const sweeper = setInterval(sweep, 3_600_000);
+setInterval(sweep, 3_600_000);
 const live = createLive(sql);
 const s = createServer({ sql, port: cfg.port, cfg, live, storage });
 log("info", "listening", { port: s.port });

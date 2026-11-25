@@ -1,6 +1,6 @@
-import { describe, test, expect } from "bun:test";
-import { landingPage } from "../src/pages.ts";
+import { describe, expect, test } from "bun:test";
 import { CSP } from "../src/html.ts";
+import { landingPage } from "../src/pages.ts";
 
 describe("landingPage", () => {
   test("structure and no script/inline style/csrf", async () => {

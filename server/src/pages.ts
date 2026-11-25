@@ -2,10 +2,10 @@ import type { SQL } from "bun";
 import type { Config } from "./config.ts";
 import {
   CSP,
-  LandingCSP,
   formatHours,
   formatMinutes,
   html,
+  LandingCSP,
   notFound,
   page,
   Safe,
@@ -260,25 +260,24 @@ async function projectMain(
   }
   const weekRows = [...weeks.entries()]
     .toSorted((a, b) => (a[0] < b[0] ? 1 : -1))
-    .map(
-      ([week, s]) =>
-        html`<tr><td>week of ${week}</td><td>${formatHours(s)}</td></tr>`,
-    );
+    .map(([week, s]) => html`<tr><td>week of ${week}</td><td>${formatHours(s)}</td></tr>`);
   const days = none;
   // ponytail: pie is a two-slice svg (verified vs unverified); a legend can come later
   const pie = (() => {
     const total = hours.verified_s + hours.unverified_s;
     if (total <= 0) return none;
-    const r = 42, c = 2 * Math.PI * r;
+    const r = 42;
     const vf = hours.verified_s / total;
     // pie slices start at 12 o'clock, sweep clockwise
     const pieSlice = (from: number, frac: number, cls: string) => {
       if (frac >= 0.999) return html`<circle class="${cls}" cx="60" cy="60" r="${r}" />`;
       if (frac <= 0.0001) return none;
       const a = (from - 0.25) * 2 * Math.PI;
-      const x = 60 + r * Math.cos(a), y = 60 + r * Math.sin(a);
+      const x = 60 + r * Math.cos(a),
+        y = 60 + r * Math.sin(a);
       const a2 = (from + frac - 0.25) * 2 * Math.PI;
-      const x2 = 60 + r * Math.cos(a2), y2 = 60 + r * Math.sin(a2);
+      const x2 = 60 + r * Math.cos(a2),
+        y2 = 60 + r * Math.sin(a2);
       const large = frac > 0.5 ? 1 : 0;
       return html`<path class="${cls}" d="M60 60 L${x.toFixed(2)} ${y.toFixed(2)} A${r} ${r} 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)} Z" />`;
     };
@@ -307,13 +306,15 @@ async function projectMain(
   )}${mine ? html`<p><a href="/p/${p.public_name}/settings">Project settings</a></p>` : none}
 ${numbers}${trend}${pie}
 ${
-    active.length ? html`<p class="avg">avg ${formatHours(avg)}/day over ${active.length} active days</p>` : none
-  }${days}
+  active.length
+    ? html`<p class="avg">avg ${formatHours(avg)}/day over ${active.length} active days</p>`
+    : none
+}${days}
 ${
-    weekRows.length > 1
-      ? html`<h2>Verified by week</h2><table><thead><tr><th>Week</th><th>Verified</th></tr></thead><tbody>${weekRows}</tbody></table>`
-      : none
-  }
+  weekRows.length > 1
+    ? html`<h2>Verified by week</h2><table><thead><tr><th>Week</th><th>Verified</th></tr></thead><tbody>${weekRows}</tbody></table>`
+    : none
+}
 <h2>Witnessed pushes</h2><p>Each row sums the verified time of ledger entries timestamped after the previous witnessed push and at or before this one. The push times are the server's; the ledger times are claimed by the device. It says nothing about effort. Times marked claimed come from the push and are not checked.</p>${pushes}
 <p>Ledger head last committed ${head?.t ? utc(head.t) : "never"}</p>
 <h2>Badge</h2><pre>${`![tracked with Tally](${cfg.publicBaseUrl}/badge/${p.public_name}.svg)`}</pre>

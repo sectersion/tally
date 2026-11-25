@@ -154,7 +154,7 @@ test("unverified shown separately and never added", async () => {
   expect(t).toContain("1.0 h verified");
   expect(t).toContain("30 min unverified (not counted)");
   expect(t).not.toMatch(/\b1\.5 h\b(?= verified)/); // never shows the sum as verified
-  expect(t).toContain('1.5 h claimed'); // the pie labels it honestly
+  expect(t).toContain("1.5 h claimed"); // the pie labels it honestly
 });
 
 test("under a minute of unverified time is <1 min, never 0 min", async () => {
