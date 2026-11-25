@@ -3,6 +3,7 @@ on:
   push:
     branches: [main]
     paths: ["server/**", "crates/tally-scoring/**", ".github/workflows/deploy.yml"]
+  workflow_dispatch:
 jobs:
   deploy:
     runs-on: ubuntu-latest
