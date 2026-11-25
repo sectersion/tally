@@ -1,0 +1,13 @@
+[Unit]
+Description=Tally time tracker
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=/usr/local/bin/tally run --home /home/o/.local/share/tally
+Restart=on-failure
+RestartSec=10
+Environment=TALLY_HOME=/home/o/.local/share/tally
+
+[Install]
+WantedBy=graphical-session.target
