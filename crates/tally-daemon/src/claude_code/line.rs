@@ -46,6 +46,21 @@ pub enum LineError {
 
 const INTERRUPT_PREFIX: &str = "[Request interrupted by user";
 
+/// User entries carrying these flags are machine-generated (compaction summaries,
+/// meta/system lines), not text the person typed, even when origin.kind is human.
+const HUMAN_SKIP_FLAGS: [&str; 4] = ["isMeta", "isCompactSummary", "isVisibleInTranscriptOnly", "isVirtual"];
+/// Prefixes of injected/not-typed prompt text seen on entries with no origin
+/// field at all (see tests/fixtures/claude_code/FORMAT.md).
+const HUMAN_SKIP_PREFIXES: [&str; 7] = [
+    "<task-notification>",
+    "<local-command-stdout>",
+    "<local-command-stderr>",
+    "<bash-stdout>",
+    "<bash-stderr>",
+    "Caveat:",
+    "This session is being continued from a previous conversation",
+];
+
 pub fn classify(line: &[u8]) -> Result<Vec<Entry>, LineError> {
     let s = std::str::from_utf8(line).map_err(|_| LineError::Utf8)?;
     let v: Value = serde_json::from_str(s).map_err(|_| LineError::Json)?;
@@ -96,6 +111,11 @@ fn user(v: &Value, meta: Meta) -> Vec<Entry> {
         None => v["turnOrigin"].as_str() == Some("human"),
     };
     if human {
+        if HUMAN_SKIP_FLAGS.iter().any(|f| v[f].as_bool() == Some(true))
+            || HUMAN_SKIP_PREFIXES.iter().any(|p| text_of(content).starts_with(p))
+        {
+            return vec![];
+        }
         return match content {
             Value::String(_) | Value::Array(_) => vec![Entry::HumanPrompt {
                 meta,
@@ -116,13 +136,21 @@ fn user(v: &Value, meta: Meta) -> Vec<Entry> {
     }
     // One permissionDecision per entry; it applies to the entry as a whole (n = 0).
     let pd = &v["permissionDecision"];
-    if !out.is_empty() && pd["source"].as_str().is_some_and(|s| s != "config") {
-        let decision = match pd["decision"].as_str() {
+    let decision = if pd["source"].as_str().is_some_and(|s| s != "config") {
+        match pd["decision"].as_str() {
             Some("accept") => Some(Decision::Approve),
             Some("reject") => Some(Decision::Deny),
             _ => None,
-        };
-        if let Some(decision) = decision {
+        }
+    } else if v["toolDenialKind"].as_str() == Some("user-rejected") {
+        // Human rejected a tool use with no permissionDecision recorded; same
+        // decision, and the id stays n = 0 so a later parser dedups the two forms.
+        Some(Decision::Deny)
+    } else {
+        None
+    };
+    if let Some(decision) = decision {
+        if !out.is_empty() {
             out.push(Entry::ToolDecision { meta, decision, n: 0 });
         }
     }
@@ -281,6 +309,53 @@ mod tests {
         assert!(matches!(&d[..], [Entry::ToolResult { .. }, Entry::ToolDecision { decision: Decision::Deny, .. }]));
         assert!(matches!(&cls(&l(r#"{"decision":"accept","source":"config"}"#))[..], [Entry::ToolResult { .. }]));
         assert!(matches!(&cls(&l(r#"{"decision":"maybe","source":"user_temporary"}"#))[..], [Entry::ToolResult { .. }]));
+    }
+
+    #[test]
+    fn compact_summary_and_meta_flags_are_not_human_prompts() {
+        for flag in HUMAN_SKIP_FLAGS {
+            let l = line("user", &format!(r#","origin":{{"kind":"human"}},"{flag}":true"#), r#"{"content":"hi"}"#);
+            assert!(cls(&l).is_empty(), "{flag}");
+        }
+        let l = line(
+            "user",
+            r#","isVisibleInTranscriptOnly":true"#, // no origin: prefix guard must catch it
+            r#"{"content":"This session is being continued from a previous conversation that ran out of context."}"#,
+        );
+        assert!(cls(&l).is_empty());
+        assert!(matches!(&cls(&human(r#","origin":{"kind":"human"}"#))[..], [Entry::HumanPrompt { .. }]));
+    }
+
+    #[test]
+    fn injected_prefixes_are_not_human_prompts() {
+        for p in HUMAN_SKIP_PREFIXES {
+            let l = line("user", "", &format!(r#"{{"content":"{p} something"}}"#));
+            assert!(cls(&l).is_empty(), "{p}");
+        }
+    }
+
+    #[test]
+    fn user_rejected_denial_without_permission_decision_is_a_deny() {
+        let l = line(
+            "user",
+            r#","toolUseResult":{},"toolDenialKind":"user-rejected""#,
+            r#"{"content":[{"type":"tool_result","tool_use_id":"t1","content":"denied","is_error":true}]}"#,
+        );
+        assert!(matches!(&cls(&l)[..], [Entry::ToolResult { tool_use_id, .. }, Entry::ToolDecision { decision: Decision::Deny, n: 0, .. }] if tool_use_id == "t1"));
+        // Other denial kinds are automatic; no decision.
+        let auto = line(
+            "user",
+            r#","toolUseResult":{},"toolDenialKind":"automode-unavailable""#,
+            r#"{"content":[{"type":"tool_result","tool_use_id":"t2","content":"out"}]}"#,
+        );
+        assert!(matches!(&cls(&auto)[..], [Entry::ToolResult { .. }]));
+        // Rejection with a config-sourced permissionDecision stays deduped to one decision.
+        let both = line(
+            "user",
+            r#","toolUseResult":{},"toolDenialKind":"user-rejected","permissionDecision":{"decision":"reject","source":"config"}"#,
+            r#"{"content":[{"type":"tool_result","tool_use_id":"t3","content":"out"}]}"#,
+        );
+        assert!(matches!(&cls(&both)[..], [Entry::ToolResult { .. }, Entry::ToolDecision { decision: Decision::Deny, .. }]));
     }
 
     #[test]
