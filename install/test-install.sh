@@ -34,6 +34,35 @@ echo "$out" | grep -q "already installed" || fail "second install did not say 'a
 after=$(ls -l --time-style=+%s "$t/bin/tally" 2>/dev/null || ls -l -D %s "$t/bin/tally" 2>/dev/null || stat -f %m "$t/bin/tally")
 [ "$before" = "$after" ] || fail "binary changed on the second run"
 
+# (b2) an upgrade over a RUNNING daemon pauses it with `tally stop`, swaps the binary, and resumes with `tally start`
+# (never `service stop`/`service start`: those fail or leave tracking paused when no service is installed).
+# Both versions are stubs so no real daemon is started.
+mkrel() { # version -> $t/rel-<version> with a stub `tally` that logs its subcommand
+  mkdir -p "$t/rel-$1" "$t/stage-$1"
+  cat > "$t/stage-$1/tally" <<STUB
+#!/bin/sh
+case "\$1" in
+  --version) echo "tally $1" ;;
+  service) [ "\$2" = status ] && exit 0; echo "service-\$2" >> "\$STUBLOG" ;;
+  stop | start) echo "$1:\$1" >> "\$STUBLOG" ;;
+esac
+exit 0
+STUB
+  chmod +x "$t/stage-$1/tally"
+  tar -C "$t/stage-$1" -czf "$t/rel-$1/tally-$1-$arch-$os.tar.gz" tally
+  if command -v sha256sum >/dev/null 2>&1; then x=$(sha256sum "$t/rel-$1/tally-$1-$arch-$os.tar.gz" | cut -d' ' -f1); else x=$(shasum -a 256 "$t/rel-$1/tally-$1-$arch-$os.tar.gz" | cut -d' ' -f1); fi
+  echo "$x  tally-$1-$arch-$os.tar.gz" > "$t/rel-$1/SHA256SUMS"
+}
+mkrel 0.0.9; mkrel 0.0.10
+mkdir -p "$t/up"
+TALLY_RELEASE_BASE="file://$t/rel-0.0.9" TALLY_VERSION=0.0.9 TALLY_INSTALL_DIR="$t/up" sh "$here/install.sh" >/dev/null || fail "installing the old version failed"
+[ "$("$t/up/tally" --version)" = "tally 0.0.9" ] || fail "old stub not installed"
+STUBLOG="$t/stub.log" TALLY_RELEASE_BASE="file://$t/rel-0.0.10" TALLY_VERSION=0.0.10 TALLY_INSTALL_DIR="$t/up" sh "$here/install.sh" >/dev/null || fail "upgrade exited non-zero"
+[ "$("$t/up/tally" --version)" = "tally 0.0.10" ] || fail "upgrade did not install 0.0.10"
+want=$(printf '0.0.9:stop\n0.0.10:start')
+got=$(cat "$t/stub.log" 2>/dev/null || true)
+[ "$got" = "$want" ] || fail "upgrade must run the OLD 'tally stop' then the NEW 'tally start', got: $(echo "$got" | tr '\n' ' ')"
+
 # (c) a corrupt checksum installs nothing
 echo "0000000000000000000000000000000000000000000000000000000000000000  $name" > "$t/rel/SHA256SUMS"
 if inst "$t/clean" >/dev/null 2>&1; then fail "corrupt checksum was accepted"; fi

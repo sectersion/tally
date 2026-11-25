@@ -77,10 +77,12 @@ mkdir -p "$dir"
 was_running=0
 if [ -x "$dir/tally" ] && "$dir/tally" service status --quiet >/dev/null 2>&1; then
   was_running=1
-  "$dir/tally" service stop >/dev/null 2>&1 || true
+  # `tally stop`/`tally start`, not `tally service ...`: the daemon may have been started by a hook with no service
+  # installed, and `service start` would fail (or leave the `paused` marker) in that case.
+  "$dir/tally" stop >/dev/null 2>&1 || true
 fi
 mv -f "$tmp/tally" "$dir/tally.new" && chmod 755 "$dir/tally.new" && mv -f "$dir/tally.new" "$dir/tally"
-[ "$was_running" = 1 ] && "$dir/tally" service start >/dev/null 2>&1 || true
+if [ "$was_running" = 1 ]; then "$dir/tally" start >/dev/null 2>&1 || true; fi
 
 echo "installed tally $ver to $dir"
 case ":$PATH:" in *":$dir:"*) ;; *) echo "add $dir to your PATH (this script does not edit shell profiles)" ;; esac

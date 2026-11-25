@@ -88,6 +88,26 @@ pub struct PurgeOpts<'a> {
     pub daemon_running: &'a dyn Fn() -> bool,
     /// How long to wait for the daemon to exit after the stop request.
     pub wait: std::time::Duration,
+    /// True for the user's own home directory (the real one comes from `dirs::home_dir()`).
+    pub is_user_home: &'a dyn Fn(&Path) -> bool,
+}
+
+/// `--purge` deletes `home` recursively and `--home`/`TALLY_HOME` can name anything. Only a directory that already holds
+/// Tally's own files, is not the user's home and holds no git repository qualifies.
+fn purge_target_problem(home: &Path, is_user_home: &dyn Fn(&Path) -> bool) -> Option<String> {
+    if !home.is_absolute() {
+        return Some(format!("{} is a relative path", home.display()));
+    }
+    if is_user_home(home) {
+        return Some(format!("{} is your home directory", home.display()));
+    }
+    if !home.join("tally.db").exists() && !home.join("config.toml").exists() {
+        return Some(format!("{} is not a Tally data directory (no tally.db or config.toml in it)", home.display()));
+    }
+    if home.join(".git").exists() {
+        return Some(format!("{} holds a git repository", home.display()));
+    }
+    None
 }
 
 /// Removes the service registration; with `purge` also deletes `home`, last, after consent and only once the
@@ -96,6 +116,9 @@ pub fn uninstall(os: &str, s: &ServiceSpec, r: &mut dyn Runner, purge: Option<&P
     if let Some(p) = purge {
         if !p.yes && !(p.confirm)() {
             return Err(ExecError::Refused(format!("--purge deletes {}; pass --yes to confirm (nothing was changed)", s.home.display())));
+        }
+        if let Some(why) = purge_target_problem(&s.home, p.is_user_home) {
+            return Err(ExecError::Refused(format!("refusing to purge: {why}; nothing was changed")));
         }
         // stop the daemon first so it does not hold files open; not running is fine
         let stop: Vec<Step> = plan(os, Action::Stop, s).into_iter().map(|st| if let Step::Run(c) = st { Step::TryRun(c) } else { st }).collect();

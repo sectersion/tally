@@ -48,6 +48,11 @@ fn post(agent: &ureq::Agent, url: &str, body: serde_json::Value) -> Result<(u16,
 
 /// Runs the flow and returns the device token. `say` gets the lines meant for the person (never the token);
 /// `open` tries to open the browser (failure ignored by the caller); `sleep` is injectable for tests.
+/// Only a plain http(s) URL without whitespace or control/quote characters may be handed to the OS to open.
+pub fn browser_safe(u: &str) -> bool {
+    (u.starts_with("https://") || u.starts_with("http://")) && !u.chars().any(|c| c.is_whitespace() || c.is_control() || matches!(c, '"' | '\\' | '<' | '>' | '|' | '^' | '`'))
+}
+
 pub fn fetch_token(server: &str, device_name: &str, say: &mut dyn FnMut(&str), open: &dyn Fn(&str), sleep: &mut dyn FnMut(u64)) -> Result<String> {
     let base = server.trim_end_matches('/');
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build();
@@ -57,6 +62,9 @@ pub fn fetch_token(server: &str, device_name: &str, say: &mut dyn FnMut(&str), o
         bail!("the server refused to start a login (status {status})");
     }
     let c: Code = serde_json::from_str(&body).context("unexpected answer from /v1/device/code")?;
+    if !browser_safe(&c.verification_uri_complete) {
+        bail!("the server sent a verification URL that is not a plain http(s) URL; refusing to show or open it");
+    }
     say(&format!("open {}", c.verification_uri_complete));
     say(&format!("code: {}", c.user_code));
     open(&c.verification_uri_complete);
@@ -128,5 +136,40 @@ mod tests {
         assert_eq!(waits, [5, 10]);
         assert!(said.iter().any(|l| l.contains("BCDF-GHJK")) && said.iter().any(|l| l.starts_with("open http://x/device?code=")));
         assert!(!said.join("\n").contains("SECRET-TOKEN"));
+    }
+
+    /// One request answered with `body` as the /v1/device/code reply.
+    fn serve_code(body: &'static str) -> (String, std::thread::JoinHandle<()>) {
+        let srv = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", srv.server_addr().to_ip().unwrap());
+        let h = std::thread::spawn(move || {
+            if let Some(req) = srv.incoming_requests().next() {
+                req.respond(tiny_http::Response::from_string(body)).unwrap();
+            }
+        });
+        (url, h)
+    }
+
+    #[test]
+    fn a_verification_url_that_is_not_plain_http_is_never_opened() {
+        // The URL comes from the server's JSON and ends up in a process argument: a hostile or intercepted server must not be
+        // able to launch anything (`file:` URLs, a bare program name, or shell metacharacters).
+        for bad in ["file:///C:/Windows/System32/calc.exe", "calc.exe", "javascript:alert(1)", "https://x/y z", r#"https://x/\"y"#, r"https://x/\ncalc", r"https://x/a|calc"] {
+            // (the raw strings are JSON text: \" and \n decode to a quote and a newline in the URL)
+            let body: &'static str = Box::leak(format!(r#"{{"device_code":"d","user_code":"U","verification_uri":"x","verification_uri_complete":"{bad}","expires_in":600,"interval":5}}"#).into_boxed_str());
+            let (url, h) = serve_code(body);
+            let opened = std::cell::Cell::new(false);
+            let said = std::cell::RefCell::new(vec![]);
+            let r = fetch_token(&url, "n", &mut |l| said.borrow_mut().push(l.to_string()), &|_| opened.set(true), &mut |_| {});
+            h.join().unwrap();
+            assert!(r.is_err() && !opened.get(), "{bad}: {r:?}");
+            assert!(r.unwrap_err().to_string().contains("http"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_ampersand_in_a_legitimate_url_is_allowed_and_passed_as_one_argument() {
+        assert!(browser_safe("https://tally.example/device?code=BCDF-GHJK&next=%2Fx"));
+        assert!(!browser_safe("https://tally.example/device&calc.exe |x"));
     }
 }

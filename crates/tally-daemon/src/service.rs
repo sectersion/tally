@@ -69,7 +69,7 @@ fn p(x: &Path) -> String {
 pub fn render_systemd_unit(s: &ServiceSpec) -> String {
     format!(
         "[Unit]\nDescription=Tally time tracker\nAfter=graphical-session.target\nPartOf=graphical-session.target\n\n\
-         [Service]\nExecStart={} run --home {}\nRestart=on-failure\nRestartSec=10\nEnvironment=TALLY_HOME={}\n\n\
+         [Service]\nExecStart={} run --home {}\nRestart=on-failure\nRestartSec=10\nRestartPreventExitStatus=75\nEnvironment=TALLY_HOME={}\n\n\
          [Install]\nWantedBy=graphical-session.target\n",
         sd(&p(&s.exe)),
         sd(&p(&s.home)),
@@ -86,13 +86,14 @@ pub fn render_launchd_plist(s: &ServiceSpec) -> String {
          \t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>{}</string>\n\t\t<string>run</string>\n\t\t<string>--home</string>\n\t\t<string>{}</string>\n\t</array>\n\
          \t<key>RunAtLoad</key>\n\t<true/>\n\
          \t<key>KeepAlive</key>\n\t<dict>\n\t\t<key>SuccessfulExit</key>\n\t\t<false/>\n\t</dict>\n\
+         \t<key>ThrottleInterval</key>\n\t<integer>60</integer>\n\
          \t<key>ProcessType</key>\n\t<string>Background</string>\n\
          \t<key>StandardErrorPath</key>\n\t<string>{}</string>\n\
          </dict>\n</plist>\n",
         xml(s.label),
         xml(&p(&s.exe)),
         xml(&p(&s.home)),
-        xml(&p(&s.home.join("tally.log"))),
+        xml(&format!("{}/tally.log", p(&s.home))), // not join(): on a Windows host that puts a backslash into the golden
     )
 }
 
@@ -113,12 +114,17 @@ pub fn render_task_xml(s: &ServiceSpec) -> String {
          \x20   <RestartOnFailure>\n      <Interval>PT1M</Interval>\n      <Count>3</Count>\n    </RestartOnFailure>\n\
          \x20   <Enabled>true</Enabled>\n\
          \x20 </Settings>\n\
-         \x20 <Actions Context=\"Author\">\n    <Exec>\n      <Command>{}</Command>\n      <Arguments>start --home \"{}\"</Arguments>\n    </Exec>\n  </Actions>\n\
+         \x20 <Actions Context=\"Author\">\n    <Exec>\n      <Command>{}</Command>\n      <Arguments>ensure --home \"{}\"</Arguments>\n    </Exec>\n  </Actions>\n\
          </Task>\n",
         xml(&p(&s.exe)),
         xml(&p(&s.home)),
         u = xml(&s.user),
     )
+}
+
+/// `<exe> <sub> --home <home>`.
+fn tally(s: &ServiceSpec, sub: &str) -> Cmd {
+    Cmd { program: p(&s.exe), args: vec![sub.into(), "--home".into(), p(&s.home)] }
 }
 
 fn cmd(program: &str, args: &[&str]) -> Cmd {
@@ -138,8 +144,10 @@ pub fn plan(os: &str, action: Action, s: &ServiceSpec) -> Vec<Step> {
                     Step::Run(sc(&["daemon-reload"])),
                     Step::Run(sc(&["enable", "--now", "tally.service"])),
                 ],
-                Start => vec![Step::Run(sc(&["start", "tally.service"]))],
-                Stop => vec![Step::Run(sc(&["stop", "tally.service"]))],
+                // `tally start`/`tally stop` clear/write the `paused` marker; without it the next Claude Code prompt
+                // restarts the daemon (ensure), so a stopped service would not stay stopped.
+                Start => vec![Step::Run(tally(s, "start"))],
+                Stop => vec![Step::TryRun(tally(s, "stop")), Step::Run(sc(&["stop", "tally.service"]))],
                 Status => vec![Step::Run(sc(&["is-enabled", "tally.service"]))],
                 Uninstall => vec![Step::TryRun(sc(&["disable", "--now", "tally.service"])), Step::RemoveFile(unit), Step::TryRun(sc(&["daemon-reload"]))],
             }
@@ -157,8 +165,8 @@ pub fn plan(os: &str, action: Action, s: &ServiceSpec) -> Vec<Step> {
                     Step::Run(lc(&["bootstrap", &domain, &pl])),
                     Step::TryRun(lc(&["kickstart", &target])),
                 ],
-                Start => vec![Step::TryRun(lc(&["bootstrap", &domain, &pl])), Step::Run(lc(&["kickstart", &target]))],
-                Stop => vec![Step::Run(lc(&["bootout", &target]))],
+                Start => vec![Step::Run(tally(s, "start"))],
+                Stop => vec![Step::TryRun(tally(s, "stop")), Step::Run(lc(&["bootout", &target]))],
                 Status => vec![Step::Run(lc(&["print", &target]))],
                 Uninstall => vec![Step::TryRun(lc(&["bootout", &target])), Step::RemoveFile(plist)],
             }
@@ -173,9 +181,9 @@ pub fn plan(os: &str, action: Action, s: &ServiceSpec) -> Vec<Step> {
                     Step::Run(st(&["/Create", "/TN", TASK_NAME, "/XML", &xp, "/F"])),
                     Step::Run(st(&["/Run", "/TN", TASK_NAME])),
                 ],
-                Start => vec![Step::Run(st(&["/Run", "/TN", TASK_NAME]))],
+                Start => vec![Step::Run(tally(s, "start"))],
                 // the task only launches the detached daemon, so stopping means `tally stop`
-                Stop => vec![Step::TryRun(st(&["/End", "/TN", TASK_NAME])), Step::Run(Cmd { program: p(&s.exe), args: vec!["stop".into(), "--home".into(), p(&s.home)] })],
+                Stop => vec![Step::TryRun(st(&["/End", "/TN", TASK_NAME])), Step::Run(tally(s, "stop"))],
                 Status => vec![Step::Run(st(&["/Query", "/TN", TASK_NAME]))],
                 Uninstall => vec![Step::TryRun(st(&["/End", "/TN", TASK_NAME])), Step::TryRun(st(&["/Delete", "/TN", TASK_NAME, "/F"])), Step::RemoveFile(xmlp)],
             }

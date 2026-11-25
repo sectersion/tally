@@ -48,3 +48,15 @@ fn missing_machine_description_is_refused_and_no_file_is_written() {
     assert!(e.contains("--machine"), "{e}");
     assert!(!out.exists());
 }
+
+#[test]
+fn the_active_phase_is_only_valid_if_the_daemon_really_ingested_the_load() {
+    // `tally status` prints `events: N`. N = 0 means the load writer failed or the adapter ignored the log layout,
+    // and the "active" numbers would be an idle daemon's, reported as PASS.
+    assert_eq!(events_in_status("events: 120\nfinal_claims: 3\n"), Some(120));
+    assert_eq!(events_in_status("final_claims: 3\n"), None);
+    assert_eq!(events_in_status("events: nope\n"), None);
+    assert!(check_ingested(Some(0)).unwrap_err().to_string().contains("no events"));
+    assert!(check_ingested(None).is_err());
+    assert!(check_ingested(Some(5)).is_ok());
+}

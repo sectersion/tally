@@ -163,6 +163,19 @@ pub struct Options {
     pub plugged: Option<bool>,
 }
 
+/// The `events: N` line of `tally status`.
+pub fn events_in_status(text: &str) -> Option<u64> {
+    text.lines().find_map(|l| l.strip_prefix("events: ")?.trim().parse().ok())
+}
+
+pub fn check_ingested(events: Option<u64>) -> Result<()> {
+    match events {
+        Some(0) => bail!("the daemon ingested no events from the load (the adapter ignored it or the writer wrote nothing); no numbers were written"),
+        Some(_) => Ok(()),
+        None => bail!("could not read the event count from `tally status`; no numbers were written"),
+    }
+}
+
 /// Idle phase: the first tenth of the run, at most 10 minutes.
 fn idle_phase(total: Duration) -> Duration {
     (total / 6).min(Duration::from_secs(600))
@@ -201,13 +214,22 @@ pub fn run(o: &Options) -> Result<Summary> {
         // enough simulated work to outlast the run: the writer is stopped with the process
         plan.hours = ((o.duration.as_secs() * o.speedup) / 3600 + 1) as u32;
         let (logs2, plan2) = (logs.clone(), plan.clone());
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
         std::thread::spawn(move || {
-            let _ = write_session_log(&logs2, &plan2, &mut RealClock);
+            if let Err(e) = write_session_log(&logs2, &plan2, &mut RealClock) {
+                let _ = tx.send(e.to_string());
+            }
         });
         let active_samples = measure(pid, o.duration.saturating_sub(idle_for), Duration::from_secs(1));
         if child.try_wait()?.is_some() {
             bail!("the daemon exited during the measurement; no numbers were written");
         }
+        if let Ok(e) = rx.try_recv() {
+            bail!("the load writer failed ({e}); the active phase would be an idle daemon's numbers, so none were written");
+        }
+        // The daemon must really have ingested the load, or "active" would be an idle daemon reported as PASS.
+        let status = std::process::Command::new(&o.tally).arg("--home").arg(&home).arg("status").output().context("running `tally status`")?;
+        check_ingested(events_in_status(&String::from_utf8_lossy(&status.stdout)))?;
         if active_samples.is_empty() {
             bail!("no samples collected");
         }

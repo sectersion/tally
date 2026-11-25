@@ -7,6 +7,7 @@ PartOf=graphical-session.target
 ExecStart=/usr/local/bin/tally run --home /home/o/.local/share/tally
 Restart=on-failure
 RestartSec=10
+RestartPreventExitStatus=75
 Environment=TALLY_HOME=/home/o/.local/share/tally
 
 [Install]

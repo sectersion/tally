@@ -59,7 +59,7 @@ pub fn choose(env: &DesktopEnv, mutter_present: bool, ext_idle_present: bool) ->
                     Choice::ExtIdleNotify
                 } else {
                     let d = env.desktop.as_deref().unwrap_or("unknown desktop");
-                    Choice::Unsupported(format!("Wayland compositor {d} offers neither org.gnome.Mutter.IdleMonitor nor ext-idle-notify-v1"))
+                    Choice::Unsupported(format!("Wayland compositor {d} offers neither org.gnome.Mutter.IdleMonitor nor ext-idle-notify-v1 version 2"))
                 }
             } else if env.x_display.is_some() {
                 Choice::X11

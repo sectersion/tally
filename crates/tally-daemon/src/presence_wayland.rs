@@ -1,5 +1,7 @@
 //! Wayland idle time through `ext-idle-notify-v1`.
 //!
+//! Needs version 2 (see `available`): version 1 counts idle inhibitors as activity.
+//!
 //! The protocol does not report elapsed idle time: it reports `idled` after a timeout and `resumed` on input.
 //! So below `IDLE_TIMEOUT_MS` the true idle time is unknown and reported as 0; resolution below 30 s is not
 //! available on this path. `Tracker` only opens spans at `IDLE_SAMPLE_MIN_MS` and dates them from `now - idle_ms`,
@@ -91,11 +93,13 @@ mod os {
         }
     }
 
-    /// `WAYLAND_DISPLAY` connects and the compositor advertises `ext_idle_notifier_v1`.
+    /// `WAYLAND_DISPLAY` connects and the compositor advertises `ext_idle_notifier_v1` at version 2 or newer: version 1 only has
+    /// `get_idle_notification`, which never reports idle while ANY idle inhibitor is active (a browser playing video, mpv),
+    /// so a video playing over a running agent would read as presence. Version 2 adds `get_input_idle_notification`, which ignores inhibitors.
     pub fn available() -> bool {
         let Ok(conn) = Connection::connect_to_env() else { return false };
         let Ok((globals, _q)) = registry_queue_init::<State>(&conn) else { return false };
-        globals.contents().with_list(|l| l.iter().any(|g| g.interface == "ext_idle_notifier_v1"))
+        globals.contents().with_list(|l| l.iter().any(|g| g.interface == "ext_idle_notifier_v1" && g.version >= 2))
     }
 
     pub struct ExtIdlePlatform {
@@ -128,8 +132,8 @@ mod os {
         let (globals, mut queue) = registry_queue_init::<State>(&conn).map_err(|e| format!("wayland registry: {e}"))?;
         let qh = queue.handle();
         let seat: wl_seat::WlSeat = globals.bind(&qh, 1..=1, ()).map_err(|e| format!("wl_seat: {e}"))?;
-        let notifier: ExtIdleNotifierV1 = globals.bind(&qh, 1..=1, ()).map_err(|e| format!("ext_idle_notifier_v1: {e}"))?;
-        let _notification = notifier.get_idle_notification(IDLE_TIMEOUT_MS, &seat, &qh, ());
+        let notifier: ExtIdleNotifierV1 = globals.bind(&qh, 2..=2, ()).map_err(|e| format!("ext_idle_notifier_v1: {e}"))?;
+        let _notification = notifier.get_input_idle_notification(IDLE_TIMEOUT_MS, &seat, &qh, ());
         let mut state = State { shared, epoch };
         loop {
             queue.blocking_dispatch(&mut state).map_err(|e| format!("wayland dispatch: {e}"))?;

@@ -18,9 +18,11 @@
 		<key>SuccessfulExit</key>
 		<false/>
 	</dict>
+	<key>ThrottleInterval</key>
+	<integer>60</integer>
 	<key>ProcessType</key>
 	<string>Background</string>
 	<key>StandardErrorPath</key>
-	<string>/home/o/.local/share/tally\tally.log</string>
+	<string>/home/o/.local/share/tally/tally.log</string>
 </dict>
 </plist>

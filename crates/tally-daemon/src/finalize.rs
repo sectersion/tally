@@ -518,6 +518,7 @@ mod tests {
             }
             assert_eq!(ids(&s), ["e200"], "{name}");
             assert_eq!(skipped_ids(&s), ["e950"], "{name}");
+            assert!(s.skipped().unwrap().iter().all(|x| x.2 == "no_presence_coverage"), "{name}: skipped for the wrong reason");
         }
     }
     #[test] fn status_reports_skipped_claims() {

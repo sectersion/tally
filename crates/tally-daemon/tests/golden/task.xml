@@ -31,7 +31,7 @@
   <Actions Context="Author">
     <Exec>
       <Command>/usr/local/bin/tally</Command>
-      <Arguments>start --home "/home/o/.local/share/tally"</Arguments>
+      <Arguments>ensure --home "/home/o/.local/share/tally"</Arguments>
     </Exec>
   </Actions>
 </Task>

@@ -78,12 +78,21 @@ try {
     Expand-Archive -Path $zip -DestinationPath (Join-Path $tmp 'x') -Force
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $wasRunning = $false
+    # `tally stop`/`tally start`, not `tally service ...`: the daemon may have been started by a hook with no service
+    # installed, and `service start` would fail (or leave the `paused` marker) in that case.
+    # Windows PowerShell 5.1 turns a native command's stderr into a terminating error under 'Stop': relax it around them.
+    $ErrorActionPreference = 'Continue'
     if (Test-Path $exe) {
-        & $exe service status --quiet *> $null
-        if ($LASTEXITCODE -eq 0) { $wasRunning = $true; & $exe service stop *> $null }
+        $null = & $exe service status --quiet 2>&1
+        if ($LASTEXITCODE -eq 0) { $wasRunning = $true; $null = & $exe stop 2>&1 }
     }
+    $ErrorActionPreference = 'Stop'
     Copy-Item (Join-Path $tmp 'x\tally.exe') $exe -Force
-    if ($wasRunning) { & $exe service start *> $null }
+    if ($wasRunning) {
+        $ErrorActionPreference = 'Continue'
+        $null = & $exe start 2>&1
+        $ErrorActionPreference = 'Stop'
+    }
 } finally {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }

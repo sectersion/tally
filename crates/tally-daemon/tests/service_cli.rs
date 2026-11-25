@@ -42,7 +42,7 @@ fn spec(home: &Path) -> ServiceSpec {
 }
 
 fn purge(yes: bool, daemon_up: bool) -> PurgeOpts<'static> {
-    PurgeOpts { yes, confirm: &|| false, daemon_running: if daemon_up { &|| true } else { &|| false }, wait: Duration::from_millis(50) }
+    PurgeOpts { yes, confirm: &|| false, daemon_running: if daemon_up { &|| true } else { &|| false }, wait: Duration::from_millis(50), is_user_home: &|_| false }
 }
 
 fn home_with_db() -> tempfile::TempDir {
@@ -131,4 +131,36 @@ fn purge_refuses_while_the_daemon_still_holds_the_home() {
     assert!(matches!(e, ExecError::Refused(_)), "{e}");
     assert!(d.path().join("tally.db").exists());
     assert!(!f.log.iter().any(|l| l.starts_with("rmdir") || l.starts_with("remove")), "{:?}", f.log);
+}
+
+#[test]
+fn purge_refuses_a_directory_that_is_not_a_tally_home() {
+    // `--home ~` or a stale TALLY_HOME must never wipe an arbitrary folder.
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("notes.txt"), b"mine").unwrap();
+    let mut f = Fake::default();
+    let e = uninstall("linux", &spec(d.path()), &mut f, Some(&purge(true, false))).unwrap_err();
+    assert!(matches!(e, ExecError::Refused(ref m) if m.contains("not a Tally data directory")), "{e}");
+    assert!(d.path().join("notes.txt").exists());
+    assert!(f.log.is_empty(), "{:?}", f.log);
+}
+
+#[test]
+fn purge_refuses_a_directory_that_holds_a_git_repository() {
+    let d = home_with_db();
+    std::fs::create_dir(d.path().join(".git")).unwrap();
+    let e = uninstall("linux", &spec(d.path()), &mut Fake::default(), Some(&purge(true, false))).unwrap_err();
+    assert!(matches!(e, ExecError::Refused(_)), "{e}");
+    assert!(d.path().join("tally.db").exists());
+}
+
+#[test]
+fn purge_refuses_the_users_home_directory_even_if_it_holds_a_config() {
+    let d = home_with_db();
+    let mut o = purge(true, false);
+    let home = d.path().to_path_buf();
+    let is_home = move |p: &Path| p == home;
+    o.is_user_home = &is_home;
+    let e = uninstall("linux", &spec(d.path()), &mut Fake::default(), Some(&o)).unwrap_err();
+    assert!(matches!(e, ExecError::Refused(_)), "{e}");
 }

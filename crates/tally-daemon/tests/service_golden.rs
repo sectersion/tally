@@ -76,3 +76,40 @@ fn every_action_plans_something_on_every_os() {
         }
     }
 }
+
+// ---- review fixes ----
+
+#[test]
+fn plist_log_path_uses_a_forward_slash_on_every_host_os() {
+    // `home.join("tally.log")` put a backslash into the golden when generated on Windows, so the golden failed on Linux/macOS.
+    let mut s = spec();
+    s.home = r"/Users/o/Library/Application Support/tally".into();
+    assert!(render_launchd_plist(&s).contains("<string>/Users/o/Library/Application Support/tally/tally.log</string>"));
+}
+
+#[test]
+fn the_windows_logon_task_respects_tally_stop() {
+    // `tally start` deletes the `paused` marker, so a stop would be undone at every logon. `ensure` honours it.
+    let x = render_task_xml(&spec());
+    assert!(x.contains("<Arguments>ensure --home "), "{x}");
+    assert!(!x.contains("<Arguments>start"), "{x}");
+}
+
+#[test]
+fn stop_pauses_and_start_resumes_on_every_os() {
+    // Without the marker the next Claude Code prompt restarts the daemon (ensure), so `service stop` would not stay stopped.
+    let s = spec();
+    let is_tally = |c: &Cmd, sub: &str| c.program.ends_with("tally") && c.args.first().map(String::as_str) == Some(sub);
+    for os in ["windows", "macos", "linux"] {
+        let has = |a: Action, sub: &str| plan(os, a, &s).iter().any(|st| matches!(st, Step::Run(c) | Step::TryRun(c) if is_tally(c, sub)));
+        assert!(has(Action::Stop, "stop"), "{os} stop must run `tally stop`");
+        assert!(has(Action::Start, "start"), "{os} start must run `tally start`");
+    }
+}
+
+#[test]
+fn units_do_not_restart_into_a_held_lock() {
+    // `tally run` exits 75 when another daemon holds the lock; restarting every 10 s forever would open the store each time.
+    assert!(render_systemd_unit(&spec()).contains("RestartPreventExitStatus=75"));
+    assert!(render_launchd_plist(&spec()).contains("<key>ThrottleInterval</key>"));
+}

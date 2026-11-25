@@ -373,7 +373,9 @@ fn service_cmd(home: &std::path::Path, cmd: &ServiceCmd) -> Result<()> {
                 std::io::stdin().read_line(&mut l).is_ok() && l.trim() == "delete"
             };
             let up = || tally_daemon::ensure::daemon_running(home);
-            let opts = tally_daemon::service_exec::PurgeOpts { yes: *yes, confirm: &confirm, daemon_running: &up, wait: std::time::Duration::from_secs(20) };
+            let user_home = dirs::home_dir();
+            let is_user_home = |p: &std::path::Path| user_home.as_deref().is_some_and(|h| std::fs::canonicalize(h).ok() == std::fs::canonicalize(p).ok());
+            let opts = tally_daemon::service_exec::PurgeOpts { yes: *yes, confirm: &confirm, daemon_running: &up, wait: std::time::Duration::from_secs(20), is_user_home: &is_user_home };
             for l in uninstall(os, &s, &mut r, purge.then_some(&opts)).map_err(|e| anyhow!("{e}"))? {
                 println!("{l}");
             }
@@ -535,7 +537,9 @@ fn main() -> Result<()> {
                 // Advisory lock for the life of the process; the OS releases it on exit or crash.
                 let lock = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(home.join("run.lock"))?;
                 if lock.try_lock().is_err() {
-                    bail!("another `tally run` is already using {}", home.display());
+                    // 75 (EX_TEMPFAIL): the service units do not restart on it (systemd RestartPreventExitStatus=75)
+                    eprintln!("Error: another `tally run` is already using {}", home.display());
+                    std::process::exit(75);
                 }
                 ctrlc::set_handler(|| STOP.store(true, Ordering::Relaxed)).context("installing the Ctrl-C handler")?;
                 let dash = if dashboard || cfg.run.dashboard {
@@ -721,7 +725,8 @@ fn dashboard(db: &std::path::Path, port: u16, no_open: bool) -> Result<()> {
 
 fn open_browser(url: &str) -> std::io::Result<std::process::Child> {
     #[cfg(windows)]
-    return std::process::Command::new("cmd").args(["/c", "start", "", url]).spawn();
+    // not `cmd /c start`: cmd would interpret `&` and `|` in the URL, which for the login flow comes from the server
+    return std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
     #[cfg(target_os = "macos")]
     return std::process::Command::new("open").arg(url).spawn();
     #[cfg(not(any(windows, target_os = "macos")))]
