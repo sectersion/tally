@@ -1,0 +1,9 @@
+# OBSERVED: request sent by the Tally VS Code extension 0.1.0 inside VS Code 1.147.0 (scratch profile, scratch daemon port), captured by a scratch listener on 2026-11-24. Key removed; port is a scratch value; the entity path is replaced with C:/tallyproj/a.rs (the real one was a temp path). Body is not gzipped; no Accept or User-Agent header is sent (node http defaults).
+POST /api/users/current/heartbeats HTTP/1.1
+content-type: application/json
+authorization: Basic <api_key redacted>
+host: 127.0.0.1:58635
+connection: close
+content-length: 166
+
+{"entity":"C:/tallyproj/a.rs","type":"file","time":1795565842.411,"is_write":false,"lineno":1,"cursorpos":1,"lines":2,"language":"rust","plugin":"tally-vscode/0.1.0"}
