@@ -2,12 +2,13 @@ import type { SQL } from "bun";
 import type { Config } from "./config.ts";
 import {
   CSP,
+  LandingCSP,
   formatHours,
   formatMinutes,
   html,
   notFound,
   page,
-  type Safe,
+  Safe,
   type Viewer,
 } from "./html.ts";
 import { bumpChange, commitWindows, projectDaily, projectHours } from "./projects.ts";
@@ -42,6 +43,89 @@ const errorLine = (req: Request) => {
 const handleForm = (s: Session) =>
   html`<h2>Set your handle first</h2><p>Your handle is permanent: it starts every project name (handle/name).</p>
 <form method="post" action="/settings/handle">${csrfField(s)}<input name="handle" required maxlength="39" aria-label="Handle"> <button>Save handle</button></form>`;
+
+/** SVG markup that is ours, not user data. */
+const svg = (s: string) => new Safe(s);
+
+// ponytail: stats are placeholder copy; wire to live counts when a counts endpoint exists
+const LANDING = html`<section class="mesh"><div class="mx-auto max-w-[660px] px-4 py-24 text-center">
+  <h1 class="mb-5 text-4xl font-light tracking-[-0.025em] text-ink sm:text-5xl">Time you can prove.</h1>
+  <p class="mx-auto mb-7 max-w-[30em] text-[17px] leading-relaxed text-ink-2">Tally records the hours you spend building with AI, locks them in a log nobody can quietly edit, and has a person review them.</p>
+  <div class="flex flex-wrap justify-center gap-3">
+    <a class="pill pill-primary" href="/auth/login">${svg(`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/></svg>`)}Sign in with Hack Club</a>
+    <a class="pill pill-outline" href="https://github.com/Sectersion/tally" rel="noopener">${svg(`<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.27-.01-1.17-.02-2.12-3.2.69-3.87-1.36-3.87-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.03 1.75 2.69 1.25 3.35.95.1-.74.4-1.25.72-1.54-2.55-.29-5.23-1.28-5.23-5.68 0-1.26.45-2.28 1.18-3.09-.12-.29-.51-1.46.11-3.04 0 0 .96-.31 3.15 1.18a10.9 10.9 0 0 1 2.87-.39c.97 0 1.95.13 2.87.39 2.19-1.49 3.15-1.18 3.15-1.18.62 1.58.23 2.75.11 3.04.73.81 1.18 1.83 1.18 3.09 0 4.41-2.69 5.38-5.25 5.67.41.35.77 1.05.77 2.12 0 1.53-.01 2.76-.01 3.14 0 .31.21.67.8.56A11.52 11.52 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5z"/></svg>`)}View source</a>
+  </div>
+  <div class="mt-16 flex flex-wrap justify-center gap-x-14 gap-y-8 [font-variant-numeric:tabular-nums]">
+    <div><b class="block text-[28px] font-normal tracking-[-0.02em]">128,447</b><span class="text-[13px] text-mute">minutes verified so far</span></div>
+    <div><b class="block text-[28px] font-normal tracking-[-0.02em]">0</b><span class="text-[13px] text-mute">keystrokes recorded, ever</span></div>
+    <div><b class="block text-[28px] font-normal tracking-[-0.02em]">100%</b><span class="text-[13px] text-mute">of hours re-derivable by anyone</span></div>
+  </div>
+</div></section>
+<section class="py-20"><div class="mx-auto max-w-[660px] px-4 text-center">
+  <h2 class="mb-4 text-3xl font-light tracking-[-0.02em] sm:text-[3rem]">Agent activity earns zero.</h2>
+  <p class="mx-auto max-w-[32em] text-[17px] text-ink-2">Hackatime counts how active your agent is. Tally counts how often <b>you</b> decide something — a prompt, an approval, an edit that survives, a test run — and how long you spent getting there. Watching the agent generate earns nothing. Reading and testing its output does.</p>
+  <div class="mx-auto mt-11 grid max-w-[980px] gap-5 text-left sm:grid-cols-3">
+    <div class="card"><span class="tag">Substance caps</span><h3>Earned by decisions</h3><p>Each human action claims only the time you were present, capped by substance. A &quot;try again&quot; earns a minute; a real fail→pass loop earns twenty.</p></div>
+    <div class="card"><span class="tag">Hash chain</span><h3>Locked in a chain</h3><p>Every entry seals the one before it, so history can&#39;t be backfilled or quietly rewritten.</p></div>
+    <div class="card"><span class="tag">Human review</span><h3>Checked by a person</h3><p>A human reviews every project before its hours count. The judge only routes work to them.</p></div>
+  </div>
+</div></section>
+<section class="band-cream py-20"><div class="mx-auto max-w-[1080px] px-4">
+  <div class="mb-8 text-center">
+    <h2 class="mb-4 text-3xl font-light tracking-[-0.02em] sm:text-[3rem]">The log is the point.</h2>
+    <p class="mx-auto max-w-[28em] text-[17px] text-ink-2">Every entry seals the one before it — and anyone can check the math.</p>
+  </div>
+  <div class="console"><b>$</b> tally verify --project tally/tally
+<i>✓</i> 61h 24m verified · 214 claims re-derived
+    entry 12,407  prompt        +3m  <em>capped 20m, relevant</em>
+    entry 12,406  fail→pass     +14m <em>test pre-existed</em>
+    entry 12,405  edit          +6m  <em>edit survived the session</em>
+    entry 12,404  agent-busy    <s>+0m</s>  <em>you were idle 12 min</em>
+    entry 12,403  idle          <s>+0m</s>  <em>lunch break</em>
+<i>✓</i> seal matches · rule version 2026.11-1 · signed by reviewer <b>@z</b></div>
+</div></section>
+<section class="py-20"><div class="mx-auto max-w-[660px] px-4 text-center">
+  <h2 class="mb-4 text-3xl font-light tracking-[-0.02em] sm:text-[3rem]">Your prompts never leave your machine.</h2>
+  <p class="mx-auto max-w-[32em] text-[17px] text-ink-2">Logging sends project names, action types, timestamps, seconds claimed, hashes. That&#39;s the whole list. No keystrokes, no screenshots, no window titles, no URLs — none of it is ever recorded.</p>
+  <p class="mx-auto mt-4 max-w-[32em] text-[17px] text-ink-2">Session text goes out only when you run <code>tally submit</code>, to a self-hosted judge, deleted after review.</p>
+  <div class="rows">
+    <div class="row"><h3>Never recorded</h3><p>Keystrokes, screenshots, window titles, URLs, browser permissions.</p></div>
+    <div class="row"><h3>When logging</h3><p>Project names, action types, timestamps, seconds claimed, hashes. That&#39;s the whole list.</p></div>
+    <div class="row"><h3>When submitting</h3><p>Scrubbed session text, your choice of project only. Self-hosted judge. Deleted after review.</p></div>
+  </div>
+</div></section>
+<section class="bg-canvas-soft py-20"><div class="mx-auto max-w-[660px] px-4 text-center">
+  <h2 class="mb-4 text-3xl font-light tracking-[-0.02em] sm:text-[3rem]">Start tracking in 30 seconds.</h2>
+  <div class="steps">
+    <div class="step"><b>1</b><span>Sign in with Hack Club</span></div>
+    <div class="step"><b>2</b><span>Install the daemon — it finds Claude Code, Codex, Cursor, Aider and your editor plugins on its own</span></div>
+    <div class="step"><b>3</b><span>Keep building. Hours show up on your public project page</span></div>
+  </div>
+</div></section>
+<section class="py-20"><div class="mx-auto max-w-[660px] px-4 text-center">
+  <h2 class="mb-4 text-3xl font-light tracking-[-0.02em] sm:text-[3rem]">What Tally won&#39;t claim.</h2>
+  <div class="limits">
+    <p><b>We don&#39;t prevent fraud.</b> We make faking hours cost about as much as real work. Reviewers still sample, starting with the least confident turns.</p>
+    <p><b>Thinking away from the keyboard isn&#39;t counted.</b> You can claim it in one click; reviewers see the claim.</p>
+    <p><b>Web builders are mostly unverified.</b> Lovable, Bolt, v0 capture timing only, for now.</p>
+  </div>
+</div></section>
+<footer class="mx-auto flex max-w-[1080px] flex-wrap gap-5 px-4 pb-14 pt-14 text-[13px] text-mute"><span>AGPL-3.0</span><a class="hover:text-primary" href="https://github.com/Sectersion/tally" rel="noopener">Source</a><a class="hover:text-primary" href="https://github.com/Sectersion/tally/blob/main/PITCH.md" rel="noopener">PITCH.md</a></footer>`;
+
+export function landingPage(): Response {
+  return new Response(
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Tally — time you can prove</title><meta name="description" content="Tally records verified coding time with AI, in a tamper-evident log, reviewed by a person."><link rel="stylesheet" href="/static/landing.css"></head><body>${LANDING.__html}</body></html>`,
+    {
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "content-security-policy": LandingCSP,
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "same-origin",
+        "cache-control": "public, max-age=60",
+      },
+    },
+  );
+}
 
 export async function homePage(sql: SQL, req: Request, s: Session | null): Promise<Response> {
   if (!s)

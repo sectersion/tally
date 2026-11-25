@@ -39,6 +39,8 @@ export const formatMinutes = (s: number) =>
 
 export const CSP =
   "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+/** Landing only: self-hosted Inter. */
+export const LandingCSP = CSP + " font-src 'self'";
 
 /** The signed-in viewer, if any. handle is null until they pick one. */
 export type Viewer = { handle: string | null; csrf: string };

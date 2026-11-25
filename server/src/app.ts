@@ -35,6 +35,7 @@ import { log } from "./log.ts";
 import {
   deleteAccount,
   homePage,
+  landingPage,
   profilePage,
   projectFragment,
   projectPage,
@@ -418,7 +419,9 @@ export function createServer(deps: Deps) {
       "/": {
         GET: handle("/", async (req, server) => {
           limitPage(req, server);
-          return homePage(sql, req, await getSession(sql, req));
+          const s = await getSession(sql, req);
+          if (!s) return landingPage();
+          return homePage(sql, req, s);
         }),
       },
       "/u/:handle": {
