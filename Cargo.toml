@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/tally-scoring", "crates/tally-daemon"]
+members = ["crates/tally-scoring", "crates/tally-daemon", "crates/tally-evidence"]
 resolver = "2"
 
 # Used only by the release workflow (`cargo build --profile dist`); `release` stays untouched because

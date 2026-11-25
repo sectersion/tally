@@ -58,6 +58,15 @@ enum Cmd {
         #[arg(long)]
         battery: bool,
     },
+    /// Cost sheet from a published ledger (JSON array of ledger entries) and `cost-inputs.toml`.
+    Cost {
+        #[arg(long)]
+        ledger: PathBuf,
+        #[arg(long)]
+        inputs: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Score every threat-model attack and an honest control; print or write the Markdown report.
     Redteam {
         #[arg(long)]
@@ -112,6 +121,16 @@ fn main() -> Result<()> {
             };
             let a = tally_evidence::resources::run(&o)?;
             println!("wrote {} (active: RSS p95 {:.1} MB, CPU p95 {:.2}%)", out.display(), a.rss_p95 as f64 / 1e6, f64::from(a.cpu_p95_x100) / 100.0);
+        }
+        Cmd::Cost { ledger, inputs, out } => {
+            let read = |p: &std::path::Path| std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()));
+            let stats = tally_evidence::cost::ledger_stats(&read(&ledger)?)?;
+            let inp = tally_evidence::cost::parse_inputs(&read(&inputs)?)?;
+            let md = tally_evidence::cost::render(&stats, &tally_evidence::cost::project(&stats, inp.hours_monthly), &inp, &ledger.display().to_string());
+            match out {
+                Some(p) => std::fs::write(&p, md).with_context(|| format!("writing {}", p.display()))?,
+                None => print!("{md}"),
+            }
         }
         Cmd::Redteam { out } => {
             let commit = std::process::Command::new("git")

@@ -33,5 +33,10 @@ fn main() {
         let nd: String = ev.iter().map(|e| serde_json::to_string(e).unwrap() + "\n").collect();
         std::fs::write(dir.join(format!("{name}.ndjson")), nd).unwrap();
         std::fs::write(dir.join(format!("{name}.md")), render_markdown(&compare(&ev, None), title)).unwrap();
+        if name == "steady-work" {
+            // a ledger of the synthetic session, the input of `tally-evidence cost` until a real published ledger exists
+            let led = tally_scoring::chain(&tally_scoring::score(&ev), tally_scoring::GENESIS_HASH);
+            std::fs::write(dir.join("steady-work.ledger.json"), serde_json::to_string(&led).unwrap()).unwrap();
+        }
     }
 }
