@@ -21,3 +21,24 @@ export function verifyChain(entries: LedgerEntry[], prevHash: string): VerifyRes
     reason: entries[i]?.prev_hash !== expected ? "bad_prev_hash" : "bad_hash",
   };
 }
+
+export type RederivedClaim = {
+  action_id: string;
+  ts: number;
+  verified_s: number;
+  unverified_s: number;
+};
+export type RederiveInput = {
+  ruleset: string;
+  project: string;
+  from_ms: number;
+  to_ms: number;
+  events: unknown[];
+  excluded_action_ids: string[];
+  review: Record<string, never>;
+};
+
+/** Re-scores a timeline (Rust `rederive`). Throws on a malformed event or a foreign ruleset. */
+export function rederive(input: RederiveInput): { claims: RederivedClaim[] } {
+  return JSON.parse(w.rederiveJson(JSON.stringify(input)));
+}

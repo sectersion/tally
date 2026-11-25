@@ -1,7 +1,7 @@
 import type { BunRequest, Server, SQL } from "bun";
 import { hashToken, newToken, requireToken } from "./auth.ts";
 import { badgeResponse, rateLimited } from "./badge.ts";
-import { type Config, MAX_BATCH, MAX_BODY_BYTES } from "./config";
+import { BUNDLE_MAX_COMPRESSED, type Config, MAX_BATCH, MAX_BODY_BYTES } from "./config";
 import {
   createDeviceCode,
   decide,
@@ -76,6 +76,13 @@ import {
   same,
   sessionToken,
 } from "./session.ts";
+import type { Storage } from "./storage.ts";
+import {
+  deleteSubmission,
+  listSubmissions,
+  submissionProject,
+  uploadSubmission,
+} from "./submissions.ts";
 import { findUpdEntries, updLabel } from "./upd.ts";
 import { rulesetVersion } from "./wasm.ts";
 
@@ -91,6 +98,8 @@ type Deps = {
   fetchFn?: typeof fetch;
   /** SSE hub; main.ts passes its own so SIGTERM can close every stream. */
   live?: Live;
+  /** Encrypted bundle storage; without it the submission routes answer 503. */
+  storage?: Storage;
 };
 
 const b64url = (b: ArrayBuffer | Uint8Array) => Buffer.from(b as Uint8Array).toString("base64url");
@@ -203,6 +212,20 @@ export function createServer(deps: Deps) {
       throw e;
     }
     limit(`tok:${tokenId}`);
+    return tokenId;
+  };
+  const storage = () => {
+    if (!deps.storage) throw new HttpError(503, { error: "storage_unavailable" });
+    return deps.storage;
+  };
+  /** The project's owner, by device token or by session; returns the audit actor. */
+  const ownerOf = async (req: Request, server: Srv, projectId: string) => {
+    if (req.headers.get("authorization")) return `token:${await authed(req, server, projectId)}`;
+    const u = await requireUser(sql, req);
+    limit(`form:${u.userId}`, rates.form);
+    const [p] = await sql`select owner_id from projects where id = ${projectId}`;
+    if (!p || p.owner_id !== u.userId) throw new HttpError(403, { error: "forbidden" });
+    return `user:${u.userId}`;
   };
   /** Read the body once per request. */
   const formOf = (req: Request) => req.formData().catch(() => new FormData());
@@ -249,7 +272,9 @@ export function createServer(deps: Deps) {
     development: false,
     // Transport hard cap only: Bun resets the connection past it, so it sits above MAX_BODY_BYTES
     // and readJson answers the JSON 413 for everything in between (Content-Length is checked first).
-    maxRequestBodySize: 2 * MAX_BODY_BYTES,
+    // Bun has one cap for every route: it is the bundle upload's, and the other routes keep
+    // their own 1 MiB checks (readJson, the webhook).
+    maxRequestBodySize: BUNDLE_MAX_COMPRESSED + MAX_BODY_BYTES,
     routes: {
       "/static/:file": {
         GET: async (req) => {
@@ -304,6 +329,26 @@ export function createServer(deps: Deps) {
           await authed(req, server, projectId);
           await recordCommit(sql, projectId, parse(CommitBody, await readJson(req)));
           return json(200, { ok: true });
+        }),
+      },
+      "/v1/projects/:id/submissions": {
+        POST: handle("/v1/projects/:id/submissions", async (req, server) => {
+          const id = req.params.id;
+          const actor = `token:${await authed(req, server, id)}`;
+          return json(201, await uploadSubmission(sql, storage(), req, id, actor));
+        }),
+        GET: handle("/v1/projects/:id/submissions", async (req, server) => {
+          await ownerOf(req, server, req.params.id);
+          return json(200, await listSubmissions(sql, req.params.id));
+        }),
+      },
+      "/v1/submissions/:sid": {
+        DELETE: handle("/v1/submissions/:sid", async (req, server) => {
+          const projectId = await submissionProject(sql, req.params.sid);
+          if (!projectId) throw new HttpError(404, { error: "not_found" });
+          const actor = await ownerOf(req, server, projectId);
+          await deleteSubmission(sql, storage(), req.params.sid, actor);
+          return new Response(null, { status: 204 });
         }),
       },
       "/auth/login": {
