@@ -34,11 +34,10 @@ Nothing here downloads anything. You need a clone of this repo and a Rust toolch
    ```
    cd integrations/vscode
    bun install
-   bunx tsc -p .
-   bunx vsce package --out <dir>/tally-vscode.vsix
+   bun run package
    ```
 
-   Then either `code --install-extension <dir>/tally-vscode.vsix` or `tally setup --only vscode --extras-dir <dir>` (setup looks for the file name `tally-vscode.vsix`).
+   This writes `integrations/vscode/tally-vscode.vsix`. Then either `code --install-extension integrations/vscode/tally-vscode.vsix` or `tally setup --only vscode --extras-dir integrations/vscode` (setup looks for the file name `tally-vscode.vsix`).
 
 4. Check first with `tally setup --dry-run`. Add `--yes` to skip the questions; without a terminal setup refuses unless `--yes` is given.
 

@@ -47,6 +47,15 @@ if [ -f "$vs" ]; then
   [ "$v" = "$want" ] || bad "(d) vscode package.json version '$v' != '$want'"
 fi
 
+# (f) one license everywhere: the crate, the plugin and the extension
+lic=$(sed -n 's/^license = "//p' crates/tally-daemon/Cargo.toml | head -n1 | tr -d '"')
+for f in "$pj" "$vs"; do
+  [ -f "$f" ] || continue
+  l=$(js "$f" 'console.log(j.license)')
+  [ "$l" = "$lic" ] || bad "(f) $f license '$l' != Cargo.toml '$lic'"
+done
+[ ! -f "$vs" ] || cmp -s LICENSE integrations/vscode/LICENSE || bad "(f) integrations/vscode/LICENSE differs from LICENSE"
+
 # (e) each command file has description front matter
 n=0
 for f in integrations/claude-code/commands/*.md; do

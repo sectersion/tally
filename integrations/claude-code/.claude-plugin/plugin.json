@@ -3,5 +3,5 @@
   "version": "0.1.0",
   "description": "Starts the Tally daemon when a Claude Code session starts, so your coding time is tracked.",
   "repository": "https://github.com/sectersion/tally",
-  "license": "AGPL-3.0-or-later"
+  "license": "AGPL-3.0-only"
 }

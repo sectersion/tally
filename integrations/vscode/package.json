@@ -4,7 +4,7 @@
   "description": "Sends throttled file-activity heartbeats to the local Tally daemon.",
   "version": "0.1.0",
   "publisher": "sectersion",
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "repository": { "type": "git", "url": "https://github.com/sectersion/tally" },
   "engines": { "vscode": "^1.90.0" },
   "categories": ["Other"],
@@ -13,7 +13,7 @@
   "scripts": {
     "build": "tsc -p .",
     "test": "bun test",
-    "package": "tsc -p . && vsce package"
+    "package": "tsc -p . && vsce package --out tally-vscode.vsix"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

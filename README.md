@@ -22,7 +22,7 @@ What works today, from a clone of this repo:
 
 - `cargo install --path crates/tally-daemon` puts `tally` on PATH.
 - The Claude Code plugin installs from the clone: `claude plugin marketplace add <path to clone>`, then `claude plugin install tally@tally`.
-- The VS Code extension is built from `integrations/vscode`; `tally setup --only vscode --extras-dir <dir>` installs it.
+- The VS Code extension is built from `integrations/vscode` with `bun install && bun run package`, which writes `tally-vscode.vsix`; `tally setup --only vscode --extras-dir integrations/vscode` installs it.
 - `tally setup --dry-run` shows what setup would install without changing anything.
 - `tally status --brief` prints one line; `tally stop` pauses tracking across sessions until `tally start`.
 

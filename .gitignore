@@ -6,4 +6,3 @@ wasm-smoke/node_modules/
 integrations/vscode/node_modules/
 integrations/vscode/out/
 *.vsix
-integrations/vscode/bun.lock

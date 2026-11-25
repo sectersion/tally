@@ -5,6 +5,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { execFile } from "child_process";
+import { fileFolders } from "./folders";
 import { heartbeat, isLoopbackUrl, isTrackable } from "./payload";
 import { Throttle } from "./throttle";
 
@@ -35,12 +36,17 @@ async function findTally(version: string): Promise<string | undefined> {
   return undefined;
 }
 
+// One call per local workspace folder (argv array: spaces and non-ASCII stay one argument); one plain call when there is none.
 async function ensure(bin: string): Promise<void> {
-  try {
-    const out = (await run(bin, ["ensure", "--client", "vscode", "--hook-json"])).trim();
-    const msg = out ? JSON.parse(out).systemMessage : undefined;
-    if (typeof msg === "string") void vscode.window.showInformationMessage(msg);
-  } catch {}
+  const dirs = fileFolders(vscode.workspace.workspaceFolders?.map((f) => ({ scheme: f.uri.scheme, fsPath: f.uri.fsPath })));
+  for (const d of dirs.length ? dirs : [undefined]) {
+    try {
+      const args = ["ensure", "--client", "vscode", ...(d ? ["--register-cwd", d] : []), "--hook-json"];
+      const out = (await run(bin, args)).trim();
+      const msg = out ? JSON.parse(out).systemMessage : undefined;
+      if (typeof msg === "string") void vscode.window.showInformationMessage(msg);
+    } catch {}
+  }
 }
 
 async function offerInstall(ctx: vscode.ExtensionContext, version: string): Promise<void> {
