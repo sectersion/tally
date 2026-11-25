@@ -15,6 +15,15 @@ fn lock(home: &Path) -> std::fs::File {
     f.try_lock().unwrap();
     f
 }
+/// After dropping a held lock, wait (bounded) until it is really free. Other tests in this binary spawn
+/// children at the same time, and a child forked while the lock was held keeps the descriptor, and so the
+/// lock, until it execs; asserting right after the drop was flaky on macOS CI.
+fn wait_unlocked(home: &Path) {
+    let t0 = std::time::Instant::now();
+    while daemon_running(home) && t0.elapsed().as_secs() < 3 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
 
 #[test]
 fn first_run_records_consent_and_starts_the_daemon() {
@@ -213,6 +222,7 @@ fn start_clears_the_pause() {
     assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "already running");
     assert!(!home.join("paused").exists());
     drop(held);
+    wait_unlocked(&home);
     let n = Cell::new(0);
     let r = ensure(&home, &opts(), &|_| {
         n.set(n.get() + 1);
