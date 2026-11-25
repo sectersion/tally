@@ -4,7 +4,7 @@ Facts about vendor tools, observed on a real machine. Never invent a vendor form
 
 ## Extension hosts
 
-Observed 2026-11-24 on Windows 11 (10.0.26300), Claude Code 2.1.331, VS Code 1.147.0, Node 24.12 (plan 13 Task 4). Probes used scratch plugins and extensions in the system temp dir; all were removed and the temp dirs deleted (a first deletion of `%TEMP%	ally-spike-4\proj` failed with "busy", most likely because one of my own earlier shells had it as its cwd; a read-only process listing showed only `bash.exe`/`powershell.exe` command lines, holder not pinpointed, nothing killed; the directory deleted fine later).
+Observed 2026-11-24 on Windows 11 (10.0.26300), Claude Code 2.1.331, VS Code 1.147.0, Node 24.12 (plan 13 Task 4). Probes used scratch plugins and extensions in the system temp dir; all were removed and the temp dirs deleted (a first deletion of `%TEMP%\tally-spike-4\proj` failed with "busy", most likely because one of my own earlier shells had it as its cwd; a read-only process listing showed only `bash.exe`/`powershell.exe` command lines, holder not pinpointed, nothing killed; the directory deleted fine later).
 
 ### Claude Code 2.1.331
 
