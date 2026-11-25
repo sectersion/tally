@@ -2,10 +2,14 @@
 
 How a release is built, what the maintainer must provide, and what has and has not been verified. Anything about prices or vendor procedure is marked **maintainer to verify**: it was not checked against the vendor.
 
+## Versioning
+
+`0.y.z` SemVer: **minor** (`y`) = breaking change (ledger/heartbeat protocol is the compat surface that matters), **patch** (`z`) = a release. Pin `x` at 0 until 1.0.0, which is set by hand. Nightly builds are `0.y.z-nightly.YYYYMMDD` (prerelease, sorts below the release) — no version bump per commit.
+
 ## How to cut a release
 
-1. Bump `version` in `crates/tally-daemon/Cargo.toml` (the workflow fails if the tag and the crate version differ).
-2. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+1. `sh scripts/release-bump.sh patch` (or `minor` for a breaking change) — bumps all crates, commits, tags.
+2. Push: `git push origin main "v0.y.z"`.
 3. `.github/workflows/release.yml` builds six archives (`x86_64`/`aarch64` for Windows MSVC, macOS, and Linux musl), writes `SHA256SUMS`, runs `scripts/check-release-artifacts.sh`, and creates a **draft** GitHub release.
 4. Read the draft: the checksums, and whether it starts with `UNSIGNED BUILD`. Publish it yourself.
 
