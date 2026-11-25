@@ -30,10 +30,10 @@ FAKE
   if [ -n "$3" ]; then mkdir -p "$W/root/install"; printf '#!/bin/sh\n%s\n' "$3" > "$W/root/install/install.sh"; chmod +x "$W/root/install/install.sh"; fi
 }
 run() { # runs the hook; sets RC OUT ERR
-  local start=$SECONDS
+  local start=$(date +%s%N)
   OUT=$(PATH="$W/bin:/usr/bin:/bin" CLAUDE_PLUGIN_ROOT="$W/root" CLAUDE_PROJECT_DIR="$W/proj/My Code é" TALLY_HOME="${HOME_OVERRIDE:-$W/home}" \
     bash "$W/root/hooks/session-start" session-start 2>"$W/err"); RC=$?
-  ERR=$(cat "$W/err"); ELAPSED=$((SECONDS-start))
+  ERR=$(cat "$W/err"); ELAPSED_MS=$((($(date +%s%N)-start)/1000000)); ELAPSED=$((ELAPSED_MS/1000))
 }
 valid() { [ -z "$OUT" ] || printf '%s' "$OUT" | node -e 'JSON.parse(require("fs").readFileSync(0,"utf8"))' 2>/dev/null; }
 common() { [ "$RC" = 0 ] || { no "$1" "exit $RC"; return 1; }; valid || { no "$1" "stdout not JSON: $OUT"; return 1; }; }
@@ -91,6 +91,6 @@ if common $t; then [ -z "$OUT" ] && grep -q 'ensure exited' "$W/home/ensure.log"
 
 t=hanging_ensure_is_bounded; world $t "$VER" ""; echo sleep > "$W/mode"; run
 [ -f "$W/sleeper.pid" ] && kill "$(cat "$W/sleeper.pid")" 2>/dev/null
-if common $t; then [ "$ELAPSED" -lt 5 ] && [ -z "$OUT" ] && ok $t || no $t "elapsed $ELAPSED out $OUT"; fi
+if common $t; then [ "$ELAPSED_MS" -lt 4900 ] && [ -z "$OUT" ] && ok $t || no $t "elapsed ${ELAPSED_MS}ms out $OUT"; fi
 
 echo "$pass passed, $failn failed"; [ "$failn" = 0 ]
