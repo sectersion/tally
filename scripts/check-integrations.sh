@@ -35,7 +35,6 @@ if [ -f "$hj" ]; then
     [ "$mode" = 100755 ] || bad "(c) $p is not executable in git (mode '$mode'; git update-index --chmod=+x)"
   done
 else bad "(c) $hj missing"; fi
-# ponytail: VS Code checks skipped until Tasks 6/7 add integrations/vscode and setup/vscode.rs
 vs=integrations/vscode/package.json
 if [ -f "$vs" ] && [ -f crates/tally-daemon/src/setup/vscode.rs ]; then
   id=$(sed -n 's/.*EXTENSION_ID[^"]*"\([^"]*\)".*/\1/p' crates/tally-daemon/src/setup/vscode.rs | head -n1)

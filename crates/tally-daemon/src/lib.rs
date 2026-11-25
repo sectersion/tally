@@ -23,6 +23,7 @@ pub mod repair;
 pub mod replay;
 pub mod run;
 pub mod serve;
+pub mod setup;
 pub mod snapshot;
 pub mod source;
 pub mod status;

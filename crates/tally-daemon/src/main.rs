@@ -98,6 +98,30 @@ enum Cmd {
         #[arg(long)]
         hook_json: bool,
     },
+    /// Detect editors and clients on this machine and install their Tally extensions.
+    Setup {
+        /// Do not ask anything.
+        #[arg(long)]
+        yes: bool,
+        /// Print what would be done; run and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Only these integrations (for example `vscode`, `cursor`, `claude-code`); repeatable.
+        #[arg(long)]
+        only: Vec<String>,
+        /// Also set up stock WakaTime plugins (JetBrains) and `~/.wakatime.cfg`.
+        #[arg(long)]
+        include_wakatime: bool,
+        /// Replace an existing `~/.wakatime.cfg` (the old one is kept as `.wakatime.cfg.tally-bak`).
+        #[arg(long)]
+        force: bool,
+        /// Uninstall the extensions; the data directory is never touched.
+        #[arg(long)]
+        remove: bool,
+        /// Where `tally-vscode.vsix` is (default: `extras` next to this program).
+        #[arg(long)]
+        extras_dir: Option<PathBuf>,
+    },
     /// Pause tally: stop the daemon and keep `ensure` from starting it until `tally start`.
     Stop,
     /// Undo `tally stop` and start the daemon if it is not running.
@@ -192,6 +216,53 @@ enum ProjectCmd {
     },
 }
 
+/// The terminal, not stdin, so a piped install can still ask. `TALLY_NO_TTY` pretends there is none (tests).
+fn terminal() -> Option<std::io::BufReader<std::fs::File>> {
+    if std::env::var_os("TALLY_NO_TTY").is_some() {
+        return None;
+    }
+    let p = if cfg!(windows) { "CONIN$" } else { "/dev/tty" };
+    std::fs::File::open(p).ok().map(std::io::BufReader::new)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn setup(home: &std::path::Path, yes: bool, dry_run: bool, only: Vec<String>, include_wakatime: bool, force: bool, remove: bool, extras_dir: Option<PathBuf>) -> Result<()> {
+    use tally_daemon::setup as s;
+    let mut tty = if yes || dry_run { None } else { terminal() };
+    if !yes && !dry_run && tty.is_none() {
+        eprintln!("run `tally setup` in a terminal, or add --yes");
+        std::process::exit(2);
+    }
+    let extras_dir = extras_dir.unwrap_or_else(|| std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.join("extras"))).unwrap_or_default());
+    let wakatime_cfg = if include_wakatime && !dry_run && !remove {
+        let cfg = config::load(home)?;
+        let file = cfg.heartbeat.token_file.clone().unwrap_or_else(|| home.join("heartbeat.token"));
+        let key = tally_daemon::heartbeat::server::load_or_create_token(&file).context("reading or creating the heartbeat token")?;
+        Some((format!("http://127.0.0.1:{}/api", cfg.heartbeat.port), key))
+    } else {
+        None
+    };
+    let o = s::SetupOpts { yes, dry_run, only, include_wakatime, force, remove, extras_dir, wakatime_cfg };
+    let mut empty = std::io::empty();
+    let input: &mut dyn std::io::BufRead = match tty.as_mut() {
+        Some(t) => t,
+        None => &mut std::io::BufReader::new(&mut empty),
+    };
+    let mut out = std::io::stdout();
+    let rep = s::run(&s::RealEnv, &o, input, &mut out)?;
+    if rep.declined {
+        println!("nothing changed");
+        return Ok(());
+    }
+    if !dry_run && !remove {
+        s::finish(home, &mut out)?;
+    }
+    if rep.rows.iter().any(|r| matches!(r.outcome, Some(Err(_)))) {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     if let Cmd::VerifyPublished { files } = &cli.cmd {
@@ -245,6 +316,9 @@ fn main() -> Result<()> {
             println!("{}", serde_json::json!({ "systemMessage": n }));
         }
         return Ok(());
+    }
+    if let Cmd::Setup { yes, dry_run, only, include_wakatime, force, remove, extras_dir } = cli.cmd {
+        return setup(&home, yes, dry_run, only, include_wakatime, force, remove, extras_dir);
     }
     if let Cmd::Stop = &cli.cmd {
         // Always exits 0; the pause marker is written even with no daemon so a later session does not start one.
@@ -343,7 +417,7 @@ fn main() -> Result<()> {
             let s = ingest_ndjson(&mut store, &text, &source, watermark)?;
             println!("added {}, duplicates {}", s.added, s.duplicates);
         }
-        Cmd::HeartbeatConfig | Cmd::Ensure { .. } | Cmd::Stop | Cmd::Start => unreachable!("handled before the store opens"),
+        Cmd::HeartbeatConfig | Cmd::Ensure { .. } | Cmd::Setup { .. } | Cmd::Stop | Cmd::Start => unreachable!("handled before the store opens"),
         Cmd::Hook { .. } | Cmd::Doctor { .. } | Cmd::VerifyPublished { .. } | Cmd::Login { .. } | Cmd::Logout { .. } | Cmd::Dashboard { .. } => {
             unreachable!("handled before the store is opened")
         }
