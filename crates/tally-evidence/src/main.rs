@@ -22,6 +22,11 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Score every threat-model attack and an honest control; print or write the Markdown report.
+    Redteam {
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 fn read_events(path: &std::path::Path) -> Result<Vec<tally_scoring::Event>> {
@@ -43,6 +48,21 @@ fn main() -> Result<()> {
                 .transpose()?;
             let r = tally_evidence::replay::compare(&ev, hb);
             println!("{}", if json { tally_evidence::replay::render_json(&r) } else { tally_evidence::replay::render_markdown(&r, &title) });
+        }
+        Cmd::Redteam { out } => {
+            let commit = std::process::Command::new("git")
+                .args(["log", "-1", "--format=%h", "--", "crates/tally-scoring"])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "unknown".into());
+            let md = tally_evidence::redteam::render(&commit);
+            match out {
+                Some(p) => std::fs::write(&p, md).with_context(|| format!("writing {}", p.display()))?,
+                None => print!("{md}"),
+            }
         }
     }
     Ok(())
