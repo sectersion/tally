@@ -87,10 +87,16 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     throw new Error("BUNDLE_KEY must be 32 bytes, base64");
   const accessKeyId = env.S3_ACCESS_KEY_ID;
   const secretAccessKey = env.S3_SECRET_ACCESS_KEY;
-  if (!accessKeyId || !secretAccessKey)
-    throw new Error("S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY are required");
+  // Optional: absent creds mean bundles are stored in Postgres (pgStorage).
+  if (!accessKeyId !== !secretAccessKey)
+    throw new Error("S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must be set together (or both omitted)");
   return {
-    s3: { accessKeyId, secretAccessKey, endpoint: env.S3_ENDPOINT, region: env.S3_REGION },
+    s3: {
+      accessKeyId: accessKeyId ?? "",
+      secretAccessKey: secretAccessKey ?? "",
+      endpoint: env.S3_ENDPOINT,
+      region: env.S3_REGION,
+    },
     port,
     databaseUrl,
     logLevel: logLevel as LogLevel,

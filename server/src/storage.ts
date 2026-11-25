@@ -1,4 +1,4 @@
-import { S3Client } from "bun";
+import { S3Client, type SQL } from "bun";
 import type { Config } from "./config.ts";
 
 export type Storage = {
@@ -7,6 +7,18 @@ export type Storage = {
   /** Idempotent: deleting a missing object is not an error. */
   del(key: string): Promise<void>;
 };
+
+/** Bundles live in Postgres (bytea, ≤ BUNDLE_MAX_BYTES). ponytail: swap to S3 when bundles outgrow one table. */
+export function pgStorage(sql: SQL): Storage {
+  return {
+    put: async (k, b) => void (await sql`insert into bundles (key, bytes) values (${k}, ${b}) on conflict (key) do update set bytes = excluded.bytes`),
+    get: async (k) => {
+      const [r] = await sql`select bytes from bundles where key = ${k}`;
+      return r ? (r.bytes as Uint8Array) : null;
+    },
+    del: async (k) => void (await sql`delete from bundles where key = ${k}`),
+  };
+}
 
 export function memoryStorage(): Storage & { objects: Map<string, Uint8Array> } {
   const objects = new Map<string, Uint8Array>();

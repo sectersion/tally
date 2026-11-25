@@ -3,7 +3,7 @@ import { loadConfig } from "./config.ts";
 import { connect, migrate } from "./db.ts";
 import { createLive } from "./live.ts";
 import { log, setLogLevel } from "./log.ts";
-import { encrypted, requireSse, s3Storage } from "./storage.ts";
+import { encrypted, pgStorage, requireSse, s3Storage } from "./storage.ts";
 import { sweepBundles } from "./submissions.ts";
 
 try {
@@ -18,8 +18,15 @@ setLogLevel(cfg.logLevel);
 const sql = connect(cfg.databaseUrl);
 const applied = await migrate(sql);
 if (applied.length) log("info", "migrated", { applied });
-const bucket = s3Storage(cfg);
-await requireSse(bucket); // refuses to start on a bucket without server-side encryption
+// S3 creds present → real bucket (SSE required); absent → bundles live in Postgres.
+let bucket;
+if (process.env.S3_ACCESS_KEY_ID) {
+  bucket = s3Storage(cfg);
+  await requireSse(bucket); // refuses to start on a bucket without server-side encryption
+} else {
+  bucket = pgStorage(sql);
+  log("info", "storage", { backend: "postgres" });
+}
 const storage = encrypted(bucket, cfg.bundleKey);
 const sweep = () =>
   sweepBundles(sql, storage).catch((e) =>
