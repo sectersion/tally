@@ -52,6 +52,10 @@ jobs:
       PORT: "8080"
       # Placeholders so loadConfig passes; the e2e never signs in or calls GitHub.
       PUBLIC_BASE_URL: http://localhost:8080
+      BUNDLE_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      BUNDLE_BUCKET: ci-bucket
+      S3_ACCESS_KEY_ID: ci-placeholder
+      S3_SECRET_ACCESS_KEY: ci-placeholder
       HCA_CLIENT_ID: ci-placeholder
       HCA_CLIENT_SECRET: ci-placeholder
       GITHUB_APP_SLUG: ci-placeholder
