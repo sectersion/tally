@@ -16,6 +16,7 @@ pub mod publish;
 pub mod ingest;
 pub mod presence;
 pub mod presence_select;
+pub mod login_browser;
 pub mod service;
 pub mod service_exec;
 mod presence_macos;

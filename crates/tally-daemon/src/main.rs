@@ -62,6 +62,9 @@ enum Cmd {
         server_id: String,
         #[arg(long)]
         server: Option<String>,
+        /// Link through the browser (device-code flow; needs --server) instead of pasting a token.
+        #[arg(long, requires = "server")]
+        browser: bool,
     },
     /// Remove a project's device token.
     Logout {
@@ -427,8 +430,8 @@ fn main() -> Result<()> {
     if let Cmd::Hook { cmd: HookCmd::TestRun { args } } = &cli.cmd {
         std::process::exit(test_run(&home, &db, args));
     }
-    if let Cmd::Login { server_id, server } = &cli.cmd {
-        return login(&home, server_id, server.as_deref());
+    if let Cmd::Login { server_id, server, browser } = &cli.cmd {
+        return login(&home, server_id, server.as_deref(), *browser);
     }
     if let Cmd::Dashboard { port, no_open } = &cli.cmd {
         return dashboard(&db, *port, *no_open);
@@ -755,16 +758,25 @@ fn doctor(home: &std::path::Path, db: &std::path::Path, json: bool) -> Result<()
 }
 
 /// Stores the token from stdin, then checks it against `[sync] server` if one is configured.
-fn login(home: &std::path::Path, server_id: &str, server: Option<&str>) -> Result<()> {
+fn login(home: &std::path::Path, server_id: &str, server: Option<&str>, browser: bool) -> Result<()> {
     if !tally_daemon::project::valid_server_id(server_id) {
         bail!("invalid server id; use 1 to 64 letters, digits, '_' or '-'");
     }
     std::fs::create_dir_all(home).with_context(|| format!("creating {}", home.display()))?;
     // Validate the config (and any existing [sync] server) before storing a secret.
     config::load(home)?;
-    eprint!("paste device token: ");
     let mut line = String::new();
-    std::io::stdin().read_line(&mut line).context("reading the token")?;
+    if browser {
+        let name = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "this computer".into());
+        let url = server.ok_or_else(|| anyhow!("--browser needs --server"))?;
+        let open = |u: &str| {
+            let _ = open_browser(u);
+        };
+        line = tally_daemon::login_browser::fetch_token(url, &name, &mut |l| eprintln!("{l}"), &open, &mut |n| std::thread::sleep(std::time::Duration::from_secs(n)))?;
+    } else {
+        eprint!("paste device token: ");
+        std::io::stdin().read_line(&mut line).context("reading the token")?;
+    }
     tally_daemon::credentials::save_token(home, server_id, &line).map_err(|e| anyhow!("token not stored: {e}"))?;
     if let Some(url) = server {
         let p = home.join("config.toml");
