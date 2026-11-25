@@ -1,0 +1,44 @@
+# ActivityWatch AFK watcher: idle sources and what Tally can reuse
+
+## Summary
+aw-watcher-afk (Python, MPL-2.0) uses OS idle APIs on Windows and macOS, but on Linux it does NOT query idle time. It runs pynput listeners and timestamps the last event itself. That works only on X11 and only while the process is running. The Linux idle sources that matter live in the separate third-party Rust project awatcher (MPL-2.0). It uses XScreenSaver on X11, Mutter D-Bus on GNOME, and Wayland `ext-idle-notify-v1` or `kde-idle` elsewhere. Tally's `Tracker` is already more careful than ActivityWatch's loop on gaps and clock jumps. The missing piece is only a `Platform` impl per OS, which small MIT/Apache crates can supply.
+
+## Findings
+1. Idle source per OS
+   - Windows (`aw_watcher_afk/windows.py`): `GetLastInputInfo` (32-bit dwTime) minus `GetTickCount64`, with a manual 2^32 wraparound fix. No special permission. Per-session, so it does not work from a service in session 0.
+   - macOS (`macos.py`): Quartz `CGEventSourceSecondsSinceLastEventType(kCGEventSourceStateHIDSystemState, kCGAnyInputEventType)`. It needs no Accessibility permission. It also reads `CGSessionCopyCurrentDictionary()["CGSSessionScreenIsLocked"]` for lock state. The awatcher Cargo.toml uses IOKit-sys/mach, which suggests HIDIdleTime there. UNVERIFIED: I did not read that code.
+   - Linux X11 (`unix.py`, `listeners.py`): pynput Mouse/Keyboard listeners (plus optional evdev gamepad). `seconds_since_last_input()` is "now minus the last time a listener flagged an event". It needs a live X connection. `_check_listeners()` restarts dead listeners (X restart, suspend) and resets `last_activity`. The code has a TODO admitting a poll-interval delay. Listener-based idle cannot know about input from before the process started.
+   - Linux Wayland: aw-watcher-afk has no Wayland support (the README has no mention, and a grep for "wayland" in .md/.py/.toml found nothing). ActivityWatch/aw-watcher-window-wayland README says "kde-idle OR ext-idle-notify-v1" and lists GNOME/Mutter as unsupported. The README is the only source for this and I did not read its code.
+   - awatcher (github.com/2e3s/awatcher, third party, MPL-2.0; not an ActivityWatch org repo; no aw-awatcher repo exists). Files read by name only: `x11_screensaver_idle.rs` (XScreenSaver extension, via the `x11` crate with `xss`), `gnome_idle.rs` (D-Bus `org.gnome.Mutter.IdleMonitor` at `/org/gnome/Mutter/IdleMonitor/Core`, method `GetIdletime`), `wl_ext_idle_notify.rs` and `wl_kwin_idle.rs`. Wayland protocols are push-style (a notification fires after a timeout, with no "idle ms" getter). So idle must be derived from a fixed threshold plus a "resumed" event. Its README table marks idle as supported on X11, Sway/Hyprland, COSMIC, KDE and GNOME.
+   - aw-server-rust holds no idle code. Its crates are server-side (UNVERIFIED beyond the repo description).
+2. State machine (`afk.py` `heartbeat_loop`)
+   - Defaults from `config.py`: `timeout = 180` s, `poll_time = 5` s. Heartbeats use `pulsetime = timeout + poll_time`, and the server merges them.
+   - A transition to AFK backdates `afk_start = last_input = now - idle`. Becoming active again ends the AFK event at `last_input`, or at `now` if the last input predates the AFK start (for example an unlock with no HID input). It sends paired pings 1 ms apart so the event merges correctly (aw-watcher-afk#61).
+   - Screen lock (macOS only; Windows and Linux are TODO stubs returning False) forces AFK and blocks the return to active on synthetic input. This is a lock-aware design that Tally lacks.
+   - On Windows an `OSError` is retried without changing state. On macOS and Linux it is raised.
+   - Sleep and suspend: no explicit handling. A long gap between polls just becomes one huge idle reading, and the AFK period spans the sleep. Wall-clock jumps are not guarded, and a backward clock jump is unhandled. There is no mouse-versus-keyboard distinction except on Linux, where all events reset one timer (a held-key max age of 300 s guards a missed release).
+   - Tally `Tracker::step` (`presence.rs`): the threshold is `IDLE_SAMPLE_MIN_MS` (the tests imply 30 s). Spans are closed rather than backdated across gaps. A gap over 60 s (`COVERAGE_MAX_GAP_MS`) or a backward clock jump resets, closes the span at the last sample, and emits no coverage. Watermarks are monotonic. State persists across restarts. `RESUME_SLACK_MS` is 2 s. A failed sample leaves a gap and logs once per streak. Tests cover: span open/close, below-threshold idle, sleep resume, backward and forward clock jumps, restart round-trip, failed sample, and the unsupported platform.
+   - Tally test gaps: no lock or session-switch signal, no idle-counter wrap or u64-overflow test (`min(i64::MAX)` is present but untested), no exact-boundary test for idle == threshold, no test of an idle sample larger than the elapsed time (the clock-versus-idle-source skew case, which is what a sleeping Mac or a Wayland-derived idle would produce), and no multi-session (SSH or remote desktop) case.
+3. Rust crates (crates.io API, checked today)
+   - `user-idle` 0.6.0, MIT OR Apache-2.0, VERIFIED. Offers `UserIdle::get_time()`. Its README table says Linux X11 yes, Wayland no, Windows yes, macOS yes. Linux defaults to an x11 impl, with a `dbus` feature as the alternative. The macOS IOKit HIDIdleTime internals are UNVERIFIED.
+   - `x11rb` 0.14.0, MIT OR Apache-2.0, VERIFIED. Pure Rust; the `screensaver` feature gives `QueryInfo` idle time without linking libXss. UNVERIFIED: that feature name.
+   - `xcb` 1.7.1, MIT, VERIFIED. Links libxcb.
+   - `core-graphics` 0.25.0, MIT OR Apache-2.0, VERIFIED. UNVERIFIED: whether it exposes `CGEventSourceSecondsSinceLastEventType`. A small `extern "C"` declaration is the safe fallback.
+   - `wayland-protocols-misc` 0.3.12, MIT, VERIFIED. Exists. I did not confirm which idle-notify module it contains. awatcher uses `wayland_protocols::ext::idle_notify`, which is in `wayland-protocols` (UNVERIFIED).
+   - `windows-sys` 0.61.2, MIT OR Apache-2.0, VERIFIED.
+   - `zbus` was not checked (UNVERIFIED).
+4. Licensing: `LICENSE.txt` is MPL-2.0 and `pyproject.toml` says `license = "MPL-2.0"`. MPL is file-level weak copyleft and one-way compatible with AGPL-3.0, because MPL-2.0 section 3.3 allows combining into a Larger Work under a Secondary License such as the GNU AGPL. A port of the logic as a new Rust file is a derivative, so keep the MPL notice and attribution for any translated code. Calling the same OS APIs and reimplementing the idea needs no licence. The APIs are not copyrightable. The simplest safe route is to write from the API docs and the findings above and copy no code. All the crates in section 3 are MIT/Apache and compatible with AGPL-3.0.
+
+## Recommendation
+Keep `Tracker` and add `impl Platform` per OS behind `cfg`. Change `supported()` to be per-OS or runtime-detected.
+- macOS (about 15 lines): declare `CGEventSourceSecondsSinceLastEventType(1, u32::MAX)` through `core-graphics` or a raw extern, with state `kCGEventSourceStateHIDSystemState` and event type `kCGAnyInputEventType`. Return `Failed` on a negative value. Failure modes: SSH or launchd daemon outside the GUI session reports an unreliable value (UNVERIFIED), and a locked screen with a mouse jiggle still reads active.
+- Linux X11 (about 25 lines): `x11rb` with the screensaver extension, or `user-idle`, which costs less code and one dependency. Return `Failed` when `DISPLAY` is unset or the connection or extension is missing. Failure modes: a headless box or SSH without `DISPLAY` gives `Failed`, so a coverage gap and no false activity. Also, XWayland sees only X-client input.
+- Linux Wayland and GNOME (about 40 lines, second step): D-Bus `org.gnome.Mutter.IdleMonitor.GetIdletime` (ms) over the session bus with `zbus`. That covers GNOME Wayland and X11 and gives a direct ms value. For wlroots, KDE and COSMIC, `ext-idle-notify-v1` is push-only, so it needs a thread and a threshold. Defer it unless users ask.
+- Never treat Linux without a signal as "active". Keep returning `Failed` so `Tracker` records a gap, as it already does.
+- Add tests: idle greater than elapsed time, threshold boundary, and a lock-state signal (macOS `CGSSessionScreenIsLocked`) if wanted.
+
+## Not verified
+- I did not read awatcher's or user-idle's source beyond grep hits. macOS HIDIdleTime use, `x11rb` screensaver feature names, `zbus`, and `wayland-protocols` module paths are UNVERIFIED.
+- Behaviour over SSH, launchd, and a locked macOS screen is UNVERIFIED (no test run). No code was executed or installed.
+- aw-server-rust contents beyond its repo description are UNVERIFIED. awatcher licence per its Cargo.toml and GitHub API is MPL-2.0.
+- Tally's 30 s threshold is inferred from the tests. I did not open `tally_scoring::ruleset`.
