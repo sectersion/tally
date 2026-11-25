@@ -1,0 +1,108 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #533afd;
+  --color-primary-deep: #4434d4;
+  --color-primary-soft: #b9b9f9;
+  --color-canvas: #ffffff;
+  --color-canvas-soft: #f6f9fc;
+  --color-canvas-cream: #f5e9d4;
+  --color-ink: #0d253d;
+  --color-ink-2: #273951;
+  --color-mute: #64748d;
+  --color-hairline: #e3e8ee;
+  --font-sans: "Inter", system-ui, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+
+/* weight-300 editorial display (Stripe language) */
+body { font-weight: 300; }
+b, .pill, .steps span, .limits b, .rows h3, .card h3 { font-weight: 400; }
+h1, h2 { letter-spacing: -0.02em; }
+
+/* mesh backdrop — organic blob shapes utilities can't express */
+.mesh { position: relative; overflow: hidden; background: var(--color-canvas); }
+.mesh::before {
+  content: ""; position: absolute; inset: -30% -10% -55%; pointer-events: none;
+  background:
+    radial-gradient(38% 55% at 12% 40%, #f5e9d4 0%, transparent 68%),
+    radial-gradient(30% 48% at 34% 30%, #ffe0c2 0%, transparent 66%),
+    radial-gradient(30% 52% at 58% 42%, #d9d4ff 0%, transparent 66%),
+    radial-gradient(26% 46% at 80% 36%, #b9b9f9 0%, transparent 64%),
+    radial-gradient(22% 40% at 94% 30%, #f9c6dd 0%, transparent 62%);
+  filter: blur(6px);
+}
+.mesh > * { position: relative; }
+
+/* pills: one filled indigo per band */
+.pill {
+  display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 8px 16px;
+  border-radius: 9999px; font-size: 15px;
+  transition: background 120ms ease;
+}
+.pill svg { width: 16px; height: 16px; flex: none; }
+.pill-primary { background: var(--color-primary); color: #fff; }
+.pill-primary:hover { background: var(--color-primary-deep); }
+.pill-outline { background: var(--color-canvas); color: var(--color-primary); border: 1px solid var(--color-primary); }
+.pill-outline:hover { background: var(--color-canvas-soft); }
+
+/* hairline feature cards */
+.card {
+  background: var(--color-canvas); border: 1px solid var(--color-hairline); border-radius: 12px;
+  padding: 28px 28px 24px; box-shadow: rgba(0, 55, 112, 0.08) 0 1px 3px;
+}
+.card h3 { font-size: 18px; letter-spacing: -0.012em; margin: 0 0 8px; }
+.card p { margin: 0; color: var(--color-ink-2); font-size: 15px; }
+.tag {
+  display: inline-block; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+  background: var(--color-primary-soft); color: var(--color-primary-deep);
+  border-radius: 9999px; padding: 4px 8px; margin-bottom: 14px;
+}
+
+/* navy console ledger mockup, tnum */
+.console {
+  max-width: 720px; margin: 0 auto; text-align: left;
+  background: #1c1e54; color: #aeb8e8; border-radius: 12px; padding: 24px 28px;
+  font-family: var(--font-mono); font-size: 13.5px; line-height: 1.75;
+  font-variant-numeric: tabular-nums; letter-spacing: -0.02em;
+  box-shadow: rgba(0, 55, 112, 0.25) 0 8px 24px;
+  overflow-x: auto; white-space: pre;
+}
+.console b { color: #fff; }
+.console i { font-style: normal; color: #7de8b0; }
+.console em { font-style: normal; color: #6a76b8; }
+.console s { text-decoration: none; color: #ff7ba0; }
+.console::before {
+  content: "tally — verified"; display: block; color: #6a76b8; font-size: 11px;
+  letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 12px;
+}
+
+/* privacy rows */
+.rows { max-width: 660px; margin: 2.5rem auto 0; text-align: left; }
+.rows .row { padding-block: 14px; border-top: 1px solid var(--color-hairline); display: grid; grid-template-columns: 1fr 2fr; gap: 16px; }
+.rows .row:first-child { border-top: none; }
+.rows .row h3 { margin: 0; font-size: 18px; font-weight: 400; }
+.rows .row p { margin: 0; color: var(--color-ink-2); font-size: 15px; }
+@media (max-width: 520px) { .rows .row { grid-template-columns: 1fr; gap: 4px; } }
+
+/* setup steps */
+.steps { display: grid; gap: 10px; max-width: 560px; margin: 2.25rem auto 0; text-align: left; }
+.steps .step { display: grid; grid-template-columns: 1.6em 1fr; gap: 12px; align-items: baseline; }
+.steps .step b { color: var(--color-primary); font-variant-numeric: tabular-nums; }
+
+/* honest limits */
+.limits { max-width: 620px; margin: 2.25rem auto 0; text-align: left; }
+.limits p { padding-block: 14px; border-top: 1px solid var(--color-hairline); margin: 0; color: var(--color-ink-2); font-size: 15px; }
+.limits p:first-child { border-top: none; }
+
+code {
+  font-family: var(--font-mono); font-size: 13px;
+  background: var(--color-canvas-soft); border: 1px solid var(--color-hairline);
+  border-radius: 6px; padding: 2px 6px;
+}
+
+/* band-cream needs its own token-driven class (used in markup) */
+.band-cream { background: var(--color-canvas-cream); }
+
+:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .pill { transition: none; } }
