@@ -1,3 +1,12 @@
 [workspace]
 members = ["crates/tally-scoring", "crates/tally-daemon"]
 resolver = "2"
+
+# Used only by the release workflow (`cargo build --profile dist`); `release` stays untouched because
+# wasm-pack builds tally-scoring with it and a stripped, abort-on-panic wasm would change the server build.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
