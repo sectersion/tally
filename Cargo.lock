@@ -1483,6 +1483,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tally-evidence"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "tally-scoring",
+]
+
+[[package]]
 name = "tally-scoring"
 version = "0.1.0"
 dependencies = [

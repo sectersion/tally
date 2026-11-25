@@ -18,7 +18,8 @@ jobs:
       - if: runner.os != 'Linux'
         run: cargo test -p tally-daemon --features test-kit
       - run: git diff --exit-code crates/tally-daemon/tests/fixtures
-      - run: cargo clippy -p tally-daemon --all-targets -- -D warnings
+      - run: cargo test -p tally-evidence
+      - run: cargo clippy -p tally-daemon -p tally-evidence --all-targets -- -D warnings
   e2e:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
