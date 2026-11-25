@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tally_scoring::{Event, Kind};
 
@@ -570,6 +570,152 @@ fn doctor_lists_heartbeat_counters() {
     assert!(l.contains("accepted=3") && l.contains("dropped_agent=2"), "{s}");
     let o = tally(&home, &["doctor", "--json"]);
     assert!(out(&o).contains("\"dropped_agent\""), "{}", out(&o));
+}
+
+#[test]
+fn rederive_runs_without_a_database() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("nope");
+    let mut events = vec![ev("1", 0, prompt()), ev("2", 60, Kind::Idle { end_ts: 1_860_000 }), ev("3", 1900, prompt())];
+    for e in &mut events {
+        e.project = Some("P".into());
+    }
+    let input = |ruleset: &str| serde_json::json!({
+        "ruleset": ruleset, "project": "P", "from_ms": 0, "to_ms": 10_000_000, "events": events, "review": {}
+    });
+    let f = t.path().join("in.json");
+    std::fs::write(&f, input(tally_scoring::RULESET_VERSION).to_string()).unwrap();
+    let o = tally(&home, &["rederive", f.to_str().unwrap()]);
+    assert!(o.status.success(), "{}", err(&o));
+    let s = out(&o);
+    assert!(s.lines().any(|l| l == "verified_s: 660") && s.lines().any(|l| l == "unknown_ids: none"), "{s}");
+    assert!(!home.exists());
+
+    let gz = t.path().join("in.json.gz");
+    let mut w = flate2::write::GzEncoder::new(std::fs::File::create(&gz).unwrap(), flate2::Compression::default());
+    std::io::Write::write_all(&mut w, input(tally_scoring::RULESET_VERSION).to_string().as_bytes()).unwrap();
+    w.finish().unwrap();
+    let o = tally(&home, &["rederive", gz.to_str().unwrap(), "--json"]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&out(&o)).unwrap()["verified_s"], 660);
+
+    std::fs::write(&f, input("2026.11-0").to_string()).unwrap();
+    let o = tally(&home, &["rederive", f.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(err(&o).contains("ruleset mismatch"), "{}", err(&o));
+}
+
+// ---- tally submit ----
+
+/// Stub server: records every request as (head, body) and replies 201 to all.
+fn stub() -> (String, std::sync::mpsc::Receiver<(String, Vec<u8>)>) {
+    use std::io::{Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let mut s = s.unwrap();
+            let mut buf = vec![];
+            let mut b = [0u8; 4096];
+            let (head, body_at) = loop {
+                let n = s.read(&mut b).unwrap();
+                if n == 0 {
+                    break (String::new(), 0);
+                }
+                buf.extend_from_slice(&b[..n]);
+                if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break (String::from_utf8_lossy(&buf[..i]).to_string(), i + 4);
+                }
+            };
+            let len = head.to_lowercase().lines().find_map(|l| l.strip_prefix("content-length: ").and_then(|v| v.trim().parse::<usize>().ok())).unwrap_or(0);
+            while buf.len() < body_at + len {
+                let n = s.read(&mut b).unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&b[..n]);
+            }
+            let _ = s.write_all(b"HTTP/1.1 201 Created\r\ncontent-type: application/json\r\ncontent-length: 31\r\nconnection: close\r\n\r\n{\"id\":\"s1\",\"status\":\"uploaded\"}");
+            let _ = tx.send((head, buf[body_at..].to_vec()));
+        }
+    });
+    (url, rx)
+}
+
+/// A home with project o/one linked to srv_1, a logged-in token, and finalized prompt events.
+fn submit_home(t: &Path, server: &str) -> PathBuf {
+    let home = t.join("home");
+    let repo = t.join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let id = out(&tally(&home, &["project", "add", repo.to_str().unwrap(), "--name", "o/one"]));
+    assert!(tally(&home, &["project", "link", repo.to_str().unwrap(), "--server-id", "srv_1"]).status.success());
+    std::fs::write(home.join("config.toml"), format!("[sync]\nenabled = true\nserver = \"{server}\"\n")).unwrap();
+    std::fs::write(home.join("device_tokens"), "srv_1 tok\n").unwrap();
+    let evs: Vec<Event> = (0..5)
+        .map(|k| {
+            let mut e = ev(&format!("p{k}"), 1000 + k * 60, prompt());
+            e.project = Some(id.clone());
+            e
+        })
+        .collect();
+    let f = t.join("events.jsonl");
+    write_events(&f, &evs);
+    assert!(tally(&home, &["ingest", f.to_str().unwrap(), "--watermark", "100000000"]).status.success());
+    assert!(tally(&home, &["finalize"]).status.success());
+    home
+}
+
+fn submit(home: &Path, stdin: &str) -> Output {
+    use std::io::Write;
+    let mut c = Command::new(env!("CARGO_BIN_EXE_tally"))
+        .arg("--home").arg(home)
+        .args(["submit", "o/one", "--from", "0", "--to", "1000000"])
+        .env_remove("CLAUDECODE")
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
+        .spawn().unwrap();
+    c.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+    c.wait_with_output().unwrap()
+}
+
+fn submissions_empty(home: &Path) -> bool {
+    std::fs::read_dir(home.join("submissions")).map_or(true, |d| d.flatten().all(|e| std::fs::read_dir(e.path()).map_or(true, |mut f| f.next().is_none())))
+}
+
+#[test]
+fn submit_uploads_only_after_yes() {
+    use std::io::Read;
+    let t = tempfile::tempdir().unwrap();
+    let (url, rx) = stub();
+    let home = submit_home(t.path(), &url);
+    let o = submit(&home, "yes\n");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(out(&o).contains("submitted s1"), "{}", out(&o));
+    let reqs: Vec<_> = rx.try_iter().filter(|(h, _)| h.starts_with("POST ")).collect();
+    assert_eq!(reqs.len(), 1);
+    let (head, body) = &reqs[0];
+    assert!(head.starts_with("POST /v1/projects/srv_1/submissions "), "{head}");
+    assert!(!head.contains("o/one") && !head.contains("o%2F"), "{head}");
+    assert!(head.to_lowercase().contains("content-encoding: gzip") && head.contains("tok"), "{head}");
+    let mut json = String::new();
+    flate2::read::GzDecoder::new(&body[..]).read_to_string(&mut json).unwrap();
+    let b: tally_daemon::submit::Bundle = serde_json::from_str(&json).unwrap();
+    assert_eq!((b.format.as_str(), b.project.as_str()), ("tally-bundle/1", "o/one"));
+    assert!(submissions_empty(&home));
+}
+
+#[test]
+fn submit_declined_uploads_nothing() {
+    for answer in ["no\n", "Yes\n", ""] {
+        let t = tempfile::tempdir().unwrap();
+        let (url, rx) = stub();
+        let home = submit_home(t.path(), &url);
+        let o = submit(&home, answer);
+        assert!(o.status.success(), "{}", err(&o));
+        assert!(out(&o).contains("not submitted"), "{}", out(&o));
+        assert_eq!(rx.try_iter().filter(|(h, _)| h.starts_with("POST ")).count(), 0);
+        assert!(submissions_empty(&home));
+    }
 }
 
 #[test]

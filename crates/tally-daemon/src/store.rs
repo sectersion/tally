@@ -436,6 +436,13 @@ impl Store {
         Ok(v)
     }
 
+    /// Every local id registered with `public_name`, sorted.
+    pub fn local_ids_for(&self, public_name: &str) -> Result<Vec<String>, StoreError> {
+        let mut st = self.conn.prepare("SELECT local_id FROM projects WHERE public_name = ?1 ORDER BY local_id")?;
+        let rows = st.query_map([public_name], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Local id to public name, only for projects that have a name.
     pub fn project_names(&self) -> Result<BTreeMap<String, String>, StoreError> {
         let mut st = self
@@ -958,4 +965,5 @@ mod tests {
         s.register_project("id1", "C:/r", Some("owner/renamed")).unwrap();
         assert_eq!(s.project_names().unwrap().get("id1").map(String::as_str), Some("owner/renamed"));
     }
+
 }

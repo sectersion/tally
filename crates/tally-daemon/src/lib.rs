@@ -37,6 +37,7 @@ pub mod setup;
 pub mod snapshot;
 pub mod source;
 pub mod status;
+pub mod submit;
 pub mod store;
 pub mod sync;
 pub mod testrun;

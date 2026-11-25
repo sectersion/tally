@@ -43,7 +43,7 @@ Revoke with `bun run token:revoke <token_id>` (prints `revoked`, or `no such act
 
 ## Migrations
 
-`server/migrations/` runs in name order. Number `103` has two files (`103_device.sql`, `103_one_repo_per_project.sql`; both apply, never rename an applied migration), `104` is reserved for plan 10 (`104_submissions.sql`), `105_ledger_entries_chain_ts.sql` already exists, and `106` has three files (`106_chains_unverified_s.sql`, `106_repo_gh_updated_at.sql`, `106_unique_action_id.sql`; independent, all apply). New migrations start at `107`.
+`server/migrations/` runs in name order. Number `103` has two files (`103_device.sql`, `103_one_repo_per_project.sql`; both apply, never rename an applied migration), `104` is reserved for plan 10 (`104_submissions.sql`), `105_ledger_entries_chain_ts.sql` already exists, and `106` has three files (`106_chains_unverified_s.sql`, `106_repo_gh_updated_at.sql`, `106_unique_action_id.sql`; independent, all apply). `107_submission_flags.sql` (reviewer triage flags) is the latest. New migrations start at `108`.
 
 ## Test
 

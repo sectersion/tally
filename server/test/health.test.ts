@@ -60,6 +60,10 @@ test("config requires DATABASE_URL", () => {
     GITHUB_APP_CLIENT_ID: "d",
     GITHUB_APP_CLIENT_SECRET: "e",
     GITHUB_WEBHOOK_SECRET: "f",
+    BUNDLE_KEY: Buffer.alloc(32, 1).toString("base64"),
+    BUNDLE_BUCKET: "g",
+    S3_ACCESS_KEY_ID: "h",
+    S3_SECRET_ACCESS_KEY: "i",
   };
   expect(loadConfig(all)).toMatchObject({
     port: 8080,
@@ -71,6 +75,7 @@ test("config requires DATABASE_URL", () => {
   expect(() => loadConfig({ ...all, GITHUB_WEBHOOK_SECRET: "" })).toThrow(
     "GITHUB_WEBHOOK_SECRET is required",
   );
+  expect(() => loadConfig({ ...all, BUNDLE_KEY: "c2hvcnQ=" })).toThrow("BUNDLE_KEY must be 32");
   expect(() => loadConfig({ DATABASE_URL: "x", LOG_LEVEL: "loud" })).toThrow();
   for (const bad of [
     "tally.example",

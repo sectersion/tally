@@ -2,9 +2,11 @@
 
 The contract every component implements: the daemon computes it, the server verifies the ledger's hash chain, ruleset, project and unique action ids (same Rust crate compiled to WebAssembly) but does not re-score claims, which is bounded by the device token; auditors re-derive it from events. If code and this spec disagree, the spec wins until it is changed.
 
-Ruleset version: `2026.11-1`. Every constant below is part of the ruleset; changing any value bumps the version.
+Ruleset version: `2026.12-0`. `2026.12-0` adds §3.2 (labels and reviewer adjustments). For events with no review input it produces the same claims as `2026.11-1`. A ruleset bump starts a new ledger chain; earlier chains stay valid under their own ruleset.
 
-`2026.11-1` changes from `2026.11-0`: agent output no longer cancels the idle/busy subtraction (REDTEAM-1, REDTEAM-3). A ruleset bump starts a new ledger chain; `2026.11-0` chains stay valid under their own ruleset.
+`2026.11-1` changed from `2026.11-0`: agent output no longer cancels the idle/busy subtraction (REDTEAM-1, REDTEAM-3).
+
+Every constant below is part of the ruleset; changing any value bumps the version.
 
 ## 1. Concepts
 
@@ -65,6 +67,26 @@ Credited hours = sum of `verified_s`. Unverified seconds are shown to reviewers 
 
 **Every project is reviewed by a human before it ships.** Tally's hours are what the reviewer starts from, not a final verdict. Reviewers may approve unverified seconds or remove verified ones; each change is recorded with the reviewer's id and a reason.
 
+### 3.2 Review input
+
+```
+Review input (optional, at submission): { "labels": { "<prompt action_id>": "<label>" }, "adjustments": [Adjustment] }
+Labels: steering | testing | debugging | repetitive | dark_flow
+Adjustment: { "action_id", "approve_unverified_s" (int >= 0), "remove_verified_s" (int >= 0), "reviewer", "reason" }
+
+9. Turn. The turn of a labelled prompt P is P plus every later human action with the same
+   non-null `session` and ts before the next prompt of that session. A human action with a null
+   session, or one that is not a prompt and belongs to no labelled turn, is in no turn.
+10. Forfeit. If P's label is repetitive or dark_flow, every claim in P's turn gets
+   unverified_s += verified_s, verified_s = 0, and reason "label_<label>". Other labels change no seconds
+   but add the reason "label_<label>" to P's own claim only.
+11. Adjustments, in input order after step 10, per claim:
+   moved = min(approve_unverified_s, unverified_s): verified_s += moved, unverified_s -= moved, reason "reviewer_approved" (only if moved > 0);
+   moved = min(remove_verified_s, verified_s): verified_s -= moved, unverified_s += moved, reason "reviewer_removed" (only if moved > 0).
+   An adjustment or label naming an action_id with no claim is ignored and reported (§3.2 input error list).
+Reasons are appended in that order and are never duplicated. verified_s + unverified_s is never changed by steps 9 to 11.
+```
+
 ## 4. Caps
 
 | Action | Cap |
@@ -99,7 +121,7 @@ Computed locally on prompt text, which is then discarded.
 ```json
 {
   "v": 1,
-  "ruleset": "2026.11-1",
+  "ruleset": "2026.12-0",
   "action_id": "01J...",
   "ts": 1763800000000,
   "project": "<public project name, e.g. sectersion/tally>",
@@ -133,13 +155,22 @@ The `project` field is the public project name, set before chaining, and is neve
 | `VOCAB_MAX` | 50,000 tokens |
 | `COMMIT_INTERVAL_S` | 300 s |
 
+Label effects (§3.2):
+
+| Label | Effect on the turn's verified seconds |
+|---|---|
+| `steering`, `testing`, `debugging` | none |
+| `repetitive`, `dark_flow` | forfeited to unverified |
+
+Changing which labels forfeit, or the turn rule, bumps the ruleset.
+
 All values are starting points, to be calibrated against human-labeled sessions.
 
-## 8. Deferred (not in ruleset 2026.11-1)
+## 8. Deferred (not in ruleset 2026.12-0)
 
 - Surviving-diff check for `user_edit` (M2).
 - "Failing test existed before the loop" check (M2).
-- Judge labels at submission and their effect on claims (M3).
+- Judge model choice and its thresholds are not part of the ruleset: a label is an input, whoever produced it. The judge version is recorded with each label (see the submission plan).
 - Repo-delta cap (M3).
 
 ## 9. Decisions

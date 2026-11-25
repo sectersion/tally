@@ -12,10 +12,17 @@ export type Config = {
   githubWebhookSecret: string;
   /** TRUST_PROXY=1: take the client ip from the last x-forwarded-for hop. */
   trustProxy: boolean;
+  /** BUNDLE_KEY: 32 bytes, base64. Encrypts submitted turns before they reach the bucket. */
+  bundleKey: string;
+  bundleBucket: string;
+  s3: { accessKeyId: string; secretAccessKey: string; endpoint?: string; region?: string };
 };
 
 export const MAX_BODY_BYTES = 1_048_576;
 export const MAX_BATCH = 1000;
+/** Submissions: compressed body and decompressed bundle caps. */
+export const BUNDLE_MAX_COMPRESSED = 8 * 1024 * 1024;
+export const BUNDLE_MAX_BYTES = 16 * 1024 * 1024;
 // Traffic budget: a daemon uploads about every 300 s and commits every 300 s, so 120/min per
 // token leaves two orders of magnitude for retries.
 export const RATE_PER_MIN = 120;
@@ -31,6 +38,8 @@ const REQUIRED = {
   githubAppClientId: "GITHUB_APP_CLIENT_ID",
   githubAppClientSecret: "GITHUB_APP_CLIENT_SECRET",
   githubWebhookSecret: "GITHUB_WEBHOOK_SECRET",
+  bundleKey: "BUNDLE_KEY",
+  bundleBucket: "BUNDLE_BUCKET",
 } as const;
 
 /** Dummy config for tests only; loadConfig never fills in missing values. */
@@ -47,6 +56,9 @@ export function testConfig(over: Partial<Config> = {}): Config {
     githubAppClientSecret: "test",
     githubWebhookSecret: "test",
     trustProxy: false,
+    bundleKey: Buffer.alloc(32, 7).toString("base64"),
+    bundleBucket: "test",
+    s3: { accessKeyId: "test", secretAccessKey: "test" },
     ...over,
   };
 }
@@ -71,7 +83,14 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   v.publicBaseUrl = v.publicBaseUrl.replace(/\/+$/, "");
   if (URL.parse(v.publicBaseUrl)?.origin !== v.publicBaseUrl)
     throw new Error("PUBLIC_BASE_URL must be an origin like https://tally.example");
+  if (Buffer.from(v.bundleKey, "base64").length !== 32)
+    throw new Error("BUNDLE_KEY must be 32 bytes, base64");
+  const accessKeyId = env.S3_ACCESS_KEY_ID;
+  const secretAccessKey = env.S3_SECRET_ACCESS_KEY;
+  if (!accessKeyId || !secretAccessKey)
+    throw new Error("S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY are required");
   return {
+    s3: { accessKeyId, secretAccessKey, endpoint: env.S3_ENDPOINT, region: env.S3_REGION },
     port,
     databaseUrl,
     logLevel: logLevel as LogLevel,

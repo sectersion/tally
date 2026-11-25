@@ -136,7 +136,7 @@ mod tests {
     fn canonical_json_is_sorted_and_compact() {
         let e = sample_entry();
         assert_eq!(canonical_json(&e), format!(
-            r#"{{"action_id":"a1","features":{{"relevance_pm":600}},"kind":"prompt","prev_hash":"{}","project":"p","reasons":["capped"],"ruleset":"2026.11-1","ts":1000,"unverified_s":0,"v":1,"verified_s":60}}"#,
+            r#"{{"action_id":"a1","features":{{"relevance_pm":600}},"kind":"prompt","prev_hash":"{}","project":"p","reasons":["capped"],"ruleset":"2026.12-0","ts":1000,"unverified_s":0,"v":1,"verified_s":60}}"#,
             GENESIS_HASH));
     }
 
@@ -154,7 +154,7 @@ mod tests {
         let mut c = claim("a1");
         c.features.insert("chars".into(), 200);
         let mut e = chain(&[c.clone()], GENESIS_HASH).remove(0);
-        let tail = format!(r#""prev_hash":"{GENESIS_HASH}","project":"p","reasons":["capped"],"ruleset":"2026.11-1","ts":1000,"unverified_s":0,"v":1,"verified_s":60}}"#);
+        let tail = format!(r#""prev_hash":"{GENESIS_HASH}","project":"p","reasons":["capped"],"ruleset":"2026.12-0","ts":1000,"unverified_s":0,"v":1,"verified_s":60}}"#);
         let head = r#"{"action_id":"a1","features":{"chars":200,"relevance_pm":600},"kind":"prompt","#;
         assert_eq!(canonical_json(&e), format!("{head}{tail}"));
         e.project = None;

@@ -152,9 +152,9 @@ test("append to an existing older-ruleset chain succeeds", async () => {
     const r = await post(p, { prev_hash: c[2]?.hash, entries: c.slice(3) }, p.token, url);
     await ok(r, at("acme/demo-6", 5), 6);
     const [ch] =
-      await sql`select verified_s from chains where project_id = ${p.projectId} and ruleset = '2026.11-1'`;
+      await sql`select verified_s from chains where project_id = ${p.projectId} and ruleset = '2026.12-0'`;
     expect(Number(ch.verified_s)).toBe(c.reduce((s, e) => s + e.verified_s, 0));
-    // demo-3 has no 2026.11-1 chain: on this server that ruleset is old, so it cannot start one
+    // demo-3 has no 2026.12-0 chain: on this server that ruleset is old, so it cannot start one
     const fresh = await seedFixture(sql, "acme/demo-3");
     const d = chains["acme/demo-3"]?.slice(0, 3);
     const r2 = await post(fresh, { prev_hash: GENESIS, entries: d }, fresh.token, url);

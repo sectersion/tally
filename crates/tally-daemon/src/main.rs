@@ -92,6 +92,25 @@ enum Cmd {
     },
     /// Print the two `.wakatime.cfg` lines that point an editor plugin at the local heartbeat server.
     HeartbeatConfig,
+    /// Re-derive a project's claims from a RederiveInput JSON file (plain or .gz); needs no home or database.
+    Rederive {
+        file: PathBuf,
+        /// Print the RederiveOutput JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Preview a project's claims and session text for a range, and upload them to the server only after you type `yes`.
+    ///
+    /// PROJECT is the public name (owner/repo). `--from`/`--to` take YYYY-MM-DD (UTC; `--to` is the end of that day) or ms.
+    /// Default `--from`: end of the last completed submission (asked of the server, best effort), else the project's first claim.
+    /// Default `--to`: the project's latest final claim.
+    Submit {
+        project: String,
+        #[arg(long)]
+        from: Option<String>,
+        #[arg(long)]
+        to: Option<String>,
+    },
     /// For extensions: record consent once, register the repo (local only) and start the daemon if it is not running. Always exits 0.
     Ensure {
         #[arg(long)]
@@ -249,6 +268,37 @@ enum ProjectCmd {
         #[arg(long)]
         server_id: String,
     },
+}
+
+fn rederive(file: &std::path::Path, json: bool) -> Result<()> {
+    use std::io::Read;
+    let f = std::fs::File::open(file).with_context(|| format!("reading {}", file.display()))?;
+    let mut text = String::new();
+    if file.extension().is_some_and(|e| e == "gz") {
+        flate2::read::GzDecoder::new(f).read_to_string(&mut text)
+    } else {
+        std::io::BufReader::new(f).read_to_string(&mut text)
+    }
+    .with_context(|| format!("reading {}", file.display()))?;
+    let input: tally_scoring::RederiveInput = serde_json::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
+    let o = match tally_scoring::rederive(&input) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
+    if json {
+        println!("{}", serde_json::to_string(&o)?);
+    } else {
+        let ids = if o.unknown_ids.is_empty() { "none".to_string() } else { o.unknown_ids.join(",") };
+        println!("ruleset: {}
+claims: {}
+verified_s: {}
+unverified_s: {}
+unknown_ids: {ids}", o.ruleset, o.claims.len(), o.verified_s, o.unverified_s);
+    }
+    Ok(())
 }
 
 /// The terminal, not stdin, so a piped install can still ask. Test seams: `TALLY_NO_TTY` pretends there is none,
@@ -424,6 +474,9 @@ fn main() -> Result<()> {
         }
         std::process::exit(i32::from(failed));
     }
+    if let Cmd::Rederive { file, json } = &cli.cmd {
+        return rederive(file, *json);
+    }
     let home = match cli.home {
         Some(h) => h,
         None => dirs::data_local_dir().ok_or_else(|| anyhow!("no local data directory; pass --home"))?.join("tally"),
@@ -564,7 +617,8 @@ fn main() -> Result<()> {
             println!("added {}, duplicates {}", s.added, s.duplicates);
         }
         Cmd::HeartbeatConfig | Cmd::Ensure { .. } | Cmd::Setup { .. } | Cmd::Stop | Cmd::Start | Cmd::Service { .. } => unreachable!("handled before the store opens"),
-        Cmd::Hook { .. } | Cmd::Doctor { .. } | Cmd::VerifyPublished { .. } | Cmd::Login { .. } | Cmd::Logout { .. } | Cmd::Dashboard { .. } => {
+        Cmd::Submit { project, from, to } => submit(&home, &mut store, &project, from.as_deref(), to.as_deref())?,
+        Cmd::Hook { .. } | Cmd::Doctor { .. } | Cmd::VerifyPublished { .. } | Cmd::Rederive { .. } | Cmd::Login { .. } | Cmd::Logout { .. } | Cmd::Dashboard { .. } => {
             unreachable!("handled before the store is opened")
         }
         Cmd::Project { cmd: ProjectCmd::Add { path, name } } => {
@@ -837,4 +891,89 @@ fn test_run(home: &std::path::Path, db: &std::path::Path, args: &[String]) -> i3
         eprintln!("tally: warning: test run not recorded: {e}");
     }
     code
+}
+
+/// ms, or YYYY-MM-DD in UTC (`end_of_day`: the last ms of that day).
+fn parse_time(s: &str, end_of_day: bool) -> Result<i64> {
+    if let Ok(ms) = s.parse::<i64>() {
+        return Ok(ms);
+    }
+    let d = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| anyhow!("{s:?} is neither ms nor YYYY-MM-DD"))?;
+    let start = d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
+    Ok(if end_of_day { start + 86_400_000 - 1 } else { start })
+}
+
+/// Build, write the files for review, ask, and upload only on the exact line `yes`.
+fn submit(home: &std::path::Path, store: &mut Store, project: &str, from: Option<&str>, to: Option<&str>) -> Result<()> {
+    let ids = store.server_ids()?.remove(project).unwrap_or_default();
+    let server_id = match &ids[..] {
+        [one] => one.clone(),
+        [] => {
+            eprintln!("{project} has no server id; run tally project link <path> --server-id <id>");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("{}", tally_daemon::sync::SyncError::ConflictingLink { project: project.into() });
+            std::process::exit(1);
+        }
+    };
+    let cfg = config::load(home)?;
+    let Some(server) = cfg.sync.server.clone() else { bail!("no [sync] server in config.toml") };
+    let Some(token) = tally_daemon::credentials::load_tokens(home).context("reading device tokens")?.remove(&server_id) else {
+        eprintln!("no device token; run tally login --server-id {server_id}");
+        std::process::exit(1);
+    };
+    tally_daemon::published::sync(store, true)?;
+    let rows = store.published_rows(project)?;
+    let (Some(first), Some(last)) = (rows.first(), rows.last()) else { bail!("{project} has no final claims yet") };
+    let to_ms = match to {
+        Some(t) => parse_time(t, true)?,
+        None => last.entry.ts,
+    };
+    let from_ms = match from {
+        Some(f) => parse_time(f, false)?,
+        None => tally_daemon::submit::upload::last_submitted_to(&server, &server_id, &token).unwrap_or(first.entry.ts),
+    };
+    let logs_dir = cfg.claude_code.projects_dir.clone().or_else(|| dirs::home_dir().map(|h| h.join(".claude").join("projects"))).unwrap_or_default();
+    let created = now_ms();
+    let bundle = tally_daemon::submit::build_bundle(store, &logs_dir, project, from_ms, to_ms, created)?;
+    let dir = home.join("submissions").join(format!("{}-{created}", project.replace('/', "-")));
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let (bundle_json, preview) = (dir.join("bundle.json"), dir.join("preview.txt"));
+    let cleanup = || {
+        let _ = std::fs::remove_file(&bundle_json);
+        let _ = std::fs::remove_file(&preview);
+        let _ = std::fs::remove_dir(&dir);
+    };
+    let written = serde_json::to_vec(&bundle)
+        .map_err(anyhow::Error::from)
+        .and_then(|j| Ok(std::fs::write(&bundle_json, j)?))
+        .and_then(|_| Ok(std::fs::write(&preview, tally_daemon::submit::preview_text(&bundle))?));
+    if let Err(e) = written {
+        cleanup(); // never leave bundle.json (it holds text) behind a failed preview
+        return Err(e);
+    }
+    print!("{}", tally_daemon::submit::summary_text(&bundle));
+    println!("full text: {}", preview.display());
+    print!("type yes to upload: ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let mut line = String::new();
+    // EOF or a read error is the same as declining
+    let _ = std::io::stdin().read_line(&mut line);
+    if line.trim_end_matches(['\r', '\n']) != "yes" {
+        cleanup();
+        println!("not submitted");
+        return Ok(());
+    }
+    match tally_daemon::submit::upload::upload(&server, &server_id, &token, &bundle) {
+        Ok(id) => {
+            cleanup();
+            println!("submitted {id}");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("upload failed: {e}\nfiles kept in {}; retry or delete them", dir.display());
+            std::process::exit(1);
+        }
+    }
 }
