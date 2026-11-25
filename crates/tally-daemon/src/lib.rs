@@ -16,6 +16,7 @@ pub mod publish;
 pub mod ingest;
 pub mod presence;
 pub mod presence_select;
+mod presence_macos;
 #[cfg(windows)]
 mod presence_win;
 pub mod project;
