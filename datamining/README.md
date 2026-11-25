@@ -13,7 +13,7 @@ Tracking issue: #117. This directory holds everything found while reading the ot
    - Human tool rejections (`toolDenialKind: "user-rejected"`, no `permissionDecision`) are dropped. 27 in the same logs.
 2. **Kairos is HQ's own tracker and a direct competitor** (`projects/kairos.md`). Its ~13 harness parsers are the most useful code to port (`implementation/code-to-steal.md`). Whether it is "the official method" is unverified.
 3. **Hooks cannot replace log parsing** (`research/claude-code-hooks-otel.md`). Hooks cannot tell typed from pasted prompts or detect a human rejection. Keep logs as the primary source; hooks are an optional second source at most.
-4. **Our heartbeat notes were wrong in several places** (`research/wakatime-cli.md`): the real CLI sends at most 10 heartbeats per bulk request (`SendLimit = 10`, not 25), always uses Basic auth, queues offline in a bbolt file (not sqlite), sends the machine name as a header, and nulls `lineno`/`cursorpos`/`lines` when file names are hidden.
+4. **Heartbeat protocol notes — mostly already fixed in PR #109** (`research/wakatime-cli.md`): the basics (at most 10 heartbeats per bulk request, Basic auth only, no `/v1`, UUID-shaped key, bbolt offline queue, machine name as a header, the 120 s send throttle) were already verified against real wakatime-cli v2.28.4 and are documented in `docs/adapters/heartbeat.md` and the fixtures' `NOTES.md`. Still open from the source read: hidden-file-names mode nulls `lineno`/`cursorpos`/`lines` and sends `HIDDEN<.ext>` as the entity, `line_additions`/`line_deletions` are not fields in the CLI at all (ignored on stdin, not just unseen), a per-heartbeat inner 400 is dropped rather than re-queued, the throttle is global (bursts of up to 10 with original `time` values, never a live stream), and `ai_subscription_plan` is a field Tally has not seen on the wire.
 5. **Reviewers will compare against Hackatime's number** (`research/hackatime.md`): a sum of gaps between heartbeats, each capped at 120 s. Its trust factor is a manual admin label, not a computed score. Recommendation: show our hours next to that figure, do not send heartbeats to Hackatime.
 6. **Presence is Windows-only today**, so macOS and Linux have no presence signal (`research/activitywatch-afk.md`). ActivityWatch's watcher is MPL-2.0 and does not do Wayland itself; a fresh Rust implementation per OS is recommended.
 7. **ccusage's dedupe keys on message id + request id, never `uuid`** (`research/ccusage.md`), which supports dropping the session from our event id (see the open question in `claude_code/session.rs`). Not fully settled: it is inferred, not confirmed.
@@ -25,7 +25,7 @@ Tracking issue: #117. This directory holds everything found while reading the ot
 2. Add the property test that claims cannot exceed wall time.
 3. Server-side ledger entry validation, together with the `pasted_pm` feature and its ruleset bump.
 4. Commit attribution for non-Claude agents (agent-quiet rule).
-5. Correct `docs/adapters/heartbeat.md` and the heartbeat fixtures' `NOTES.md` against `research/wakatime-cli.md`.
+5. Port any remaining genuinely-new heartbeat findings from `research/wakatime-cli.md` into the docs (hidden-file `HIDDEN` entities, missing `line_additions`/`line_deletions`, inner-400 handling, burst semantics, `ai_subscription_plan`); the protocol basics are already done (PR #109).
 6. Late-upload flag on ledger entries, replay hatching, persona simulator.
 7. Codex adapter spike, starting from Kairos and Steer's field names.
 8. Non-Windows presence.
