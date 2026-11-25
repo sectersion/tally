@@ -1,6 +1,6 @@
 # Landing page (MVP) design
 
-Status: draft for approval. Size: a small change (one page, one stylesheet, a new page shell). The signed-in app, the reviewer queue (#112) and the homepage overview (#115) are separate pieces that come after this.
+Status: approved 2026-11-25. Size: a small change (one page, one stylesheet, a new page shell). The signed-in app, the reviewer queue (#112) and the homepage overview (#115) are separate pieces that come after this.
 
 ## Intent and why
 
@@ -52,15 +52,28 @@ I recommend 1. Not yet agreed with the maintainer: the open question is whether 
 Page, top to bottom, nothing else:
 
 1. **Nav:** a small floating pill, wordmark left, "Sign in" right. Flat fill and a hairline border; no backdrop blur.
-2. **Hero (the surface):** a single light source behind the headline built from CSS radial gradients (cool blue, a hint of warm). Headline, one sentence, one white pill button "Sign in with Hack Club". Draft copy:
+2. **Hero (the surface):** a single light source behind the headline built from CSS radial gradients (cool blue, a hint of warm). Headline, one sentence, then two pill buttons: primary white **Sign in with Hack Club** (→ `/auth/login`) and a secondary outline **View source** (→ GitHub repo). Draft copy:
    - Headline: **Time you can prove.**
    - Sentence: Tally records the hours you spend building with AI, locks them in a log nobody can quietly edit, and has a person review them.
-3. **Waterline:** a hairline across the page, with a small label "Below the surface".
-4. **Under the surface:** three short statements, each one line plus one line of detail:
-   - **Recorded on your machine.** Only hashes and numbers leave it, never your prompts or code.
-   - **Locked in a chain.** Every entry seals the one before it, so history can't be rewritten.
-   - **Checked by a person.** A human reviews every project before its hours count.
-5. **Footer:** one line, a link to the source repository. Nothing else.
+Trust and privacy lead everything below the hero (maintainer: trust/security over everything else):
+
+**Waterline: "How it works"** — three short statements:
+- **Recorded on your machine.** A Rust daemon reads your harness logs, editor heartbeats, git commits and OS idle time. Only hashes and numbers leave it — never your prompts or code.
+- **Earned by decisions.** Agent activity earns zero. Each human action — a prompt, an approval, an edit that survives — claims only the time you were present, capped by substance.
+- **Locked in a chain.** Every entry seals the one before it on the server, so history can't be backfilled or quietly rewritten.
+
+**Section: "What we take"** (privacy, from PITCH.md):
+- Never: keystrokes, screenshots, window titles, URLs, browser permissions.
+- When logging: project names, action types, timestamps, seconds claimed, hashes. That's the whole list.
+- Session text leaves your machine only on `tally submit`, to a self-hosted judge, deleted after review.
+
+**Section: "Why trust it"**:
+- Hours re-derivable from stored timeline, labels and rule version — anyone can check.
+- Server-witnessed pushes anchor the clock; commit timestamps can't.
+- A human reviews every project; the judge only routes work to them.
+- We don't claim to prevent fraud. We claim faking hours costs about as much as real work.
+
+4. **Footer:** one line, AGPL-3.0, link to the source repository, link to PITCH.md. Nothing else.
 
 Type: Inter (variable, SIL OFL), self-hosted as a woff2 with `font-src 'self'`; system sans fallback. Large display sizes use tight negative tracking, body 16px. Colour: near-black background, white and one muted grey for text, one ice-blue accent. Corners 20px, a single 1px hairline colour. Motion: a 400ms fade-in of the hero, off when the user prefers reduced motion.
 
