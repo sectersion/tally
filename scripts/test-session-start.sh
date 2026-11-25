@@ -20,6 +20,7 @@ if [ "$1" = --version ]; then [ -f "$W/noversion" ] && exit 2; echo "tally @V@";
 for a in "$@"; do printf '[%s]\n' "$a"; done >> "$W/calls.log"
 case "$(cat "$W/mode" 2>/dev/null)" in
   garbage) echo "not json at all" ;;
+  fail) echo "boom: no database" >&2; exit 1 ;;
   partial) printf '{"systemMessage": "x'; exit 1 ;;
   sleep) sleep 30 & echo $! > "$W/sleeper.pid"; wait ;;
 esac
@@ -54,7 +55,7 @@ fi
 t=old_binary_is_replaced_not_called; world $t 0.0.9 'env | grep "^TALLY_" > "$(dirname "$0")/../../inst.env"; echo "$@" >> "$(dirname "$0")/../../inst.env"'; run
 if common $t; then
   waitfor "$W/inst.env" binary-only
-  if grep -q "TALLY_VERSION=$VER" "$W/inst.env" && grep -q -- --binary-only "$W/inst.env" && ! grep -q "[ensure]" "$W/calls.log" 2>/dev/null \
+  if grep -q "TALLY_VERSION=$VER" "$W/inst.env" && grep -q -- --binary-only "$W/inst.env" && ! grep -qF '[ensure]' "$W/calls.log" 2>/dev/null \
      && grep -q installing <<<"$OUT"; then ok $t; else no $t "env: $(cat "$W/inst.env" 2>&1) calls: $(cat "$W/calls.log" 2>&1) out: $OUT"; fi
 fi
 
@@ -73,7 +74,7 @@ if common $t; then grep -qi 'reinstall' <<<"$OUT" && grep -q systemMessage <<<"$
 
 t=no_version_flag_without_ensure_is_stale; world $t 0.1.0 'echo "$@" >> "$(dirname "$0")/../../inst.env"'; touch "$W/noversion"; run
 if common $t; then waitfor "$W/inst.env" binary-only
-  if grep -q -- --binary-only "$W/inst.env" && ! grep -q "[ensure]" "$W/calls.log" 2>/dev/null; then ok $t; else no $t "inst: $(cat "$W/inst.env" 2>&1) calls: $(cat "$W/calls.log" 2>&1)"; fi; fi
+  if grep -q -- --binary-only "$W/inst.env" && ! grep -qF '[ensure]' "$W/calls.log" 2>/dev/null; then ok $t; else no $t "inst: $(cat "$W/inst.env" 2>&1) calls: $(cat "$W/calls.log" 2>&1)"; fi; fi
 
 t=no_version_flag_with_ensure_is_still_stale; world $t 0.1.0 'echo "$@" >> "$(dirname "$0")/../../inst.env"'; touch "$W/noversion"; run
 if common $t; then waitfor "$W/inst.env" binary-only
@@ -81,7 +82,7 @@ if common $t; then waitfor "$W/inst.env" binary-only
 
 t=exact_plugin_version_is_accepted; world $t "$VER" 'echo ran >> "$(dirname "$0")/../../inst.env"'; run
 if common $t; then waitfor "$W/calls.log" hook-json
-  if grep -q "[ensure]" "$W/calls.log" && [ ! -e "$W/inst.env" ] && ! grep -q installing <<<"$OUT"; then ok $t; else no $t "out: $OUT"; fi; fi
+  if grep -qF '[ensure]' "$W/calls.log" && [ ! -e "$W/inst.env" ] && ! grep -q installing <<<"$OUT"; then ok $t; else no $t "out: $OUT"; fi; fi
 
 t=ensure_garbage_is_dropped; world $t "$VER" ""; echo garbage > "$W/mode"; run
 if common $t; then [ -z "$OUT" ] && grep -q 'non-JSON' "$W/home/ensure.log" && ok $t || no $t "out: $OUT log: $(cat "$W/home/ensure.log" 2>&1)"; fi
@@ -92,5 +93,9 @@ if common $t; then [ -z "$OUT" ] && grep -q 'ensure exited' "$W/home/ensure.log"
 t=hanging_ensure_is_bounded; world $t "$VER" ""; echo sleep > "$W/mode"; run
 [ -f "$W/sleeper.pid" ] && kill "$(cat "$W/sleeper.pid")" 2>/dev/null
 if common $t; then [ "$ELAPSED_MS" -lt 4900 ] && [ -z "$OUT" ] && ok $t || no $t "elapsed ${ELAPSED_MS}ms out $OUT"; fi
+
+t=slash_command_shows_a_failing_tally_error; world $t "$VER" ""; echo fail > "$W/mode"
+OUT=$(PATH="$W/bin:/usr/bin:/bin" CLAUDE_PLUGIN_ROOT="$W/root" TALLY_HOME="$W/home" bash "$W/root/hooks/session-start" tally status --brief 2>&1); RC=$?
+if grep -q 'boom: no database' <<<"$OUT" && [ "$(sed -n 1p "$W/calls.log")" = "[status]" ] && grep -q '\[--brief\]' "$W/calls.log"; then ok $t; else no $t "rc $RC out: $OUT"; fi
 
 echo "$pass passed, $failn failed"; [ "$failn" = 0 ]

@@ -1,5 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tally_daemon::config;
@@ -268,6 +269,16 @@ fn setup(home: &std::path::Path, yes: bool, dry_run: bool, only: Vec<String>, in
     Ok(())
 }
 
+fn daemon_state(home: &std::path::Path) -> &'static str {
+    if home.join("paused").exists() {
+        "paused"
+    } else if tally_daemon::ensure::daemon_running(home) {
+        "running"
+    } else {
+        "stopped"
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     if let Cmd::VerifyPublished { files } = &cli.cmd {
@@ -318,7 +329,8 @@ fn main() -> Result<()> {
         let o = tally_daemon::ensure::EnsureOpts { client, register_cwd };
         let r = tally_daemon::ensure::ensure(&home, &o, &tally_daemon::ensure::spawn_daemon);
         if let (true, Some(n)) = (hook_json, r.notice) {
-            println!("{}", serde_json::json!({ "systemMessage": n }));
+            // `ensure` always exits 0, also when the host closed our stdout (println! would panic).
+            let _ = writeln!(std::io::stdout(), "{}", serde_json::json!({ "systemMessage": n }));
         }
         return Ok(());
     }
@@ -365,6 +377,10 @@ fn main() -> Result<()> {
     }
     if let Cmd::Doctor { json } = cli.cmd {
         return doctor(&home, &db, json);
+    }
+    if let (Cmd::Status { brief: true }, false) = (&cli.cmd, db.exists()) {
+        println!("Tally: 0h 0m verified (0 unverified min), daemon {}", daemon_state(&home));
+        return Ok(());
     }
     if matches!(cli.cmd, Cmd::Ingest { .. } | Cmd::Project { .. } | Cmd::Run { .. }) {
         std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
@@ -531,13 +547,7 @@ fn main() -> Result<()> {
         Cmd::Status { brief } => {
             let s = status(&store)?;
             if brief {
-                let d = if home.join("paused").exists() {
-                    "paused"
-                } else if tally_daemon::ensure::daemon_running(&home) {
-                    "running"
-                } else {
-                    "stopped"
-                };
+                let d = daemon_state(&home);
                 println!("Tally: {}h {}m verified ({} unverified min), daemon {d}", s.verified_s / 3600, s.verified_s % 3600 / 60, s.unverified_s / 60);
                 return Ok(());
             }

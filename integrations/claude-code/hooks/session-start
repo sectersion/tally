@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Claude Code SessionStart hook. Prints only hook JSON, never waits for a download, always exits 0.
 # `session-start tally <args>` runs the located tally binary instead (used by the slash commands).
-exec 2>/dev/null
 ROOT=${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
 VER=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$ROOT/.claude-plugin/plugin.json" | head -n1)
 
@@ -14,9 +13,9 @@ esac; fi
 LOG=$HOME_DIR/ensure.log
 note() { mkdir -p "$HOME_DIR" && echo "$(date -u +%FT%TZ) session-start: $*" >> "$LOG"; }
 
-TO=; command -v timeout >/dev/null && TO="timeout 4"  # keeps the hook under Claude Code's 5 s
+TO=; TV=; command -v timeout >/dev/null && { TO="timeout 4"; TV="timeout 2"; }  # ensure 4 s + version probe 2 s: worst case about 6 s
 # `tally --version` of $1 is parseable and at least $VER; no parseable version means stale.
-fresh() { local v; v=$($TO "$1" --version | sed -n 's/[^0-9]*\([0-9][0-9.]*\).*/\1/p' | head -n1)
+fresh() { local v; v=$($TV "$1" --version | sed -n 's/[^0-9]*\([0-9][0-9.]*\).*/\1/p' | head -n1)
   [ -n "$v" ] && [ "$(printf '%s\n%s\n' "$v" "$VER" | sort -V | head -n1)" = "$VER" ]; }
 # stdin must be one JSON object: checked with node when present, else a conservative shape check.
 json_object() { local t; t=$(cat); if command -v node >/dev/null; then
@@ -32,6 +31,7 @@ find_tally() { local c; for c in "$HOME_DIR/bin/tally.exe" "$HOME_DIR/bin/tally"
 
 if [ "${1:-}" = tally ]; then shift; B=$(find_tally); [ -n "$B" ] && exec "$B" "$@"; echo "tally is not installed; reinstall the Tally plugin."; exit 0; fi
 
+exec 2>/dev/null  # only the session-start path is silent; the slash commands above show tally's errors
 trap 'exit 0' EXIT
 B=$(find_tally)
 if [ -n "$B" ] && fresh "$B"; then

@@ -289,3 +289,73 @@ fn status_brief_is_one_line() {
     assert_eq!(s.lines().count(), 1, "{s}");
     assert!(s.contains("0h 2m verified") && s.contains("daemon stopped"), "{s}");
 }
+
+#[test]
+fn status_brief_without_a_database_is_one_line_and_creates_nothing() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let o = tally(&home, &["status", "--brief"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(String::from_utf8_lossy(&o.stdout).trim_end(), "Tally: 0h 0m verified (0 unverified min), daemon stopped");
+    assert!(!home.join("tally.db").exists());
+    // Without --brief the missing database is still an error.
+    assert!(!tally(&home, &["status"]).status.success());
+}
+
+#[test]
+fn status_brief_without_a_database_reports_paused_and_running() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("paused"), "").unwrap();
+    let o = tally(&home, &["status", "--brief"]);
+    assert!(String::from_utf8_lossy(&o.stdout).trim_end().ends_with("daemon paused"), "{}", String::from_utf8_lossy(&o.stdout));
+    std::fs::remove_file(home.join("paused")).unwrap();
+    let _held = lock(&home);
+    let o = tally(&home, &["status", "--brief"]);
+    assert!(o.status.success());
+    assert!(String::from_utf8_lossy(&o.stdout).trim_end().ends_with("daemon running"), "{}", String::from_utf8_lossy(&o.stdout));
+}
+
+#[test]
+fn ensure_exits_zero_when_stdout_is_closed() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let _held = lock(&home);
+    let mut c = Command::new(env!("CARGO_BIN_EXE_tally"))
+        .arg("--home").arg(&home).args(["ensure", "--hook-json"])
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().unwrap();
+    drop(c.stdout.take()); // the reader is gone before the first run prints its notice
+    assert!(c.wait().unwrap().success());
+}
+
+/// The hook's exact argument list (integrations/claude-code/hooks/session-start) with the repo path spelled as given.
+fn hook_ensure(spelling: &str) {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let repo = t.path().join("My Code é");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    std::fs::write(home.join("config.toml"), format!("[heartbeat]\nport = {port}\n")).unwrap();
+    let _held = lock(&home); // stands in for a running daemon: nothing is spawned
+    let arg = if spelling == "slash" { repo.to_string_lossy().replace('\\', "/") } else { repo.to_string_lossy().replace('/', "\\") };
+    let o = tally(&home, &["ensure", "--client", "claude-code", "--register-cwd", &arg, "--hook-json"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert!(!v["systemMessage"].as_str().unwrap().is_empty());
+    assert_eq!(Store::open(&home.join("tally.db")).unwrap().projects().unwrap().len(), 1);
+}
+
+#[test]
+fn the_hooks_exact_arguments_with_forward_slashes() {
+    hook_ensure("slash");
+}
+
+#[cfg(windows)]
+#[test]
+fn the_hooks_exact_arguments_with_backslashes() {
+    hook_ensure("backslash");
+}
