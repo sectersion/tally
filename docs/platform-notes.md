@@ -36,3 +36,16 @@ Scratch extension (`activationEvents:["onStartupFinished"]`) packaged with `npx 
 
   `workspace.textDocuments` also held a `chatSessionInput` scheme document. So `scheme === "file"` and not untitled is the right filter; every other scheme seen is excluded by it.
 - Cursor, Windsurf, Antigravity, VSCodium, Trae: not installed (no CLI on PATH), not tested. `--install-extension` / `--list-extensions` on those: UNVERIFIED.
+
+## Idle time per OS (plan 12 Task 1)
+
+Probe: `cargo run -p tally-daemon --example idle_spike` (prints `idle_ms` once a second through `default_platform()`).
+
+### Windows 11 (10.0.26300), `GetLastInputInfo` minus `GetTickCount64`, milliseconds
+
+- OBSERVED 2026-11-24: untouched, the value grew 250, 1250, 2250 ms one second apart; after input it reset to 31 ms. Matches the call's documented meaning.
+- Across a lid-close or hibernate sleep: NOT OBSERVED (needs a human closing the lid for 2 minutes). UNVERIFIED whether the counter resets, keeps counting or jumps. Plan 04's gap rule does not depend on which.
+
+### macOS (Apple silicon / Intel), Ubuntu X11, Fedora GNOME Wayland, Sway (ext-idle-notify-v1)
+
+NOT VERIFIED: no such machine available to the executor. Later tasks (3 to 6) must keep their manual checklists open for each of these; their sleep behaviour and the presence of `ext-idle-notify-v1` / `org.gnome.Mutter.IdleMonitor` are unknown.
