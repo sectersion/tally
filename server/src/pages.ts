@@ -75,7 +75,7 @@ const LANDING = html`<section class="mesh"><div class="mx-auto max-w-[660px] px-
     <h2 class="mb-4 text-3xl font-light tracking-[-0.02em] sm:text-[3rem]">The log is the point.</h2>
     <p class="mx-auto max-w-[28em] text-[17px] text-ink-2">Every entry seals the one before it — and anyone can check the math.</p>
   </div>
-  <div class="console"><b>$</b> tally verify --project tally/tally
+  <div class="console" aria-hidden="true"><b>$</b> tally verify --project tally/tally
 <i>✓</i> 61h 24m verified · 214 claims re-derived
     entry 12,407  prompt        +3m  <em>capped 20m, relevant</em>
     entry 12,406  fail→pass     +14m <em>test pre-existed</em>

@@ -14,6 +14,10 @@ describe("landingPage", () => {
     expect(body).not.toContain("csrf");
     expect(body).not.toContain("style=");
   });
+  test("console mockup is aria-hidden", async () => {
+    const body = await (await landingPage()).text();
+    expect(body).toContain('<div class="console" aria-hidden="true">');
+  });
   test("CSP adds font-src only on landing", () => {
     const res = landingPage();
     expect(res.headers.get("content-security-policy")).toBe(CSP + " font-src 'self'");
