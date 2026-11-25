@@ -62,5 +62,28 @@ button:hover { background: var(--bg); }
 form.inline { display: inline; }
 progress { accent-color: var(--ice); }
 
+/* dashboard: hero stat, slim bars */
+#numbers p { margin: 0; }
+#numbers { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 28px; padding: 24px 26px; }
+#numbers strong {
+  font-size: 34px; font-weight: 300; letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+#numbers p:not(:first-child) { font-size: 15px; font-weight: 300; color: var(--mut); letter-spacing: 0; }
+#numbers p:not(:first-child) strong { color: var(--mut); }
+#numbers p:first-child strong { color: var(--ink); }
+#numbers p { font-size: 15px; }
+td progress {
+  appearance: none; -webkit-appearance: none; border: none; height: 6px; width: 100%;
+  min-width: 80px; border-radius: 9999px; overflow: hidden; background: var(--hair);
+  display: block; vertical-align: middle;
+}
+td progress::-webkit-progress-bar { background: transparent; border-radius: 9999px; }
+td progress::-webkit-progress-value { background: var(--ice); border-radius: 9999px; }
+td progress::-moz-progress-bar { background: var(--ice); border-radius: 9999px; }
+tbody tr:hover td { background: var(--ice-dim); }
+main > h1 { margin-bottom: 6px; }
+main > h1 + section { margin-top: 14px; }
+
 ul { padding-left: 1.2rem; }
 li { margin-block: 4px; }
