@@ -20,6 +20,22 @@ jobs:
       - run: git diff --exit-code crates/tally-daemon/tests/fixtures
       - run: cargo test -p tally-evidence
       - run: cargo clippy -p tally-daemon -p tally-evidence --all-targets -- -D warnings
+  evidence-smoke:
+    # Proves the resource harness works on every OS. The numbers are NOT published (accelerated, CI hardware).
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p tally-daemon -p tally-evidence
+      - name: Resource harness smoke run
+        shell: bash
+        run: |
+          ./target/release/tally-evidence resources --tally ./target/release/tally --machine "ci" --duration-min 1 --load accelerated:600 --no-presence --out "$RUNNER_TEMP/r.md"
+          grep -q "RSS p95" "$RUNNER_TEMP/r.md"
   e2e:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
