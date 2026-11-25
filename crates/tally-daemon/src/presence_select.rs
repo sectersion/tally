@@ -76,9 +76,19 @@ pub fn current_choice() -> Choice {
     choose(&env, mutter_available(), ext_idle_available())
 }
 
+#[cfg(target_os = "linux")]
+fn mutter_available() -> bool {
+    crate::presence_mutter::available()
+}
+#[cfg(not(target_os = "linux"))]
 fn mutter_available() -> bool {
     false
 }
+#[cfg(target_os = "linux")]
+fn ext_idle_available() -> bool {
+    crate::presence_wayland::available()
+}
+#[cfg(not(target_os = "linux"))]
 fn ext_idle_available() -> bool {
     false
 }
@@ -91,6 +101,10 @@ pub fn platform_for(c: &Choice) -> Box<dyn Platform> {
         Choice::MacOs => Box::new(crate::presence_macos::MacPlatform),
         #[cfg(target_os = "linux")]
         Choice::X11 => Box::new(crate::presence_x11::X11Platform::new()),
+        #[cfg(target_os = "linux")]
+        Choice::MutterWayland => Box::<crate::presence_mutter::MutterPlatform>::default(),
+        #[cfg(target_os = "linux")]
+        Choice::ExtIdleNotify => Box::new(crate::presence_wayland::ExtIdlePlatform::new()),
         _ => Box::new(UnsupportedPlatform),
     }
 }

@@ -53,3 +53,7 @@ NOT VERIFIED: no such machine available to the executor. Later tasks (3 to 6) mu
 ### Linux/X11 (plan 12 Task 4)
 
 OBSERVED 2026-11-24 in a `rust:1` Docker container under `xvfb-run`: `X11Platform` (XScreenSaver `QueryInfo`) returns `ms_since_user_input` and the value is at least 1000 after a 1.2 s sleep with no input. NOT VERIFIED on a real X11 desktop (typing resets the counter): needs a human.
+
+### Linux Wayland (plan 12 Task 5)
+
+`MutterPlatform` (zbus, `GetIdletime`) and `ExtIdlePlatform` (ext-idle-notify-v1, 30 s timeout) compile and pass clippy `-D warnings` in a `rust:1` container. NOT VERIFIED on a real GNOME Wayland session, on Sway, or on a compositor with neither (needs `tally status` to print the unsupported line and `tally run` to refuse): no such desktop available. The container has no D-Bus or Wayland, so only `available() == false` paths ran.

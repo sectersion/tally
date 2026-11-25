@@ -19,6 +19,9 @@ pub mod presence_select;
 mod presence_macos;
 #[cfg(target_os = "linux")]
 mod presence_x11;
+#[cfg(target_os = "linux")]
+mod presence_mutter;
+mod presence_wayland;
 #[cfg(windows)]
 mod presence_win;
 pub mod project;
