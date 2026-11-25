@@ -110,7 +110,7 @@ const redirect = (to: string, setCookies: string[] = []) => {
   return new Response(null, { status: 303, headers });
 };
 
-const STATIC = new Set(["style.css", "live.js", "review.js"]);
+const STATIC = new Set(["style.css", "live.js", "review.js", "landing.css", "fonts/inter-var.woff2"]);
 
 /** Same-site paths only. Printable ASCII: browsers strip tabs/newlines from URLs, so "/\t/evil" would become "//evil". */
 const safeReturn = (rt: string | null) => (rt && /^\/(?![/\\])[\x21-\x7e]*$/.test(rt) ? rt : "/");
