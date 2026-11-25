@@ -250,7 +250,7 @@ async function projectMain(
   const weeks = new Map<string, number>();
   for (const d of daily) {
     // ISO week of the day (UTC): Monday-start, same as to_char('YYYY-IW')
-    const [y, m, dd] = d.day.split("-").map(Number);
+    const [y, m, dd] = d.day.split("-").map(Number) as [number, number, number];
     const dt = new Date(Date.UTC(y, m - 1, dd));
     const dow = (dt.getUTCDay() + 6) % 7;
     const wk = new Date(dt);
