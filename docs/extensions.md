@@ -7,7 +7,7 @@ Tally gets its signals from two small extensions: a Claude Code plugin and a VS 
 - **Built:** `tally setup` (detect, install, remove, dry run), `tally ensure`, `tally stop`, `tally start`, `tally status --brief`, the Claude Code plugin (SessionStart hook plus `/tally:status`, `/tally:stop`, `/tally:start`), the VS Code extension, and the heartbeat server (on by default, 127.0.0.1 only).
 - **Planned, not built:** the one-line installers (`install.sh`, `install.ps1`), release archives with the `.vsix` inside, a published `sectersion/tally` plugin marketplace, listings on the VS Code Marketplace or Open VSX, and an OS service that starts the daemon at boot (plan 12). There is no release yet and no download URL.
 - **Not done:** the acceptance run for the one-liner (stop everything, run the installer, open a session and a window, reboot, `/tally:stop`, run it again with `--dry-run` and see `already installed`). It cannot be run until the installers exist.
-- **Verified** (see [platform-notes.md](platform-notes.md); Windows 11, Claude Code 2.1.331, VS Code 1.147.0): the plugin commands, hook behaviour under Git Bash, a detached child surviving the session, `code --install-extension` and `--list-extensions`, and which VS Code events fire. A single in-editor read heartbeat from the extension reached the daemon ([notes](../crates/tally-daemon/tests/fixtures/heartbeat/NOTES.md)); the save path is covered by unit tests only.
+- **Verified** (see [platform-notes.md](platform-notes.md); Windows 11, Claude Code 2.1.331, VS Code 1.147.0): the plugin commands, hook behaviour under Git Bash, a detached child surviving the session (observed with a `node` child, not with the Rust `spawn_daemon`), `code --install-extension` and `--list-extensions`, and which VS Code events fire. A single in-editor read heartbeat from the extension reached the daemon ([notes](../crates/tally-daemon/tests/fixtures/heartbeat/NOTES.md)); the save path is covered by unit tests only.
 - **UNVERIFIED:** macOS and Linux hook behaviour and process detach, the Cursor family (`--install-extension` on Cursor, Windsurf, VSCodium, Antigravity, Trae), `vscode-remote:` documents, how `systemMessage` renders to the user, the `claude plugin marketplace add owner/repo` form, and a machine without Git Bash.
 
 ## Install today
@@ -58,7 +58,7 @@ Integrations, in the order setup checks them:
 | VSCodium | `codium`, `~/.vscode-oss` | same, UNVERIFIED |
 | Trae | `trae`, `~/.trae` | same, UNVERIFIED |
 | Claude Code | `claude` on PATH; only a `~/.claude` folder is `config only` | `claude plugin marketplace add sectersion/tally`, then `claude plugin install tally@tally`; already in `claude plugin list --json` means already installed |
-| JetBrains (only with `--include-wakatime`) | `idea`, `pycharm`, `webstorm`, `goland`, `clion`, `rubymine`, `phpstorm`, `rider`, `rustrover`, `datagrip` | the stock WakaTime plugin, plus `~/.wakatime.cfg` (below). Not exercised by me. |
+| JetBrains (only with `--include-wakatime`) | `idea`, `pycharm`, `webstorm`, `goland`, `clion`, `rubymine`, `phpstorm`, `rider`, `rustrover`, `datagrip` | the stock WakaTime plugin, plus `~/.wakatime.cfg` (below). Not exercised. |
 
 Flags (from `tally setup --help`):
 
@@ -78,12 +78,19 @@ Flags (from `tally setup --help`):
 
   A dry run only detects; it does not say `already installed`. With `--remove` it says `would remove`.
 - `--yes`: do not ask anything.
-- `--only <name>`: only these integrations (`vscode`, `cursor`, `claude-code`); repeatable. Case and punctuation are ignored.
+- `--only <name>`: only these integrations (`vscode`, `cursor`, `claude-code`); repeatable. Case and punctuation are ignored. An unknown name is an error that lists the valid ones.
 - `--remove`: uninstall the extensions. The data directory is never touched.
 - `--extras-dir <dir>`: where `tally-vscode.vsix` is (default: an `extras` folder next to the `tally` program).
 - `--include-wakatime`, `--force`: see the last section.
 
-Only `--dry-run` was run for real. The install and remove paths are covered by unit tests with a fake environment, not run against real editors by me.
+Only `--dry-run` was run for real. The install and remove paths are covered by unit tests with a fake environment, not run against real editors.
+
+## TO CHECK BY A HUMAN BEFORE RELEASE
+
+These cannot be observed from a script and have not been checked:
+
+1. Start `claude` interactively once with the plugin installed on a fresh Tally home. Is the explainer (the hook's `systemMessage`) visible to you at session start? Consent is recorded on that first `ensure`, so if it is not visible the user consented to text they never saw. No other field that reaches the user has been observed, so the hook keeps `systemMessage`.
+2. Do the slash commands run when you type them, i.e. does `allowed-tools` in `integrations/claude-code/commands/*.md` match the command line at permission time, with no permission prompt?
 
 ## Slash commands
 
@@ -93,9 +100,7 @@ In Claude Code, with the plugin installed: `/tally:status` runs `tally status --
 
 ## What is captured
 
-The text setup shows you is [explainer.txt](../crates/tally-daemon/src/explainer.txt): counts and lengths of your actions, never the words; nothing leaves the machine until you link a project, publish, or run `tally submit`. The heartbeat server listens on 127.0.0.1 only and needs a token the daemon creates. The VS Code extension sends file path, line, cursor, line count and language, at most one per file every 2 minutes plus one per save, to `127.0.0.1` only. See [adapters/heartbeat.md](adapters/heartbeat.md).
-
-The explainer's "Remove it" line mentions `tally service uninstall`; there is no `service` command yet (plan 12). Use the steps below.
+The text setup shows you is [explainer.txt](../crates/tally-daemon/src/explainer.txt): counts and lengths of your actions, never the words; nothing leaves the machine until you link a project, publish, or run `tally submit`. The heartbeat server listens on 127.0.0.1 only and needs a token the daemon creates. The VS Code extension sends file path, line, cursor, line count and language, at most one per file every 2 minutes plus one per save, to `127.0.0.1` only. The daemon hashes the path and drops it; what it stores is the hash, the time and how many lines changed. See [adapters/heartbeat.md](adapters/heartbeat.md).
 
 ## Limit: the daemon starts lazily
 
@@ -112,4 +117,4 @@ tally setup --remove
 
 ## `~/.wakatime.cfg`
 
-Only `--include-wakatime` touches it, and only after a JetBrains product was found and you consented. It writes `api_url` and `api_key` under `[settings]` and keeps every other line and section. If the file already has a different `api_url` or `api_key`, it reports a conflict and changes nothing, unless `--force`: then the old file is kept as `.wakatime.cfg.tally-bak` first. Either way a stock plugin sends to one place only, so pointing it at Tally stops it sending to wakatime.com or Hackatime. `--remove` never edits the file. To do it by hand, run `tally heartbeat-config` (see [adapters/heartbeat.md](adapters/heartbeat.md)).
+Only `--include-wakatime` touches it, and only after a JetBrains product was found and you consented. It writes `api_url` and `api_key` under `[settings]` and keeps every other line and section. If the file already exists and is not already pointing at Tally (different or no `api_url`/`api_key`), it reports a conflict and changes nothing, unless `--force`: then the old file is kept as `.wakatime.cfg.tally-bak` first. A symlinked file is never replaced. Either way a stock plugin sends to one place only, so pointing it at Tally stops it sending to wakatime.com or Hackatime. `--remove` never edits the file. To do it by hand, run `tally heartbeat-config` (see [adapters/heartbeat.md](adapters/heartbeat.md)).
