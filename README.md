@@ -10,7 +10,7 @@ Tally passively measures the hours of *productive struggle* you spend building p
 
 ## How it works
 
-1. **Passive capture.** A small local daemon reads what already exists on your machine: AI harness session logs (Claude Code, Codex, Cursor, Aider, Copilot, Gemini CLI), WakaTime-compatible editor heartbeats, and git. Presence comes from the OS idle timer. No keylogging, no screenshots, no window titles.
+1. **Passive capture.** A small local daemon reads what already exists on your machine: AI harness session logs (Claude Code and Copilot today; Codex, Cursor, Aider and Gemini CLI are detected but have no adapter yet), WakaTime-compatible editor heartbeats, and git. Presence comes from the OS idle timer. No keylogging, no screenshots, no window titles.
 2. **Time-to-decision.** Every human action (a prompt, an interrupt with a redirect, accepting or rejecting a change, an edit that survives, a test run, a commit) claims the human-present time since your previous action. Idle time and time spent watching the agent generate are subtracted.
 3. **Substance caps.** "try again" claims about a minute; a specific, relevant prompt or a real fail→pass loop claims up to about 20. Excess goes to an *unverified* bucket instead of disappearing.
 4. **Struggle check on submission.** When you submit a project, you can send an evidence bundle to a pinned, self-hosted, open-weight judge that labels each turn. Hours are re-derivable from the stored labels.
