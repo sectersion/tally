@@ -1,5 +1,6 @@
 ﻿import { afterAll, expect, test } from "bun:test";
 import { connect } from "../src/db.ts";
+import { leaderboard } from "../src/leaderboard.ts";
 import { createProject } from "../src/projects.ts";
 import { start } from "./helpers.ts";
 
@@ -132,13 +133,14 @@ test("projects list: public projects with sums and last activity", async () => {
 
 test("leaderboard api: day vs week, private profile handle null, bad range 400", async () => {
   const a = await project();
-  // Bigger: other test files cumulatively seed >25 entries up to ~72e9, filling the top 25.
+  // Shared DB: seed above the current max so these always rank into the top 25.
+  const big = Math.max(0, ...(await leaderboard(sql, "week")).map((r) => r.verified_s)) + 1_000_000;
   await ledger(a.id, [
-    { ts: TODAY, v: 999_000_000_060 },
+    { ts: TODAY, v: big + 60 },
     { ts: YESTERDAY, v: 120 },
   ]);
   const b = await project({ profilePublic: false });
-  await ledger(b.id, [{ ts: TODAY, v: 999_000_000_600 }]);
+  await ledger(b.id, [{ ts: TODAY, v: big + 600 }]);
   const day = (await (await fetch(`${base}/api/v1/leaderboard?range=day`)).json()) as {
     rank: number;
     public_name: string;
@@ -147,12 +149,12 @@ test("leaderboard api: day vs week, private profile handle null, bad range 400",
   }[];
   const week = (await (await fetch(`${base}/api/v1/leaderboard?range=week`)).json()) as typeof day;
   const da = day.find((r) => r.public_name === a.name);
-  expect(da).toMatchObject({ handle: a.u.handle, verified_s: 999_000_000_060 });
+  expect(da).toMatchObject({ handle: a.u.handle, verified_s: big + 60 });
   const db = day.find((r) => r.public_name === b.name);
-  expect(db).toMatchObject({ handle: null, verified_s: 999_000_000_600 });
+  expect(db).toMatchObject({ handle: null, verified_s: big + 600 });
   expect(day.map((r) => r.rank)).toEqual(day.map((_, i) => i + 1));
-  expect(week.find((r) => r.public_name === a.name)?.verified_s).toBe(999_000_000_180);
-  expect(week.find((r) => r.public_name === b.name)?.verified_s).toBe(999_000_000_600);
+  expect(week.find((r) => r.public_name === a.name)?.verified_s).toBe(big + 180);
+  expect(week.find((r) => r.public_name === b.name)?.verified_s).toBe(big + 600);
   const bad = await fetch(`${base}/api/v1/leaderboard?range=bogus`);
   expect(bad.status).toBe(400);
   expect((await bad.json()).error).toBe("invalid_body");
