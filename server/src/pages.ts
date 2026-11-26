@@ -131,7 +131,7 @@ const LANDING = html`<section class="mesh"><div class="mx-auto max-w-[1080px] px
 <div class="grid gap-10 lg:grid-cols-[0.8fr_1.2fr] lg:items-start lg:gap-14">
 <div>
 <h2 class="mb-4 text-[2rem] font-light tracking-[-0.02em] text-ink sm:text-[2.5rem] sm:leading-[1.1]">Install.</h2>
-<p class="max-w-[26em] text-[17px] leading-relaxed text-ink-2">One binary, no daemon to babysit. It finds Claude Code, Codex, Cursor, Copilot and <code>opencode</code> session logs on its own, and your editor plugins keep talking to Hackatime if you want them to.</p>
+<p class="max-w-[26em] text-[17px] leading-relaxed text-ink-2">One binary, no daemon to babysit. It reads Claude Code and Copilot session logs today; Codex, Cursor, Aider and Gemini CLI are detected but not parsed yet, and <code>tally doctor</code> says which is which. Your editor plugins keep talking to Hackatime if you want them to.</p>
 </div>
 <div>
 <div class="snippet"><b>macOS, Linux</b><code>curl -fsSL https://raw.githubusercontent.com/sectersion/tally/main/install/install.sh | sh</code></div>
