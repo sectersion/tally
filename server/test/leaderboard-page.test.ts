@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { connect } from "../src/db.ts";
-import { formatHours } from "../src/ledger.ts";
 import { leaderboard } from "../src/leaderboard.ts";
+import { formatHours } from "../src/ledger.ts";
 import { createProject } from "../src/projects.ts";
 import { start } from "./helpers.ts";
 
