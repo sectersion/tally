@@ -18,7 +18,7 @@ describe("landingPage", () => {
     const body = await res.text();
     expect((body.match(/<h1/g) ?? []).length).toBe(1);
     expect((body.match(/href="\/auth\/login"/g) ?? []).length).toBe(1);
-    expect(body).toContain("View source");
+    expect(body).toContain("Read the code");
     expect(body).toContain("github.com/Sectersion/tally");
     expect(body).not.toContain("<script");
     expect(body).not.toContain("csrf");
@@ -42,7 +42,7 @@ describe("landingPage", () => {
     await sql.begin(async (tx) => {
       await tx`alter table ledger_entries disable trigger ledger_entries_no_mutate`;
       await tx`insert into ledger_entries (chain_id, seq, hash, prev_hash, action_id, ts, kind, verified_s, unverified_s, entry)
-        values (${chain.id}, 0, ${hash}, ${hash + '-p'}, ${hash + '-a'}, 1000, 'edit', 300, 0, '{}'::json)`;
+        values (${chain.id}, 0, ${hash}, ${hash + "-p"}, ${hash + "-a"}, 1000, 'edit', 300, 0, '{}'::json)`;
       await tx`alter table ledger_entries enable trigger ledger_entries_no_mutate`;
     });
     const body = await (await landingPage(sql)).text();
@@ -51,7 +51,7 @@ describe("landingPage", () => {
     expect(body).not.toContain("%VERIFIED_MIN%");
     const [c] = await sql`select sum(verified_s) as s from chains`;
     expect(body).toContain(
-      `<b class="block text-[28px] font-normal tracking-[-0.02em]">${Math.floor(Number(c.s) / 60).toLocaleString("en-US")}</b><span class="text-[13px] text-mute">minutes verified so far`,
+      `<span>${Math.floor(Number(c.s) / 60).toLocaleString("en-US")} minutes verified so far</span>`,
     );
     await sql.begin(async (tx) => {
       await tx`alter table ledger_entries disable trigger ledger_entries_no_mutate`;

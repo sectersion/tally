@@ -11,7 +11,8 @@ export type Storage = {
 /** Bundles live in Postgres (bytea, ≤ BUNDLE_MAX_BYTES). ponytail: swap to S3 when bundles outgrow one table. */
 export function pgStorage(sql: SQL): Storage {
   return {
-    put: async (k, b) => void (await sql`insert into bundles (key, bytes) values (${k}, ${b}) on conflict (key) do update set bytes = excluded.bytes`),
+    put: async (k, b) =>
+      void (await sql`insert into bundles (key, bytes) values (${k}, ${b}) on conflict (key) do update set bytes = excluded.bytes`),
     get: async (k) => {
       const [r] = await sql`select bytes from bundles where key = ${k}`;
       return r ? (r.bytes as Uint8Array) : null;
