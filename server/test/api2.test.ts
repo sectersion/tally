@@ -160,4 +160,3 @@ test("leaderboard api: day vs week, private profile handle null, bad range 400",
   expect((await bad.json()).error).toBe("invalid_body");
   expect((await fetch(`${base}/api/v1/leaderboard`)).status).toBe(400);
 });
-
