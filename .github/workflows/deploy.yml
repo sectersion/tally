@@ -4,6 +4,13 @@ on:
     branches: [main]
     paths: ["server/**", "crates/tally-scoring/**", ".github/workflows/deploy.yml"]
   workflow_dispatch:
+
+# One deploy at a time, queued rather than cancelled: two `compose up` runs overlapping on the
+# same host is how a container gets recreated out from under another run's health check.
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -17,8 +24,39 @@ jobs:
           script: |
             set -euo pipefail
             cd ${{ secrets.VPS_DEPLOY_DIR }}
+            echo "::group::pull"
             git pull --ff-only origin main
+            git --no-pager log --oneline -1
+            echo "::endgroup::"
             cd server
+            echo "::group::build"
             docker compose build --pull
-            docker compose up -d --wait
-            docker image prune -f
+            echo "::endgroup::"
+            echo "::group::up"
+            # A timeout turns a stuck start into a loud failure instead of a hanging job.
+            if ! docker compose up -d --wait --wait-timeout 300; then
+              echo "compose up failed; container state and server log follow"
+              docker compose ps || true
+              docker compose logs --tail=150 server || true
+              exit 1
+            fi
+            echo "::endgroup::"
+            echo "::group::health"
+            # The server service has no HEALTHCHECK, so compose calls it "up" the moment the
+            # process starts and a crash-loop would still look green. Ask the server itself.
+            ok=0
+            for i in $(seq 1 30); do
+              if curl -fsS --max-time 5 http://localhost:8080/healthz; then ok=1; break; fi
+              sleep 2
+            done
+            if [ "$ok" != 1 ]; then
+              echo "server never answered /healthz"
+              docker compose ps || true
+              docker compose logs --tail=150 server || true
+              exit 1
+            fi
+            echo
+            echo "::endgroup::"
+            # Housekeeping, not part of the deploy: a prune failure should not paint a live
+            # deployment red.
+            docker image prune -f || true
