@@ -88,7 +88,7 @@ const LANDING = html`<section class="mesh"><div class="mx-auto max-w-[1080px] px
 <p class="max-w-[30em] text-[17px] leading-relaxed text-ink-2">A person still reviews every project before its hours count. The judge only sorts turns so the reviewer reads the weakest claims first.</p>
 </div>
 <figure class="m-0 min-w-0">
-<div class="console" aria-label="Example output of tally verify"><b>$</b> tally verify tally/tally
+<div class="console" aria-hidden="true"><b>$</b> tally verify tally/tally
 <i>ok</i> 61h 24m verified, 214 claims re-derived
    12,407 prompt     +3m  <em>capped 20m</em>
    12,406 fail-pass  +14m <em>test pre-existed</em>
