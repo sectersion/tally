@@ -56,7 +56,7 @@ export function page(
 <form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="${v.csrf}"><button>Log out</button></form>`
     : html`<a href="/auth/login">Sign in</a>`;
   const live = opts.live === undefined ? "" : `<script src="/static/live.js" defer></script>`;
-  const doc = html`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><link rel="stylesheet" href="/static/style.css">${new Safe(live)}<header><a href="/">Tally</a> ${nav}</header><main>${body}</main></html>`;
+  const doc = html`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><link rel="icon" type="image/png" href="/static/favicon.png"><link rel="stylesheet" href="/static/style.css">${new Safe(live)}<header><a href="/">Tally</a> ${nav}</header><main>${body}</main></html>`;
   return new Response(doc.__html, {
     status: opts.status ?? 200,
     headers: {

@@ -11,6 +11,7 @@ import {
   type Safe,
   type Viewer,
 } from "./html.ts";
+import { leaderboard } from "./leaderboard.ts";
 import { bumpChange, commitWindows, projectDaily, projectHours } from "./projects.ts";
 import type { Session } from "./session.ts";
 import { updLabel } from "./upd.ts";
@@ -195,7 +196,7 @@ export async function homePage(sql: SQL, req: Request, s: Session | null): Promi
     : html`<p>No projects yet.</p>`;
   return page(
     "Tally",
-    html`<h1>Your projects</h1>${errorLine(req)}${s.handle ? none : handleForm(s)}${list}
+    html`<p><a href="/dashboard">Dashboard</a></p><h1>Your projects</h1>${errorLine(req)}${s.handle ? none : handleForm(s)}${list}
 <form method="post" action="/projects">${csrfField(s)}<input name="name" required maxlength="141" aria-label="Project name" placeholder="${s.handle ?? "handle"}/name"> <button>Create project</button></form>`,
     { viewer: viewerOf(s) },
   );
@@ -205,9 +206,47 @@ export async function profilePage(sql: SQL, handle: string, s: Session | null) {
   const [u] = await sql`select id, handle, display_name from users
     where lower(handle) = lower(${handle}) and profile_public`;
   if (!u) return notFound();
-  const ps = await sql`select p.id, p.public_name,
+  const nowMs = Date.now();
+  const dMs = (n: number) => nowMs - n * 86_400_000;
+  const [[total], [active], kinds, dayRows, ps] = await Promise.all([
+    sql`select coalesce(sum(c.verified_s), 0)::bigint as v from chains c
+      join projects p on p.id = c.project_id where p.owner_id = ${u.id} and p.public`,
+    sql`select exists(select 1 from ledger_entries e join chains c on c.id = e.chain_id
+      join projects p on p.id = c.project_id where p.owner_id = ${u.id} and p.public
+      and e.ts >= ${dMs(7)}) as yes`,
+    sql`select e.kind, sum(e.verified_s)::bigint as v from ledger_entries e
+      join chains c on c.id = e.chain_id join projects p on p.id = c.project_id
+      where p.owner_id = ${u.id} and p.public and e.ts >= ${dMs(90)}
+      group by e.kind order by v desc`,
+    sql`select distinct to_char(to_timestamp(e.ts / 1000.0) at time zone 'UTC', 'YYYY-MM-DD') as day
+      from ledger_entries e join chains c on c.id = e.chain_id join projects p on p.id = c.project_id
+      where p.owner_id = ${u.id} and p.public and e.verified_s > 0 and e.ts >= ${dMs(365)}
+      order by 1 desc`,
+    sql`select p.id, p.public_name,
       (select max(received_at) from push_receipts r where r.project_id = p.id) as last
-    from projects p where p.owner_id = ${u.id} and p.public order by lower(p.public_name)`;
+    from projects p where p.owner_id = ${u.id} and p.public order by lower(p.public_name)`,
+  ]);
+  const streak = streakOf(dayRows.map((d: { day: string }) => d.day));
+  // ponytail: bucket by kind prefix; new kinds fall into "other" until named here
+  const bucket = (k: string) => {
+    if (k.startsWith("prompt")) return "prompt";
+    if (k.startsWith("user_edit") || k.startsWith("edit")) return "user_edit";
+    if (k.startsWith("test_run") || k.startsWith("test")) return "test_run";
+    if (k.startsWith("commit")) return "commit";
+    return "other";
+  };
+  const mix = new Map<string, number>([
+    ["prompt", 0],
+    ["user_edit", 0],
+    ["test_run", 0],
+    ["commit", 0],
+    ["other", 0],
+  ]);
+  for (const k of kinds as { kind: string; v: unknown }[])
+    mix.set(bucket(k.kind), (mix.get(bucket(k.kind)) ?? 0) + Number(k.v));
+  const mixRows = [...mix].map(
+    ([kind, v]) => html`<tr><td>${kind}</td><td>${formatHours(v)}</td></tr>`,
+  );
   const rows = await Promise.all(
     ps.map(async (p: { id: string; public_name: string; last: Date | null }) => {
       const hrs = await projectHours(sql, p.id);
@@ -217,10 +256,90 @@ export async function profilePage(sql: SQL, handle: string, s: Session | null) {
   const name: string = u.display_name || u.handle;
   return page(
     name,
-    html`<h1>${name}</h1>${
+    html`<h1>${name}</h1>
+<p>Total verified across public projects: <strong>${formatHours(Number(total.v))}</strong></p>
+<p>Active in the last 7 days: <strong>${active.yes ? "yes" : "no"}</strong></p>
+<p>Current streak: <strong>${streak} day${streak === 1 ? "" : "s"}</strong></p>
+<h2>Action mix</h2><p>Verified time per action kind across public projects, last 90 days.</p>
+<table><thead><tr><th>Kind</th><th>Verified</th></tr></thead><tbody>${mixRows}</tbody></table>
+<h2>Public projects</h2>${
       rows.length
         ? html`<table><thead><tr><th>Project</th><th>Verified</th><th>Unverified</th><th>Last witnessed push</th></tr></thead><tbody>${rows}</tbody></table>`
         : html`<p>No public projects.</p>`
+    }`,
+    { viewer: viewerOf(s) },
+  );
+}
+
+/** Consecutive UTC days ending today or yesterday, from day strings sorted newest first. */
+export const streakOf = (days: string[]): number => {
+  if (!days.length) return 0;
+  const n = new Date();
+  const today = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
+  const ms = (d: string) => new Date(`${d}T00:00:00Z`).getTime();
+  const first = days[0];
+  if (first === undefined || ms(first) < today - 86_400_000) return 0;
+  let c = 0;
+  for (
+    let t = ms(first);
+    days[c] !== undefined && ms(days[c] as string) === t;
+    c++, t -= 86_400_000
+  );
+  return c;
+};
+
+/** GET /dashboard for the signed-in user. */
+export async function dashboardPage(sql: SQL, s: Session): Promise<Response> {
+  const uid = s.userId;
+  const ms = (d: number) =>
+    Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate()) -
+    d * 86_400_000;
+  const [[all], [today], [week], days, ps, recent] = await Promise.all([
+    sql`select coalesce(sum(c.verified_s), 0)::bigint as v, coalesce(sum(c.unverified_s), 0)::bigint as u
+      from chains c join projects p on p.id = c.project_id where p.owner_id = ${uid}`,
+    sql`select coalesce(sum(e.verified_s), 0)::bigint as v from ledger_entries e
+      join chains c on c.id = e.chain_id join projects p on p.id = c.project_id
+      where p.owner_id = ${uid} and e.ts >= ${ms(0)}`,
+    sql`select coalesce(sum(e.verified_s), 0)::bigint as v from ledger_entries e
+      join chains c on c.id = e.chain_id join projects p on p.id = c.project_id
+      where p.owner_id = ${uid} and e.ts >= ${ms(6)}`,
+    sql`select distinct to_char(to_timestamp(e.ts / 1000.0) at time zone 'UTC', 'YYYY-MM-DD') as day
+      from ledger_entries e join chains c on c.id = e.chain_id join projects p on p.id = c.project_id
+      where p.owner_id = ${uid} and e.verified_s > 0 and e.ts >= ${ms(365)} order by 1 desc`,
+    sql`select p.id, p.public_name,
+        (select max(received_at) from push_receipts r where r.project_id = p.id) as last
+      from projects p where p.owner_id = ${uid} order by lower(p.public_name)`,
+    sql`select e.ts, e.kind, e.verified_s, p.public_name from ledger_entries e
+      join chains c on c.id = e.chain_id join projects p on p.id = c.project_id
+      where p.owner_id = ${uid} order by e.ts desc, c.id desc limit 20`,
+  ]);
+  const rows = await Promise.all(
+    ps.map(async (p: { id: string; public_name: string; last: Date | null }) => {
+      const hrs = await projectHours(sql, p.id);
+      return html`<tr><td><a href="/p/${p.public_name}">${p.public_name}</a></td><td>${formatHours(hrs.verified_s)}</td><td>${hrs.unverified_s > 0 ? `${formatMinutes(hrs.unverified_s)} (not counted)` : ""}</td><td>${p.last ? utc(p.last) : "none"}</td></tr>`;
+    }),
+  );
+  const streak = streakOf(days.map((d: { day: string }) => d.day));
+  const acts = recent.map(
+    (e: { ts: number; kind: string; verified_s: unknown; public_name: string }) =>
+      html`<tr><td>${utc(Number(e.ts))}</td><td>${e.public_name}</td><td>${e.kind}</td><td>${formatMinutes(Number(e.verified_s))}</td></tr>`,
+  );
+  return page(
+    "Dashboard",
+    html`<h1>Dashboard</h1>
+<p>Today (UTC): <strong>${formatMinutes(Number(today.v))}</strong> verified</p>
+<p>Last 7 days: <strong>${formatHours(Number(week.v))}</strong> verified</p>
+<p>All time: <strong>${formatHours(Number(all.v))}</strong> verified${Number(all.u) > 0 ? `, ${formatMinutes(Number(all.u))} unverified (not counted)` : none}</p>
+<p>Current streak: <strong>${streak} day${streak === 1 ? "" : "s"}</strong></p>
+<h2>Projects</h2>${
+      rows.length
+        ? html`<table><thead><tr><th>Project</th><th>Verified</th><th>Unverified</th><th>Last witnessed push</th></tr></thead><tbody>${rows}</tbody></table>`
+        : html`<p>No projects yet.</p>`
+    }
+<h2>Recent activity</h2>${
+      acts.length
+        ? html`<table><thead><tr><th>UTC time</th><th>Project</th><th>Kind</th><th>Verified</th></tr></thead><tbody>${acts}</tbody></table>`
+        : html`<p>No entries yet.</p>`
     }`,
     { viewer: viewerOf(s) },
   );
@@ -369,6 +488,7 @@ ${
 <h2>Witnessed pushes</h2><p>Each row sums the verified time of ledger entries timestamped after the previous witnessed push and at or before this one. The push times are the server's; the ledger times are claimed by the device. It says nothing about effort. Times marked claimed come from the push and are not checked.</p>${pushes}
 <p>Ledger head last committed ${head?.t ? utc(head.t) : "never"}</p>
 <h2>Badge</h2><pre>${`![tracked with Tally](${cfg.publicBaseUrl}/badge/${p.public_name}.svg)`}</pre>
+<p><a href="${`/p/${p.public_name}/export`}">Download ledger JSON</a></p>
 <p><a href="/docs">Read the docs</a></p>`;
 }
 
@@ -380,6 +500,13 @@ export function docsPage(): Response {
 <h2>Getting started</h2><p>Tally tracks the time you spend building with AI and proves it.</p>
 <ol><li>Sign in with Hack Club and create a project.</li><li>Run <code>tally</code> in your terminal and follow the device-link prompt.</li><li>Link a GitHub repo on the project settings page so pushes are witnessed.</li></ol>
 <p>Your project page shows your hours publicly; nothing else about you does.</p>
+<h2>Set up your harness</h2><p>Run <code>tally setup</code>: it detects what is installed and installs the matching Tally integration.</p>
+<h3>Claude Code</h3><p><code>tally setup</code> adds the <code>sectersion/tally</code> marketplace and installs the <code>tally@tally</code> plugin, which logs your prompts, approvals and edits. You can also run the same two <code>claude plugin</code> commands yourself.</p>
+<h3>Codex, Aider, Gemini CLI</h3><p>No adapter yet — the daemon knows their log locations and reports them as <code>unsupported</code>. <code>tally doctor</code> shows the per-harness status.</p>
+<h3>Cursor, Windsurf, VSCodium, Trae, Antigravity</h3><p>The same Tally extension as VS Code: <code>tally setup</code> installs it through the editor's own CLI. Activity is read from their VS Code-compatible session logs.</p>
+<h3>VS Code</h3><p><code>tally setup</code> installs the <code>sectersion.tally</code> extension through the <code>code</code> CLI.</p>
+<h3>JetBrains and other WakaTime-compatible editors</h3><p>Run <code>tally setup --include-wakatime</code> and keep the stock WakaTime plugin — it is pointed at the local daemon via <code>~/.wakatime.cfg</code>. Any editor's WakaTime plugin works the same way: <code>tally heartbeat-config</code> prints the <code>api_url</code>, <code>api_key</code> and <code>heartbeat_rate_limit_seconds = 0</code> lines to put under <code>[settings]</code>.</p>
+<h3>GitHub Copilot</h3><p>An adapter reads Copilot's session state (Copilot CLI home). Copilot cannot emit every signal Tally scores, so its claims are capped accordingly.</p>
 <h2>How verified time is computed</h2><p>The daemon watches your AI sessions and logs <em>decisions</em> — a prompt, an approval, an edit that survives, a test run. Each decision claims the minutes you were present, capped by substance: watching the agent generate earns nothing, a real fail→pass loop earns more.</p>
 <p>Every entry is sealed into a hash chain. The server re-derives the totals with the same public ruleset before it counts them, so the numbers on this page are reproducible by anyone.</p>
 <h2>What is recorded</h2><p>Project names, action types, timestamps, seconds claimed, hashes. That is the whole list. No keystrokes, no screenshots, no window titles, no URLs. Session text leaves your machine only when you run <code>tally submit</code>, goes to the judge, and is deleted after review.</p>
@@ -422,6 +549,33 @@ export async function projectFragment(
       "cache-control": "no-store",
     },
   });
+}
+
+/** GET /leaderboard: top 25 public projects by verified time in the UTC day or ISO week. */
+export async function leaderboardPage(sql: SQL, req: Request, s: Session | null) {
+  const range = new URL(req.url).searchParams.get("range") === "week" ? "week" : "day";
+  const rows = await leaderboard(sql, range);
+  const table = rows.length
+    ? html`<table><thead><tr><th>Rank</th><th>Project</th><th>Owner</th><th>Verified</th></tr></thead><tbody>${rows.map(
+        (r, i) =>
+          html`<tr><td>${i + 1}</td><td><a href="/p/${r.public_name}">${r.public_name}</a></td><td>${
+            r.profile_public && r.handle ? html`<a href="/u/${r.handle}">${r.handle}</a>` : none
+          }</td><td>${formatHours(r.verified_s)}</td></tr>`,
+      )}</tbody></table>`
+    : html`<p>No verified time yet in this period.</p>`;
+  const toggle =
+    range === "day"
+      ? html`<p><a href="/leaderboard?range=week">This week instead</a></p>`
+      : html`<p><a href="/leaderboard">Today instead</a></p>`;
+  return page(
+    "Leaderboard",
+    html`<h1>Leaderboard</h1>
+<p>Only verified time counts. Unverified time is never added in.</p>
+${toggle}
+<h2>${range === "day" ? "Today (UTC)" : "This week (ISO)"}</h2>
+${table}`,
+    { viewer: viewerOf(s) },
+  );
 }
 
 const DELETE_PHRASE = "delete my account";

@@ -21,7 +21,7 @@ if (applied.length) log("info", "migrated", { applied });
 // S3 creds present → real bucket (SSE required); absent → bundles live in Postgres.
 let bucket: Storage;
 if (process.env.S3_ACCESS_KEY_ID) {
-  const s3 = s3Storage(cfg);
+  const s3 = s3Storage(cfg); // keep the concrete type: requireSse needs client.presign
   await requireSse(s3); // refuses to start on a bucket without server-side encryption
   bucket = s3;
 } else {

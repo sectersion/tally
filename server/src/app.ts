@@ -1,4 +1,5 @@
 import type { BunRequest, Server, SQL } from "bun";
+import { leaderboardApi, userProjects, userStats } from "./api2.ts";
 import { hashToken, newToken, requireToken } from "./auth.ts";
 import { badgeResponse, rateLimited } from "./badge.ts";
 import { type Config, MAX_BATCH, MAX_BODY_BYTES } from "./config";
@@ -10,6 +11,7 @@ import {
   pollDeviceToken,
 } from "./device.ts";
 import { HttpError, json, parse, readCapped, readJson } from "./errors.ts";
+import { exportLedger } from "./export.ts";
 import {
   accessibleRepos,
   dispatch,
@@ -33,10 +35,12 @@ import {
 import { createLive, type Live } from "./live.ts";
 import { log } from "./log.ts";
 import {
+  dashboardPage,
   deleteAccount,
   docsPage,
   homePage,
   landingPage,
+  leaderboardPage,
   profilePage,
   projectFragment,
   projectPage,
@@ -117,6 +121,7 @@ const STATIC = new Set([
   "review.js",
   "landing.css",
   "fonts/inter-var.woff2",
+  "favicon.png",
 ]);
 
 /** Same-site paths only. Printable ASCII: browsers strip tabs/newlines from URLs, so "/\t/evil" would become "//evil". */
@@ -433,6 +438,12 @@ export function createServer(deps: Deps) {
           return homePage(sql, req, s);
         }),
       },
+      "/leaderboard": {
+        GET: handle("/leaderboard", async (req, server) => {
+          limitPage(req, server);
+          return leaderboardPage(sql, req, await getSession(sql, req));
+        }),
+      },
       "/u/:handle": {
         GET: handle("/u/:handle", async (req, server) => {
           limitPage(req, server);
@@ -452,6 +463,15 @@ export function createServer(deps: Deps) {
           return projectPage(sql, cfg, owner, name, await getSession(sql, req), fetchFn);
         }),
       },
+      "/p/:owner/:name/export": {
+        GET: handle("/p/:owner/:name/export", async (req, server) => {
+          limitPage(req, server);
+          const { owner, name } = req.params;
+          const p = await visibleProject(sql, owner, name, await getSession(sql, req));
+          if (!p) return notFound();
+          return exportLedger(sql, p.id, p.public_name);
+        }),
+      },
       "/p/:owner/:name/fragment": {
         GET: handle("/p/:owner/:name/fragment", async (req, server) => {
           limitPage(req, server);
@@ -466,6 +486,14 @@ export function createServer(deps: Deps) {
           const p = await visibleProject(sql, owner, name, await getSession(sql, req));
           if (!p) return notFound();
           return live.stream(req, server, p.id, ip(req, server), p.public);
+        }),
+      },
+      "/dashboard": {
+        GET: handle("/dashboard", async (req, server) => {
+          limitPage(req, server);
+          const s = await getSession(sql, req);
+          if (!s) return redirect(`/auth/login?return_to=%2Fdashboard`);
+          return dashboardPage(sql, s);
         }),
       },
       "/settings": {
@@ -875,6 +903,24 @@ export function createServer(deps: Deps) {
             },
             { "cache-control": "public, max-age=60" },
           );
+        }),
+      },
+      "/api/v1/users/:handle/stats": {
+        GET: handle("/api/v1/users/:handle/stats", async (req, server) => {
+          limit(`ip:${ip(req, server)}`); // read API: not in the table, plan 06's per-ip rate
+          return userStats(sql, req.params.handle);
+        }),
+      },
+      "/api/v1/users/:handle/projects": {
+        GET: handle("/api/v1/users/:handle/projects", async (req, server) => {
+          limit(`ip:${ip(req, server)}`);
+          return userProjects(sql, req.params.handle);
+        }),
+      },
+      "/api/v1/leaderboard": {
+        GET: handle("/api/v1/leaderboard", async (req, server) => {
+          limit(`ip:${ip(req, server)}`);
+          return leaderboardApi(sql, new URL(req.url).searchParams.get("range"));
         }),
       },
       "/v1/projects/:id/badge.json": {
