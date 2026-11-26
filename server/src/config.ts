@@ -89,7 +89,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const secretAccessKey = env.S3_SECRET_ACCESS_KEY;
   // Optional: absent creds mean bundles are stored in Postgres (pgStorage).
   if (!accessKeyId !== !secretAccessKey)
-    throw new Error("S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must be set together (or both omitted)");
+    throw new Error(
+      "S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must be set together (or both omitted)",
+    );
   return {
     s3: {
       accessKeyId: accessKeyId ?? "",
