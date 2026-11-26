@@ -11,7 +11,7 @@ const sql = connect(
 const srv = start(sql);
 const base = srv.url;
 afterAll(() => {
-  srv.stop(true);
+  srv.stop();
   void sql.close();
 });
 
