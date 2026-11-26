@@ -37,7 +37,7 @@ jobs:
           ./target/release/tally-evidence resources --tally ./target/release/tally --machine "ci" --duration-min 1 --load accelerated:600 --no-presence --out "$RUNNER_TEMP/r.md"
           grep -q "RSS p95" "$RUNNER_TEMP/r.md"
   e2e:
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    # e2e runs on every PR too — server-startup breakage must die before merge (BUNDLE_KEY incident).
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -51,6 +51,9 @@ jobs:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
       PORT: "8080"
       # Placeholders so loadConfig passes; the e2e never signs in or calls GitHub.
+      # BUNDLE_KEY stayed required after pgStorage made the S3 vars optional (config.ts).
+      BUNDLE_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      BUNDLE_BUCKET: ci-bucket
       PUBLIC_BASE_URL: http://localhost:8080
       HCA_CLIENT_ID: ci-placeholder
       HCA_CLIENT_SECRET: ci-placeholder
